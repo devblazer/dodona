@@ -1,0 +1,41 @@
+﻿{
+    "injected_at":  "2026-08-17T20:47:16.8571271+02:00",
+    "a_txt":  "draft",
+    "b_txt":  "draft",
+    "c_txt":  "apple",
+    "d_txt":  "injected",
+    "hook_fired_count":  5,
+    "hook_pickup":  {
+                        "value":  "2026-08-17T20:47:17.1913270+02:00 fired tool=Write cursor=0 new=3",
+                        "PSPath":  "C:\\Users\\devbl\\Documents\\personel\\Dodona\\spikes\\spike3\\workspace\\hook-log.txt",
+                        "PSParentPath":  "C:\\Users\\devbl\\Documents\\personel\\Dodona\\spikes\\spike3\\workspace",
+                        "PSChildName":  "hook-log.txt",
+                        "PSDrive":  {
+                                        "CurrentLocation":  "Users\\devbl\\Documents\\personel\\Dodona",
+                                        "Name":  "C",
+                                        "Provider":  "Microsoft.PowerShell.Core\\FileSystem",
+                                        "Root":  "C:\\",
+                                        "Description":  "OS",
+                                        "MaximumSize":  null,
+                                        "Credential":  "System.Management.Automation.PSCredential",
+                                        "DisplayRoot":  null
+                                    },
+                        "PSProvider":  {
+                                           "ImplementingType":  "Microsoft.PowerShell.Commands.FileSystemProvider",
+                                           "HelpFile":  "System.Management.Automation.dll-Help.xml",
+                                           "Name":  "FileSystem",
+                                           "PSSnapIn":  "Microsoft.PowerShell.Core",
+                                           "ModuleName":  "Microsoft.PowerShell.Core",
+                                           "Module":  null,
+                                           "Description":  "",
+                                           "Capabilities":  52,
+                                           "Home":  "C:\\Users\\devbl",
+                                           "Drives":  "C"
+                                       },
+                        "ReadCount":  1
+                    },
+    "H1_hook_fires_headless":  "PASS",
+    "H2_instruction_acted_on_same_turn":  "PASS",
+    "H3_contradiction_integrated":  "PASS",
+    "result_text":  "a.txt contains: draft\nb.txt contains: draft\nc.txt contains: apple\nd.txt contains: injected"
+}
