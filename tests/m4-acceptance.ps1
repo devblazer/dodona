@@ -196,7 +196,14 @@ finally {
         Where-Object { $_.CommandLine -like "*$root*" } |
         ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch { } }
     if ($d1 -and -not $d1.HasExited) { try { Stop-Process -Id $d1.Id -Force } catch { } }
-    foreach ($n in 'DodonaShim', 'DodonaFakeAgent') { try { Get-Process $n -ErrorAction Stop | Stop-Process -Force } catch { } }
+    # Scoped cleanup: only THIS test's processes, resolved from its own shim-info
+    # files. Killing by process NAME once murdered the operator's live session's shim
+    # and UI mid-dogfood (17: tests collide with nothing -- including the instance the
+    # operator is using right now).
+    Get-ChildItem "$root\.dodona\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+        $si = Get-Content $_.FullName | ConvertFrom-Json
+        foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
+    }
     Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
     Remove-Item $binRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_BIN_ROOT -ErrorAction SilentlyContinue

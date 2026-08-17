@@ -119,7 +119,16 @@ int Publish()
             if (!File.Exists(proj)) return Fail($"not a Dodona source tree: {proj} not found (use --project <dir> or --exe <path>)");
             Console.WriteLine($"building {Path.GetFileNameWithoutExtension(proj)} → {outDir}");
             var psi = new System.Diagnostics.ProcessStartInfo("dotnet") { UseShellExecute = false };
-            foreach (var a in new[] { "publish", proj, "-c", "Release", "-o", outDir, "--nologo", "-v", "q" })
+            // Build into publish-private obj/bin, NOT the dev tree's: a daemon running
+            // from bin\Release locks its image (Windows), and publish kept dying on that
+            // lock whenever a test daemon lingered. Publish must never contend with
+            // whatever is running — that is its whole reason to exist.
+            // Only bin is redirected: obj must stay put (moving BaseIntermediateOutputPath
+            // after a restore double-generates AssemblyInfo → CS0579), and the lock that
+            // kept killing publish was on bin's apphost, never on obj.
+            var scratchBin = Path.Combine(Path.GetTempPath(), "dodona-publish", stamp, Path.GetFileNameWithoutExtension(proj));
+            foreach (var a in new[] { "publish", proj, "-c", "Release", "-o", outDir, "--nologo", "-v", "q",
+                                      $"-p:BaseOutputPath={scratchBin}\\" })
                 psi.ArgumentList.Add(a);
             using var p = System.Diagnostics.Process.Start(psi)!;
             p.WaitForExit();

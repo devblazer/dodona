@@ -147,7 +147,14 @@ for r in db.execute('''SELECT detail FROM events WHERE kind='ticket_created' ORD
 }
 finally {
     if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
-    foreach ($n in 'DodonaShim', 'DodonaFakeAgent') { try { Get-Process $n -ErrorAction Stop | Stop-Process -Force } catch { } }
+    # Scoped cleanup: only THIS test's processes, resolved from its own shim-info
+    # files. Killing by process NAME once murdered the operator's live session's shim
+    # and UI mid-dogfood (17: tests collide with nothing -- including the instance the
+    # operator is using right now).
+    Get-ChildItem "$root\.dodona\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+        $si = Get-Content $_.FullName | ConvertFrom-Json
+        foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
+    }
     Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
 }

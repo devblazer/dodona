@@ -167,7 +167,14 @@ print(db.execute('SELECT undone FROM routing_decisions ORDER BY id DESC LIMIT 1'
 finally {
     if ($uiProc -and -not $uiProc.HasExited) { try { Stop-Process -Id $uiProc.Id -Force } catch { } }
     if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
-    foreach ($n in 'DodonaShim', 'DodonaFakeAgent', 'DodonaUi') { try { Get-Process $n -ErrorAction Stop | Stop-Process -Force } catch { } }
+    # Scoped cleanup: only THIS test's processes, resolved from its own shim-info
+    # files. Killing by process NAME once murdered the operator's live session's shim
+    # and UI mid-dogfood (17: tests collide with nothing -- including the instance the
+    # operator is using right now).
+    Get-ChildItem "$root\.dodona\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+        $si = Get-Content $_.FullName | ConvertFrom-Json
+        foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
+    }
     Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
 }
 
