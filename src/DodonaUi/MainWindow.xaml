@@ -80,7 +80,17 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <TextBlock Grid.Row="0" Text="DISPATCHER" FontWeight="Bold" FontSize="14" Margin="4,0,0,6" Foreground="#FF9AA3AE"/>
+                <!-- which project this grid is showing; click (or Ctrl+P) to open another -->
+                <DockPanel Grid.Row="0" Margin="4,0,0,6">
+                    <TextBlock DockPanel.Dock="Left" Text="DISPATCHER" FontWeight="Bold" FontSize="14" Foreground="#FF9AA3AE"/>
+                    <Button DockPanel.Dock="Right" Click="Project_Click" HorizontalAlignment="Right"
+                            Background="Transparent" BorderThickness="0" Padding="4,0" Cursor="Hand"
+                            ToolTip="{Binding ProjectPath}">
+                        <TextBlock FontSize="11" Foreground="#FF6FA8DC">
+                            <Run Text="{Binding ProjectName, Mode=OneWay}"/><Run Text=" ▾"/>
+                        </TextBlock>
+                    </Button>
+                </DockPanel>
 
                 <Border Grid.Row="1" Background="#FF1F2227" CornerRadius="6" BorderBrush="#FF3A3E44" BorderThickness="1">
                     <ScrollViewer VerticalScrollBarVisibility="Auto">

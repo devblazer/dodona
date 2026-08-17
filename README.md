@@ -4,6 +4,39 @@ A multi-agent orchestration platform: issue tasks by voice at conversational spe
 several Claude Code agents work them in parallel on one project, and never have two
 agents build competing versions of the same thing.
 
+## Running it
+
+Dodona is an application you launch, not a command you type at a project. Build the
+one-folder install, then run `DodonaUi.exe` from it — it asks which project to open,
+starts that project's daemon itself, and needs no environment variables:
+
+```powershell
+dotnet build Dodona.sln -c Release
+# publish all three executables into one folder (%LOCALAPPDATA%\Dodona\bin\<stamp>)
+.\src\Dodona\bin\Release\net8.0\dodona.exe publish --project . --root .
+# then launch the app from that folder
+& "$env:LOCALAPPDATA\Dodona\bin\<stamp>\DodonaUi.exe"
+```
+
+The picker lists recent projects with live status (`running` / `idle` / `new`), and
+**Browse…** adds one — any git repository will do; tickets are branches and lanes are
+worktrees, so git is required. Opening a second project opens a second window with its
+own daemon: instances share nothing (§14), so that *is* multi-project support. `Ctrl+P`
+from a grid opens another.
+
+Direct and forensic entry points, for shortcuts and for debugging sessions:
+
+```powershell
+DodonaUi.exe --root C:\src\myproject          # skip the picker (starts the daemon if needed)
+DodonaUi.exe --root <copied-store> --attach   # look only: never summon a daemon
+DodonaUi.exe --pose full                      # a seeded visual state, no store at all
+DodonaUi.exe --shot out.png                   # self-render this window and exit
+```
+
+Everything the UI does is also a CLI command against the same daemon — see
+[DEBUGGING.md](DEBUGGING.md) for the full verb list, the store schema, and how to read a
+store with nothing running.
+
 ## The documents
 
 The design doc deliberately lives **outside** this repo (it governs a system that

@@ -77,7 +77,7 @@ sealed class Daemon
     /// in which case this process exits and the predecessor stays up, unharmed.</summary>
     static async Task<int> HandshakeAsSuccessorAsync(string instanceId)
     {
-        var pipe = new NamedPipeClientStream(".", $"dodona-{instanceId}-handoff", PipeDirection.InOut, PipeOptions.Asynchronous);
+        var pipe = new NamedPipeClientStream(".", Instance.HandoffPipe(instanceId), PipeDirection.InOut, PipeOptions.Asynchronous);
         try { await pipe.ConnectAsync(20000); }
         catch { return -1; }
         try
@@ -620,7 +620,7 @@ sealed class Daemon
     /// down.</summary>
     async Task<(bool Ok, string Msg)> HandoffAsync(NewBuild nb, long swapId, List<string> blockers)
     {
-        var handoffPipe = $"dodona-{_instanceId}-handoff";
+        var handoffPipe = Instance.HandoffPipe(_instanceId);
         var server = new NamedPipeServerStream(handoffPipe, PipeDirection.InOut, 1,
             PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
         Process? p = null;
@@ -739,7 +739,7 @@ sealed class Daemon
     {
         var id = _store.LaneCreate(title);
         _store.LaneRole(id, role);
-        var pipe = $"dodona-{_instanceId}-lane{id}";
+        var pipe = Instance.LanePipe(_instanceId, id);
         _store.LanePipe(id, pipe);
 
         var shimExe = Environment.GetEnvironmentVariable("DODONA_SHIM")

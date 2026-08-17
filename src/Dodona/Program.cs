@@ -1,6 +1,4 @@
 using System.IO.Pipes;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using Dodona;
 
@@ -11,13 +9,9 @@ using Dodona;
 var (cmd, root, opts, pos) = ParseArgs(args);
 if (cmd is null) { Help(); return 1; }
 
-string instanceId;
-{
-    var canonical = Path.GetFullPath(root).TrimEnd('\\', '/').ToLowerInvariant();
-    instanceId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))[..8].ToLowerInvariant();
-}
-string ctlPipe = $"dodona-{instanceId}-ctl";
-string uiPipe = $"dodona-{instanceId}-ui";
+string instanceId = Instance.Id(root);
+string ctlPipe = Instance.CtlPipe(instanceId);
+string uiPipe = Instance.UiPipe(instanceId);
 
 return cmd switch
 {
@@ -93,11 +87,15 @@ int Publish()
     else
     {
         outDir = Path.Combine(Ver.BinRoot, stamp);
-        // The shim rides along: after a swap, new lanes are spawned from the new
-        // binary's directory, so the shim must be there too. Live shims are untouched —
-        // they are already running, which is exactly why hot-swap works.
+        // All three executables land in ONE directory, which is what makes the published
+        // folder an application rather than a build output: the UI finds dodona.exe
+        // beside itself, and the daemon finds DodonaShim.exe beside itself, with no
+        // environment variables anywhere. The shim must also be here because after a swap
+        // new lanes are spawned from the new binary's directory (live shims are untouched
+        // — they are already running, which is exactly why hot-swap works).
         foreach (var proj in new[] { Path.Combine(project, "src", "Dodona", "Dodona.csproj"),
-                                     Path.Combine(project, "src", "DodonaShim", "DodonaShim.csproj") })
+                                     Path.Combine(project, "src", "DodonaShim", "DodonaShim.csproj"),
+                                     Path.Combine(project, "src", "DodonaUi", "DodonaUi.csproj") })
         {
             if (!File.Exists(proj)) return Fail($"not a Dodona source tree: {proj} not found (use --project <dir> or --exe <path>)");
             Console.WriteLine($"building {Path.GetFileNameWithoutExtension(proj)} → {outDir}");
@@ -113,7 +111,7 @@ int Publish()
     var newExe = Path.Combine(outDir, "dodona.exe");
     if (!File.Exists(newExe)) return Fail($"published, but {newExe} is missing");
 
-    var targets = opts.ContainsKey("all") ? LiveInstances() : new List<string> { ctlPipe };
+    var targets = opts.ContainsKey("all") ? Instance.LiveCtlPipes() : new List<string> { ctlPipe };
     if (targets.Count == 0) { Console.WriteLine($"published {newExe}; no daemon running to swap"); return 0; }
 
     int worst = 0;
@@ -124,22 +122,6 @@ int Publish()
         worst = Math.Max(worst, code);
     }
     return worst;
-}
-
-/// <summary>Every running instance, found the way Windows lets you: the pipe namespace
-/// is a directory. No shared registry, no lock file — nothing global (§14).</summary>
-static List<string> LiveInstances()
-{
-    try
-    {
-        return Directory.GetFiles(@"\\.\pipe\")
-            .Select(Path.GetFileName)
-            .Where(n => n is not null && n.StartsWith("dodona-") && n.EndsWith("-ctl"))
-            .Select(n => n!)
-            .Distinct()
-            .ToList();
-    }
-    catch { return new List<string>(); }
 }
 
 // The ui verbs (§17) talk to the UI process, not the daemon — the UI testifies about

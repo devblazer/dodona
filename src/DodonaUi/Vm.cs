@@ -97,6 +97,12 @@ public sealed class MainVm : INotifyPropertyChanged
     string _status = "";
     public string Status { get => _status; set { _status = value; Notify(nameof(Status)); } }
 
+    string _projectName = "";
+    public string ProjectName { get => _projectName; set { _projectName = value; Notify(nameof(ProjectName)); } }
+
+    string _projectPath = "";
+    public string ProjectPath { get => _projectPath; set { _projectPath = value; Notify(nameof(ProjectPath)); } }
+
     string _trayText = "";
     public string TrayText { get => _trayText; set { _trayText = value; Notify(nameof(TrayText)); } }
 

@@ -17,4 +17,12 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Shared SOURCE, not an assembly reference: instance identity must be derived
+         identically by the daemon, the CLI and the UI (§14 — two spellings of one root
+         would mean two merge tokens), while the UI stays runtime-decoupled and
+         disposable (§13). -->
+    <Compile Include="..\Dodona\Instance.cs" Link="Instance.cs" />
+  </ItemGroup>
+
 </Project>

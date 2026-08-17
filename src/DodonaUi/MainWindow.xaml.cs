@@ -18,13 +18,19 @@ public partial class MainWindow : Window
     readonly Poller _poller;
     readonly CancellationTokenSource _cts = new();
 
+    /// <summary>Which project this window is showing — the picker uses it to raise an
+    /// already-open project instead of opening it twice.</summary>
+    public string InstanceId => _instanceId;
+
     public MainWindow(string root, string instanceId)
     {
         _root = root;
         _instanceId = instanceId;
         InitializeComponent();
         DataContext = _vm;
-        Title = $"Dodona — {root}";
+        _vm.ProjectName = Path.GetFileName(root.TrimEnd('\\', '/')) is { Length: > 0 } n ? n : root;
+        _vm.ProjectPath = root;
+        Title = $"Dodona — {_vm.ProjectName}";
 
         _reader = new StoreReader(root);
         _poller = new Poller(_reader);
@@ -111,28 +117,14 @@ public partial class MainWindow : Window
         return JsonSerializer.Serialize(dump);
     }
 
-    /// <summary>Self-rendering screenshot (§17): RenderTargetBitmap of our own visual
-    /// tree — no window-finding, no occlusion, no DPI drift. 96dpi means pixel == DIP,
-    /// so the full window is exactly 1600x900 everywhere.</summary>
+    /// <summary>Screenshot the whole grid, or one pane (§17). Rendering is in Shot, shared
+    /// with the picker's --shot.</summary>
     string Screenshot(string outPath, string? paneTitle)
     {
-        FrameworkElement target = Root;
-        if (paneTitle is not null)
-        {
-            target = FindPaneElement(paneTitle)
-                ?? throw new InvalidOperationException($"no pane titled '{paneTitle}' in the grid");
-        }
-        target.UpdateLayout();
-        int w = (int)Math.Ceiling(target.ActualWidth), h = (int)Math.Ceiling(target.ActualHeight);
-        if (w == 0 || h == 0) return "error: target has no size (window not rendered yet?)";
-        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
-        rtb.Render(target);
-        var enc = new PngBitmapEncoder();
-        enc.Frames.Add(BitmapFrame.Create(rtb));
-        Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
-        using var fs = File.Create(outPath);
-        enc.Save(fs);
-        return $"screenshot {w}x{h} -> {outPath}";
+        FrameworkElement target = paneTitle is null
+            ? Root
+            : FindPaneElement(paneTitle) ?? throw new InvalidOperationException($"no pane titled '{paneTitle}' in the grid");
+        return Shot.Save(target, outPath);
     }
 
     FrameworkElement? FindPaneElement(string title)
@@ -224,7 +216,20 @@ public partial class MainWindow : Window
     void Window_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Escape && _vm.OverlayPane is not null) { SetOverlay(null); e.Handled = true; }
+        if (e.Key == Key.P && Keyboard.Modifiers == ModifierKeys.Control) { OpenPicker(); e.Handled = true; }
     }
+
+    /// <summary>Open another project (Ctrl+P). It gets its own window, its own daemon and
+    /// its own everything — instances share nothing (§14), so several can be open at
+    /// once and this window keeps running untouched.</summary>
+    void OpenPicker()
+    {
+        var existing = Application.Current.Windows.OfType<PickerWindow>().FirstOrDefault();
+        if (existing is not null) { existing.Activate(); return; }
+        new PickerWindow { Owner = null }.Show();
+    }
+
+    void Project_Click(object sender, RoutedEventArgs e) => OpenPicker();
 
     void Window_Drag(object sender, MouseButtonEventArgs e)
     {
