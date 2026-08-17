@@ -7,6 +7,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
 $fake = "$repo\src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.exe"
 $env:DODONA_SHIM = "$repo\src\DodonaShim\bin\Release\net8.0\DodonaShim.exe"
+$env:DODONA_NO_AUTOSTART = "1"   # this test owns daemon lifetime; start-on-demand (M4) must not join in
 $out = Join-Path $PSScriptRoot 'm2-output'
 New-Item -ItemType Directory -Force $out | Out-Null
 Remove-Item "$out\*" -Force -Recurse -ErrorAction SilentlyContinue

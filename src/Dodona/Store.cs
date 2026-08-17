@@ -126,6 +126,27 @@ sealed class Store : IDisposable
                 PRAGMA user_version = 4;
                 """);
         }
+        if (v < 5)
+        {
+            // M4: a swap that cannot be seamless is a decision with three answers, and
+            // "when it lands" must survive a daemon restart — so it is a row (§14).
+            Exec("""
+                CREATE TABLE swaps(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    requested_ts TEXT NOT NULL,
+                    exe TEXT NOT NULL,
+                    build TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    shim_protocol INTEGER NOT NULL,
+                    blocker TEXT,                       -- NULL once nothing is in the way
+                    mode TEXT NOT NULL,                 -- ask | now | when-it-lands | hold
+                    state TEXT NOT NULL,                -- pending | armed | held | swapped | failed | superseded
+                    decided_ts TEXT,
+                    note TEXT
+                );
+                PRAGMA user_version = 5;
+                """);
+        }
     }
 
     static string Now() => DateTime.UtcNow.ToString("o");
@@ -627,6 +648,83 @@ sealed class Store : IDisposable
             tx.Commit();
             reason = "";
             return true;
+        }
+    }
+
+    // ------------------------------------------------------------- swaps (§13/§14)
+
+    public record SwapRow(long Id, string Exe, string Build, int Schema, int ShimProtocol,
+                          string? Blocker, string Mode, string State);
+
+    public long SwapCreate(string exe, string build, int schema, int shimProto, string? blocker, string mode, string state)
+    {
+        lock (_lock)
+        {
+            using var tx = _db.BeginTransaction();
+            // One live proposal at a time: a newer build supersedes an older parked one.
+            TxExec(tx, "UPDATE swaps SET state = 'superseded' WHERE state IN ('pending','armed','held');");
+            using var c = _db.CreateCommand();
+            c.Transaction = tx;
+            c.CommandText = """
+                INSERT INTO swaps(requested_ts, exe, build, schema_version, shim_protocol, blocker, mode, state)
+                VALUES ($ts, $e, $b, $sc, $sp, $bl, $m, $st); SELECT last_insert_rowid();
+                """;
+            c.Parameters.AddWithValue("$ts", Now());
+            c.Parameters.AddWithValue("$e", exe);
+            c.Parameters.AddWithValue("$b", build);
+            c.Parameters.AddWithValue("$sc", schema);
+            c.Parameters.AddWithValue("$sp", shimProto);
+            c.Parameters.AddWithValue("$bl", (object?)blocker ?? DBNull.Value);
+            c.Parameters.AddWithValue("$m", mode);
+            c.Parameters.AddWithValue("$st", state);
+            var id = (long)c.ExecuteScalar()!;
+            tx.Commit();
+            return id;
+        }
+    }
+
+    public SwapRow? SwapLive()
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = """
+                SELECT id, exe, build, schema_version, shim_protocol, blocker, mode, state
+                FROM swaps WHERE state IN ('pending','armed','held') ORDER BY id DESC LIMIT 1;
+                """;
+            using var r = c.ExecuteReader();
+            if (!r.Read()) return null;
+            return new SwapRow(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetInt32(3), r.GetInt32(4),
+                               r.IsDBNull(5) ? null : r.GetString(5), r.GetString(6), r.GetString(7));
+        }
+    }
+
+    public void SwapSet(long id, string mode, string state, string? note = null)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "UPDATE swaps SET mode = $m, state = $st, decided_ts = $ts, note = COALESCE($n, note) WHERE id = $id;";
+            c.Parameters.AddWithValue("$m", mode);
+            c.Parameters.AddWithValue("$st", state);
+            c.Parameters.AddWithValue("$ts", Now());
+            c.Parameters.AddWithValue("$n", (object?)note ?? DBNull.Value);
+            c.Parameters.AddWithValue("$id", id);
+            c.ExecuteNonQuery();
+        }
+    }
+
+    public List<string> SwapsAll()
+    {
+        lock (_lock)
+        {
+            var list = new List<string>();
+            using var c = _db.CreateCommand();
+            c.CommandText = "SELECT id, requested_ts, build, state, mode, COALESCE(blocker,'-') FROM swaps ORDER BY id;";
+            using var r = c.ExecuteReader();
+            while (r.Read())
+                list.Add($"swap {r.GetInt64(0)}  {r.GetString(1)}  build={r.GetString(2)}  state={r.GetString(3)}  mode={r.GetString(4)}  blocker={r.GetString(5)}");
+            return list;
         }
     }
 

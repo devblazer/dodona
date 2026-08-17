@@ -83,7 +83,10 @@ while (!shutdown.IsCancellationRequested)
 
     try
     {
-        writer.WriteLine($"!hello shim={Environment.ProcessId} child={child.Id} " +
+        // proto= is the daemon's compatibility check before a hot swap (§13): a successor
+        // that speaks a different protocol would orphan every live shim, so it must be
+        // able to see what these ones speak. Absent means pre-versioning, i.e. proto 1.
+        writer.WriteLine($"!hello proto=1 shim={Environment.ProcessId} child={child.Id} " +
                          $"delivered={delivered} buffered={buffer.Count}");
     }
     catch { server.Dispose(); continue; }

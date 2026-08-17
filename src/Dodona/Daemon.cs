@@ -36,32 +36,93 @@ sealed class Daemon
         _config = Config.Load(root);
     }
 
-    public static async Task<int> RunAsync(string root, string instanceId, string ctlPipe)
+    public static async Task<int> RunAsync(string root, string instanceId, string ctlPipe, bool successor)
     {
+        // A successor waits its turn BEFORE touching anything: it handshakes with the
+        // predecessor, then waits for it to actually exit. Only then is it safe to take
+        // the mutex, open the store (a migration must never race a live writer) and
+        // adopt the shim pipes (a shim serves one client at a time).
+        int predecessor = 0;
+        if (successor)
+        {
+            predecessor = await HandshakeAsSuccessorAsync(instanceId);
+            if (predecessor < 0) { Console.Error.WriteLine("successor handshake failed; predecessor keeps running"); return 4; }
+        }
+
         // One daemon per canonical root, enforced at the OS (design §14).
-        using var mutex = new Mutex(initiallyOwned: true, $"Global\\dodona-{instanceId}", out bool createdNew);
-        if (!createdNew)
+        Mutex? mutex = null;
+        for (int i = 0; i < (successor ? 80 : 1); i++)
+        {
+            mutex = new Mutex(initiallyOwned: true, $"Global\\dodona-{instanceId}", out bool createdNew);
+            if (createdNew) break;
+            mutex.Dispose();
+            mutex = null;
+            await Task.Delay(250);
+        }
+        if (mutex is null)
         {
             Console.Error.WriteLine($"another daemon already owns this root (instance {instanceId})");
             return 3;
         }
-        using var store = new Store(Path.Combine(root, ".dodona", "store.db"));
-        return await new Daemon(root, instanceId, ctlPipe, store).LoopAsync();
+        using (mutex)
+        {
+            using var store = new Store(Path.Combine(root, ".dodona", "store.db"));
+            return await new Daemon(root, instanceId, ctlPipe, store).LoopAsync(predecessor);
+        }
     }
 
-    async Task<int> LoopAsync()
+    /// <summary>The successor half of the handoff (§13). Connect to the predecessor's
+    /// handoff pipe, declare what this build is, wait for `go`, then wait for the
+    /// predecessor's process to actually be gone. Returns its pid, or -1 on failure —
+    /// in which case this process exits and the predecessor stays up, unharmed.</summary>
+    static async Task<int> HandshakeAsSuccessorAsync(string instanceId)
     {
-        _store.Event("daemon_start", null, $"pid={Environment.ProcessId} root={_root}");
-        Console.WriteLine($"dodona daemon: instance {_instanceId}, ctl pipe {_ctlPipe}, pid {Environment.ProcessId}");
+        var pipe = new NamedPipeClientStream(".", $"dodona-{instanceId}-handoff", PipeDirection.InOut, PipeOptions.Asynchronous);
+        try { await pipe.ConnectAsync(20000); }
+        catch { return -1; }
+        try
+        {
+            var w = new StreamWriter(pipe) { AutoFlush = true };
+            var r = new StreamReader(pipe);
+            w.WriteLine($"ready pid={Environment.ProcessId} build={Ver.Build} schema={Ver.Schema} shim={Ver.ShimProtocol}");
+            var go = await r.ReadLineAsync();
+            if (go is null || !go.StartsWith("go ")) return -1;
+            var oldPid = int.Parse(go[3..].Trim());
+            try
+            {
+                using var old = Process.GetProcessById(oldPid);
+                using var cts = new CancellationTokenSource(20000);
+                await old.WaitForExitAsync(cts.Token);
+            }
+            catch { /* already gone, or never was: either way the road is clear */ }
+            return oldPid;
+        }
+        catch { return -1; }
+        finally { try { pipe.Dispose(); } catch { } }
+    }
 
-        // Reconcile (design §12): rows are the claim; the pipe is the proof.
-        foreach (var l in _store.LanesAll().Where(l => l.State == "alive"))
+    async Task<int> LoopAsync(int predecessorPid)
+    {
+        _store.Event("daemon_start", null,
+            $"pid={Environment.ProcessId} build={Ver.Build} schema={Ver.Schema} exe={Ver.ExePath} root={_root}" +
+            (predecessorPid > 0 ? $" successor_of={predecessorPid}" : ""));
+        Console.WriteLine($"dodona daemon: instance {_instanceId}, ctl pipe {_ctlPipe}, pid {Environment.ProcessId}, build {Ver.Build}");
+
+        // Reconcile (design §12): rows are the claim; the pipe is the proof. A successor
+        // is adopting shims the predecessor only just let go of, so give them room.
+        foreach (var l in _store.LanesAll().Where(l => l.State == "alive" && l.Role != "dispatcher"))
         {
             var rt = new LaneRuntime(l.Id, l.Pipe, _store);
-            if (await rt.ConnectAndPumpAsync(attempts: 3)) _lanes[l.Id] = rt;
+            if (await rt.ConnectAndPumpAsync(attempts: predecessorPid > 0 ? 20 : 3)) _lanes[l.Id] = rt;
             else { _store.LaneState(l.Id, "unreachable"); _store.Event("lane_unreachable", l.Id, "reconcile: pipe did not answer"); }
         }
         _store.Event("reconcile_done", null, $"connected={_lanes.Count}");
+        if (predecessorPid > 0)
+        {
+            Announce($"[dodona] swapped to build {Ver.Build} — {_lanes.Count} lane(s) adopted, nothing interrupted");
+            GcOldBuilds();
+        }
+        StartSwapTicker();
 
         // No `using` on pipe streams near a peer that may close first (spike 2's lesson).
         bool stopping = false;
@@ -121,6 +182,7 @@ sealed class Daemon
                     w.WriteLine(row);
                 break;
             case "status":
+                w.WriteLine($"daemon pid={Environment.ProcessId} build={Ver.Build} schema={Ver.Schema} exe={Ver.ExePath}");
                 foreach (var l in _store.LanesAll())
                 {
                     var connected = _lanes.TryGetValue(l.Id, out var rt) && rt.Connected;
@@ -388,11 +450,284 @@ sealed class Daemon
                 if (!landOk) w.WriteLine("##exit 1");
                 break;
             }
+            // ---------------- hot swap (M4, §13/§14) ----------------
+            case "swap":
+            {
+                var exe = e.GetProperty("exe").GetString()!;
+                var mode = e.TryGetProperty("mode", out var sm) && sm.ValueKind == JsonValueKind.String ? sm.GetString()! : "ask";
+                var (handedOff, lines) = await ConsiderSwapAsync(exe, mode);
+                foreach (var l in lines) w.WriteLine(l);
+                return handedOff;
+            }
+            case "swap-answer":
+            {
+                var answer = e.GetProperty("answer").GetString()!;
+                var live = _store.SwapLive();
+                if (live is null) { w.WriteLine("error: no update is waiting on an answer"); break; }
+                switch (answer)
+                {
+                    case "now":
+                    {
+                        // The explicit override: swap even though something is in the way.
+                        var (handedOff, lines) = await ConsiderSwapAsync(live.Exe, "now");
+                        foreach (var l in lines) w.WriteLine(l);
+                        return handedOff;
+                    }
+                    case "when-it-lands":
+                        _store.SwapSet(live.Id, "when-it-lands", "armed");
+                        _store.Event("swap_armed", null, $"swap {live.Id} build {live.Build}: {live.Blocker}");
+                        Announce($"[dodona] update {live.Build} armed — swapping the instant this clears: {live.Blocker}");
+                        w.WriteLine($"armed: swap {live.Id} fires the instant the blocker clears ({live.Blocker})");
+                        break;
+                    case "hold":
+                        _store.SwapSet(live.Id, "hold", "held");
+                        _store.Event("swap_held", null, $"swap {live.Id} build {live.Build}");
+                        Announce($"[dodona] update {live.Build} held — say `dodona swap-answer now` when you want it");
+                        w.WriteLine($"held: swap {live.Id} parked until you say so");
+                        break;
+                    default:
+                        w.WriteLine("error: answer must be now | when-it-lands | hold");
+                        break;
+                }
+                break;
+            }
+            case "swap-fire":
+            {
+                // The armed swap's condition cleared; the ticker woke us through our own
+                // control pipe so this lands on the loop thread like any other command.
+                var live = _store.SwapLive();
+                if (live is null || live.State != "armed") { w.WriteLine("no armed swap"); break; }
+                var (handedOff, lines) = await ConsiderSwapAsync(live.Exe, "armed");
+                foreach (var l in lines) w.WriteLine(l);
+                return handedOff;
+            }
+            case "swaps":
+                foreach (var row in _store.SwapsAll()) w.WriteLine(row);
+                w.WriteLine($"running: build {Ver.Build} schema {Ver.Schema} shim-protocol {Ver.ShimProtocol} exe {Ver.ExePath}");
+                break;
+
             case "stop-daemon":
                 w.WriteLine("stopping (lanes keep running)");
                 return true;
         }
         return false;
+    }
+
+    // ------------------------------------------------------------- hot swap (§13/§14)
+
+    sealed record NewBuild(string Exe, string Build, int Schema, int ShimProtocol);
+
+    /// <summary>Ask a candidate binary what it is. Running `<exe> version --json` is the
+    /// only honest way — the file name proves nothing, and we must know its schema and
+    /// shim protocol BEFORE it touches the store.</summary>
+    static NewBuild? Probe(string exe, out string error)
+    {
+        error = "";
+        if (!File.Exists(exe)) { error = $"no such binary: {exe}"; return null; }
+        try
+        {
+            var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+            psi.ArgumentList.Add("version");
+            psi.ArgumentList.Add("--json");
+            using var p = Process.Start(psi)!;
+            var so = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(10000);
+            using var d = JsonDocument.Parse(so);
+            return new NewBuild(exe,
+                d.RootElement.GetProperty("build").GetString()!,
+                d.RootElement.GetProperty("schema").GetInt32(),
+                d.RootElement.GetProperty("shimProtocol").GetInt32());
+        }
+        catch (Exception ex) { error = $"binary did not answer `version --json` ({ex.Message})"; return null; }
+    }
+
+    /// <summary>What stands in the way of a seamless swap (§14). Empty means go.</summary>
+    List<string> Blockers(NewBuild nb)
+    {
+        var blockers = new List<string>();
+
+        if (nb.Schema > Ver.Schema)
+            blockers.Add($"store schema migration v{Ver.Schema}→v{nb.Schema}");
+
+        // The live shims are the authority, not our own constant: they were spawned by
+        // whichever binary was running then, and the successor has to talk to THEM.
+        var stranded = _lanes.Values.Where(l => l.Connected && l.ShimProtocol != nb.ShimProtocol).ToList();
+        if (stranded.Count > 0)
+            blockers.Add($"shim protocol v{stranded[0].ShimProtocol}→v{nb.ShimProtocol} with {stranded.Count} live shim(s)");
+
+        var tok = _store.TokenRead();
+        if (tok.Holder is long h && (tok.ExpiresTs is null || DateTime.Parse(tok.ExpiresTs).ToUniversalTime() > DateTime.UtcNow))
+        {
+            var t = _store.Ticket(h);
+            blockers.Add($"{t?.Title ?? $"ticket {h}"} is mid-merge");
+        }
+        return blockers;
+    }
+
+    /// <summary>The swap decision. Clear road → hand off. Something in the way → do not
+    /// act: record the proposal, announce it with its three answers, and wait. This is
+    /// the one exception to act-announce-undo (§11), and it earns it — a half-applied
+    /// migration is not undoable with a keystroke.</summary>
+    async Task<(bool HandedOff, List<string> Lines)> ConsiderSwapAsync(string exe, string mode)
+    {
+        var lines = new List<string>();
+        var nb = Probe(exe, out var probeError);
+        if (nb is null)
+        {
+            _store.Event("swap_refused", null, $"{exe}: {probeError}");
+            lines.Add($"error: {probeError}");
+            lines.Add("##exit 1");
+            return (false, lines);
+        }
+        if (nb.Schema < Ver.Schema)
+        {
+            // A downgrade cannot read this store at all. Not a decision — a refusal.
+            _store.Event("swap_refused", null, $"{nb.Build}: schema v{nb.Schema} < live v{Ver.Schema}");
+            lines.Add($"refused: build {nb.Build} expects schema v{nb.Schema}, this store is v{Ver.Schema} — a downgrade would not be able to read it");
+            lines.Add("##exit 1");
+            return (false, lines);
+        }
+
+        var blockers = Blockers(nb);
+        if (blockers.Count > 0 && mode != "now")
+        {
+            var blocker = string.Join("; ", blockers);
+            if (mode == "armed")
+            {
+                lines.Add($"still blocked: {blocker}");
+                return (false, lines);
+            }
+            var id = _store.SwapCreate(nb.Exe, nb.Build, nb.Schema, nb.ShimProtocol, blocker, "ask", "pending");
+            _store.Event("swap_blocked", null, $"swap {id} build {nb.Build}: {blocker}");
+            Announce($"[dodona] update ready — {blocker}. swap now / when it lands / hold");
+            lines.Add($"update {nb.Build} ready — {blocker}");
+            lines.Add("answer: dodona swap-answer now | when-it-lands | hold");
+            return (false, lines);
+        }
+
+        var swapId = _store.SwapCreate(nb.Exe, nb.Build, nb.Schema, nb.ShimProtocol,
+                                       blockers.Count > 0 ? string.Join("; ", blockers) : null,
+                                       mode, "pending");
+        var (ok, msg) = await HandoffAsync(nb, swapId, blockers);
+        lines.Add(msg);
+        if (!ok) lines.Add("##exit 1");
+        return (ok, lines);
+    }
+
+    /// <summary>Successor handoff (§13). The old daemon spawns the new binary, waits for
+    /// it to signal ready, then releases everything and exits. If the successor never
+    /// answers, THIS daemon keeps running — a bad publish must never take the system
+    /// down.</summary>
+    async Task<(bool Ok, string Msg)> HandoffAsync(NewBuild nb, long swapId, List<string> blockers)
+    {
+        var handoffPipe = $"dodona-{_instanceId}-handoff";
+        var server = new NamedPipeServerStream(handoffPipe, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        Process? p = null;
+        try
+        {
+            var psi = new ProcessStartInfo(nb.Exe) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = _root };
+            psi.ArgumentList.Add("daemon");
+            psi.ArgumentList.Add("--root");
+            psi.ArgumentList.Add(_root);
+            psi.ArgumentList.Add("--successor");
+            p = Process.Start(psi);
+            _store.Event("swap_spawned", null, $"swap {swapId} build {nb.Build} pid={p?.Id} exe={nb.Exe}");
+
+            using var cts = new CancellationTokenSource(30000);
+            await server.WaitForConnectionAsync(cts.Token);
+            var r = new StreamReader(server);
+            var w = new StreamWriter(server) { AutoFlush = true };
+            var ready = await r.ReadLineAsync();
+            if (ready is null || !ready.StartsWith("ready "))
+                throw new InvalidOperationException($"successor said '{ready}' instead of ready");
+
+            if (blockers.Count > 0)
+                _store.Event("swap_forced", null, $"swap {swapId} over: {string.Join("; ", blockers)}");
+            _store.Event("daemon_handoff", null, $"swap {swapId}: {Ver.Build} (pid {Environment.ProcessId}) → {nb.Build} ({ready})");
+            _store.SwapSet(swapId, "now", "swapped", ready);
+
+            w.WriteLine($"go {Environment.ProcessId}");
+            await Task.Delay(150);          // let the successor read `go` before our handles close
+            return (true, $"handed off to build {nb.Build} (pid {p?.Id}); this daemon is exiting — lanes keep running");
+        }
+        catch (Exception ex)
+        {
+            try { if (p is not null && !p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+            _store.SwapSet(swapId, "now", "failed", ex.Message);
+            _store.Event("swap_failed", null, $"swap {swapId} build {nb.Build}: {ex.Message}");
+            Announce($"[dodona] update {nb.Build} FAILED to start — staying on {Ver.Build}");
+            return (false, $"swap failed ({ex.Message}) — this daemon is still running, nothing was lost");
+        }
+        finally
+        {
+            try { server.Dispose(); } catch { }
+        }
+    }
+
+    /// <summary>"When it lands" defers to a CONDITION, not a timer (§14): poll the
+    /// blockers and fire the instant they clear. The fire itself goes through our own
+    /// control pipe so it is serialized with every other command.</summary>
+    void StartSwapTicker() => _ = Task.Run(async () =>
+    {
+        while (true)
+        {
+            await Task.Delay(2000);
+            try
+            {
+                var live = _store.SwapLive();
+                if (live is null || live.State != "armed") continue;
+                var nb = Probe(live.Exe, out _);
+                if (nb is null) continue;
+                if (Blockers(nb).Count > 0) continue;
+
+                var pipe = new NamedPipeClientStream(".", _ctlPipe, PipeDirection.InOut);
+                try
+                {
+                    await pipe.ConnectAsync(2000);
+                    var w = new StreamWriter(pipe) { AutoFlush = true };
+                    var r = new StreamReader(pipe);
+                    w.WriteLine(JsonSerializer.Serialize(new { cmd = "swap-fire" }));
+                    while (await r.ReadLineAsync() is string l && l != "##end") { }
+                }
+                finally { try { pipe.Dispose(); } catch { } }
+                return;                    // fired: either we are exiting, or it failed and re-armed nothing
+            }
+            catch { /* next tick */ }
+        }
+    });
+
+    /// <summary>Old binary directories are garbage once no instance runs them (§13). A
+    /// running image is locked by Windows, which makes "is anyone using it?" a question
+    /// the filesystem answers for us: try, and skip what refuses.</summary>
+    void GcOldBuilds()
+    {
+        var binRoot = Ver.BinRoot;
+        var mine = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd('\\');
+        if (!Directory.Exists(binRoot)) return;
+        if (!mine.StartsWith(Path.GetFullPath(binRoot).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return;  // dev build: not ours to collect
+        foreach (var dir in Directory.GetDirectories(binRoot))
+        {
+            if (Path.GetFullPath(dir).TrimEnd('\\').Equals(mine, StringComparison.OrdinalIgnoreCase)) continue;
+            try { Directory.Delete(dir, recursive: true); _store.Event("binary_gc", null, dir); }
+            catch (Exception ex) { _store.Event("binary_gc_skipped", null, $"{dir}: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>System-level announcements land in the dispatcher pane, and therefore in
+    /// the decision feed (§8). The dispatcher lane holds no agent — it is a place for
+    /// the system to speak in its own voice.</summary>
+    void Announce(string text)
+    {
+        var id = _store.KvGet("dispatcher_lane") is string s && long.TryParse(s, out var l) ? l : 0;
+        if (id == 0)
+        {
+            id = _store.LaneCreate("DODONA");
+            _store.LaneRole(id, "dispatcher");
+            _store.LanePresence(id, "system");
+            _store.KvSet("dispatcher_lane", id.ToString());
+        }
+        _store.PaneEvent(id, "announcement", text, null, null);
     }
 
     static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";

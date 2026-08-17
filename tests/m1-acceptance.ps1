@@ -8,6 +8,7 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
+$env:DODONA_NO_AUTOSTART = "1"   # this test owns daemon lifetime; start-on-demand (M4) must not join in
 $out = Join-Path $PSScriptRoot 'm1-output'
 New-Item -ItemType Directory -Force $out | Out-Null
 Remove-Item "$out\*" -Force -Recurse -ErrorAction SilentlyContinue

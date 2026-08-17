@@ -20,6 +20,9 @@ sealed class LaneRuntime
     readonly Store _store;
     StreamWriter? _writer;
     public volatile bool Connected;
+    /// <summary>What this shim's wire says it speaks — read from the hello line, checked
+    /// before a hot swap (§13). Pre-versioning shims say nothing, which means 1.</summary>
+    public int ShimProtocol { get; private set; } = 1;
     TaskCompletionSource<string>? _resultTcs;
 
     public LaneRuntime(long id, string pipeName, Store store)
@@ -42,7 +45,9 @@ sealed class LaneRuntime
 
             _writer = new StreamWriter(pipe) { AutoFlush = true };
             var reader = new StreamReader(pipe);
-            var hello = await reader.ReadLineAsync();          // "!hello shim=… child=… delivered=… buffered=…"
+            var hello = await reader.ReadLineAsync();          // "!hello proto=… shim=… child=… delivered=… buffered=…"
+            var proto = System.Text.RegularExpressions.Regex.Match(hello ?? "", @"proto=(\d+)");
+            if (proto.Success) ShimProtocol = int.Parse(proto.Groups[1].Value);
             _store.Event("lane_connected", Id, hello);
             Connected = true;
 

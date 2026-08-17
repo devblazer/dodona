@@ -15,9 +15,12 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
 | Shim identity per lane | `<root>\.dodona\shim-lane<N>.json` → `{shimPid, childPid, pipeName}` |
 | Control pipe (daemon alive only) | `dodona-<instance>-ctl`, instance = first 8 hex of SHA256(lowercased canonical root) |
 | Lane pipes (shim alive) | `dodona-<instance>-lane<N>` |
+| UI pipe (UI alive only) | `dodona-<instance>-ui` |
+| Handoff pipe (during a swap only) | `dodona-<instance>-handoff` |
+| Published builds | `%LOCALAPPDATA%\Dodona\bin\<stamp>` (or `$env:DODONA_BIN_ROOT`) |
 | Agent session files (Claude Code's own) | `$env:CLAUDE_CONFIG_DIR\projects\<cwd-slug>\<session-id>.jsonl` |
 
-## The schema (v4 — `PRAGMA user_version`)
+## The schema (v5 — `PRAGMA user_version`)
 
 - **`lanes`** — `id, title, state (alive|unreachable|dead), pipe_name, session_id,
   created_ts`. The session_id is the resume handle; the pipe is the reattach handle.
@@ -42,9 +45,16 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
   (prefix|focus|classifier), target_lane, delivered_lane, confidence, retargeted,
   undone`. `undone` is reserved for the UI's undo keystroke — free labeled data for
   tuning the confidence threshold.
-- **`kv`** — small state: `focused_lane`.
+- **`kv`** — small state: `focused_lane`, `dispatcher_lane`.
 - **`lanes`** additionally carries `presence` (derived by code from tool_use wire
-  events — never a model) and `role ∈ work | router | dispatcher`.
+  events — never a model) and `role ∈ work | router | dispatcher`. The `dispatcher`
+  lane (title `DODONA`) holds no agent and takes no grid slot — it is where the system
+  speaks in its own voice, and reconcile skips it.
+- **`swaps`** — every proposed hot swap (§13/§14): `exe, build, schema_version,
+  shim_protocol, blocker, mode (ask|now|when-it-lands|hold), state (pending|armed|held|
+  swapped|failed|superseded)`. A `blocker` is why a swap could not be seamless; `armed`
+  means the daemon will swap itself the instant that blocker clears. At most one row is
+  live at a time — a newer proposal supersedes a parked one.
 - **`events`** — the causal chain: `ts, kind, lane_id, detail`. Every daemon action
   writes here. Lane kinds: `daemon_start`, `reconcile_done`, `shim_spawned`,
   `lane_connected`, `lane_unreachable`, `lane_pipe_lost`, `say`, `daemon_stop`.
@@ -54,8 +64,10 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
   `land_refused`, `land_inconsistent`, `verify_green`, `verify_red`, `worktree_pruned`,
   `worktree_prune_failed`, `ticket_git_failed`. Routing kinds: `classified` (with
   latency), `routed_retarget`, `classifier_timeout`, `classifier_failed`,
-  `route_undone`. **If a state change happened with no event row naming why, that is a
-  bug — report it as one.**
+  `route_undone`. Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
+  `swap_forced`, `swap_refused`, `swap_failed`, `daemon_handoff`, `binary_gc`,
+  `binary_gc_skipped`. **If a state change happened with no event row naming why, that
+  is a bug — report it as one.**
 
 ## The claim gate
 
@@ -100,6 +112,48 @@ If the CLI reports the daemon isn't running, read the store directly — that is
 point of the design. A lane whose shim still runs (check the pids in
 `shim-lane<N>.json`) is buffering; whatever it holds arrives when the next daemon
 connects, deduped by seq.
+
+## Hot swap (§13/§14)
+
+`dodona version [--json]` tells you what a binary is: `build` (identity),
+`schema` (the store shape it expects) and `shimProtocol` (the wire live shims speak).
+The last two decide whether a swap can be seamless.
+
+```
+dodona publish [--project <dir>] [--all]   # build into a fresh versioned dir, then swap
+dodona swap <dodona.exe> [--mode now]      # swap to an existing build
+dodona swap-answer now | when-it-lands | hold
+dodona swaps                               # every proposal + what is running now
+```
+
+The handoff: old daemon spawns the new binary with `--successor`, which connects to the
+handoff pipe and says `ready`; the old daemon records `daemon_handoff`, replies `go
+<pid>`, and exits; the successor waits for that pid to die, takes the mutex, opens the
+store, reconciles, and adopts the shim pipes. **An agent mid-turn never notices** — it is
+talking to Anthropic, and its shim buffered whatever arrived.
+
+Diagnosing a swap that misbehaved, in order:
+
+```sql
+SELECT * FROM swaps ORDER BY id;                     -- what was proposed, and its verdict
+SELECT ts, kind, detail FROM events
+ WHERE kind LIKE 'swap%' OR kind IN ('daemon_handoff','daemon_start','daemon_stop')
+ ORDER BY id;                                        -- the handoff, step by step
+```
+
+- `swap_refused` — the candidate was not a usable binary, or was a schema downgrade.
+  Nothing happened; the running daemon is untouched.
+- `swap_blocked` then no `daemon_handoff` — it is waiting on an answer. `swaps` shows
+  `pending` (asking), `armed` (will fire when the blocker clears) or `held`.
+- `swap_failed` — the successor never signalled ready. **The old daemon stays up**; this
+  is not an outage. Read the note column for why.
+- `daemon_handoff` with no following `daemon_start` — the successor died between `go`
+  and startup. No daemon is running, but nothing is lost: the shims are buffering, and
+  the next client command starts a daemon (start-on-demand) which drains them.
+
+Start-on-demand means *any* client command revives a dead daemon. Set
+`DODONA_NO_AUTOSTART=1` when you want the honest "daemon not running" instead — the
+acceptance tests all do, so they own daemon lifetime.
 
 ## The UI can testify (§17)
 
