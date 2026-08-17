@@ -25,22 +25,24 @@ most expensive mistake in this project's history — twice:
 If you cannot build — permission denied, a lock, anything — **say so as the headline of
 your reply**, not as a footnote. An unbuilt change is not a deliverable.
 
-## 2. Working work gets published and hot-swapped
+## 2. Completed work gets published
 
-**When a change builds and its tests pass, publish it.** Do not leave the operator on a
-stale binary, and do not make them run a build to see their own feature.
+**Finishing a piece of work — or being asked to publish — means running publish.** Not
+"mention that it could be published", not leaving it built-but-installed-nowhere. The
+operator sees Dodona through the installed app; work that never reaches it does not exist
+from where they are sitting.
 
 ```powershell
 .\src\Dodona\bin\Release\net8.0\dodona.exe publish --project . --all
 ```
 
-That one command builds all three executables into a fresh versioned directory, hands off
-to any running daemon **without interrupting a live agent mid-turn** (M4), and re-points
-the desktop shortcut at the new build. It is safe to run while the operator is working —
-that is the entire point of the hot swap, and it is verified by
-`tests/m4-acceptance.ps1`.
+That builds all three executables into a fresh versioned directory, hands off to any
+running daemon **without interrupting a live agent mid-turn** (M4), and re-points the
+desktop shortcut. Safe to run while the operator is working — that is the whole point of
+the hot swap, verified by `tests/m4-acceptance.ps1`. Work in progress gets published too
+when the operator wants to trial it; that is what a trial is.
 
-Two things it cannot do, so say them plainly when they apply:
+Two things publish cannot do, so say them plainly when they apply:
 
 - **A running UI window does not hot-swap.** The daemon and lanes survive; the window is
   the disposable half. Tell the operator to relaunch it from the desktop icon.
