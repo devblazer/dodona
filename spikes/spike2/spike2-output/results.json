@@ -1,0 +1,14 @@
+﻿{
+    "A_killed":  "daemon A (pid 21420) killed ~0.9s after sending turn 2",
+    "shim_survived_daemon_death":  "PASS",
+    "claude_survived_daemon_death":  "PASS",
+    "B_exit_code":  0,
+    "shim_exited_on_shutdown":  "PASS",
+    "A_seqs":  "18 lines, max seq 17",
+    "B_seqs":  "21 lines, first seq 18, max seq 38",
+    "zero_loss_no_seq_gaps":  "PASS",
+    "redelivered_overlap":  "0 line(s) delivered to both (at-least-once, deduped by seq)",
+    "B_received_turn2_result":  "PASS (produced while no daemon attached)",
+    "B_fact_recall":  "PASS",
+    "B_turn3":  "CINNABAR-77"
+}

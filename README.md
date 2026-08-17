@@ -20,7 +20,7 @@ architecture is poured around it:
 | Spike | Assumption | Status |
 |---|---|---|
 | 1 — `spikes/spike1.ps1` | resume durability + long-lived stream-json sessions | **PASS ×4** + one finding — `spikes/SPIKE-1-resume.md` |
-| 2 | detached C# shim survives daemon death, zero message loss | pending |
+| 2 — `spikes/spike2/spike2.ps1` | detached C# shim survives daemon death, zero message loss | **PASS ×6** — `spikes/SPIKE-2-shim.md`; shim is real code: `src/DodonaShim/` |
 | 3 | mid-turn `additionalContext` injection behavior | pending |
 | 4 | six concurrent sessions: quota burn + warm-turn latency | pending |
 
