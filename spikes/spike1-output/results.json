@@ -1,0 +1,10 @@
+﻿{
+    "session_id":  "8e6542aa-9e76-4464-a4af-683458a731a5",
+    "turn1_result":  "PERSIMMON-42 acknowledged.",
+    "turn2_result":  "PERSIMMON-42",
+    "A_multi_message_per_invocation":  "PASS",
+    "B_killed_mid_turn":  "killed pid 11504 ~1.5s after sending turn 3",
+    "session_file":  "NOT FOUND",
+    "resume_reply":  "PERSIMMON-42",
+    "C_context_survives_kill_and_resume":  "PASS"
+}
