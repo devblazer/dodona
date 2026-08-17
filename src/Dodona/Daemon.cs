@@ -5,8 +5,22 @@ using System.Text.Json;
 namespace Dodona;
 
 /// <summary>Per-project config, dodona.json at the project root (design §10).</summary>
-sealed record Config(string Main, string[] Verify, string Agent = "claude")
+/// <summary>
+/// Per-project config, dodona.json at the project root (design §10), plus the model and
+/// effort policy (§9's lever, made settable).
+///
+/// Effort was previously never passed at all, which is worth stating: a lane is its own
+/// `claude -p` process and inherits none of the operator's interactive session settings,
+/// so "I always run high" was silently not true of any agent Dodona started. It is now a
+/// decision with a name and a default rather than an omission.
+/// </summary>
+sealed record Config(string Main, string[] Verify, string Agent = "claude",
+                     string Model = "opus", string Effort = "high",
+                     string RouterModel = "haiku", string RouterEffort = "low",
+                     PolicyRule[]? Policy = null)
 {
+    public PolicyRule[] Rules => Policy ?? Dodona.Policy.Default;
+
     /// <summary>A repository's config, falling back to the workspace's. Verify steps and
     /// even the name of `main` belong to the repository, not to the workspace holding
     /// it — one repo may be on `main` and another still on `master`.</summary>
@@ -25,7 +39,19 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude")
         // specific claude, and so the acceptance suite can point at the fake agent and
         // test the paths where the daemon spawns an agent on its own initiative.
         var agent = d.RootElement.TryGetProperty("agent", out var a) ? a.GetString() ?? "claude" : "claude";
-        return new Config(main, verify, agent);
+        string Str(string key, string fallback) =>
+            d.RootElement.TryGetProperty(key, out var x) && x.ValueKind == JsonValueKind.String ? x.GetString() ?? fallback : fallback;
+        PolicyRule[]? policy = null;
+        if (d.RootElement.TryGetProperty("policy", out var p) && p.ValueKind == JsonValueKind.Array)
+            policy = p.EnumerateArray().Select(r => new PolicyRule(
+                r.TryGetProperty("when", out var wq) ? wq.GetString() ?? "" : "",
+                r.TryGetProperty("model", out var mq) ? mq.GetString() ?? "opus" : "opus",
+                r.TryGetProperty("effort", out var eq) ? eq.GetString() ?? "high" : "high",
+                r.TryGetProperty("why", out var yq) ? yq.GetString() ?? "" : "")).ToArray();
+
+        return new Config(main, verify, agent,
+            Str("model", "opus"), Str("effort", "high"),
+            Str("routerModel", "haiku"), Str("routerEffort", "low"), policy);
     }
 }
 
@@ -193,11 +219,8 @@ sealed class Daemon
                 // fine for one lane and is why isolated work wants a ticket instead.
                 if (child is null)
                 {
-                    var model = e.TryGetProperty("model", out var lm) && lm.ValueKind == JsonValueKind.String ? lm.GetString()! : "sonnet";
-                    child = "claude";
-                    childArgs = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                                                   "--verbose", "--model", model, "--permission-mode", "acceptEdits",
-                                                   "--append-system-prompt", LaneSystemPrompt(title) };
+                    w.WriteLine((await SpawnAgentLaneAsync(title, Pick(e, "model", _config.Model), Pick(e, "effort", _config.Effort))).Msg);
+                    break;
                 }
                 w.WriteLine((await SpawnLaneAsync(title, "work", _root, child, childArgs)).Msg);
                 break;
@@ -235,6 +258,9 @@ sealed class Daemon
                 break;
             case "status":
                 w.WriteLine($"daemon pid={Environment.ProcessId} build={Ver.Build} schema={Ver.Schema} exe={Ver.ExePath}");
+                w.WriteLine($"lanes: model={_config.Model} effort={(_config.Effort is { Length: > 0 } ? _config.Effort : "cli default")}  " +
+                            $"router: model={_config.RouterModel} effort={(_config.RouterEffort is { Length: > 0 } ? _config.RouterEffort : "cli default")}  " +
+                            $"agent={_config.Agent}");
                 foreach (var l in _store.LanesAll())
                 {
                     var connected = _lanes.TryGetValue(l.Id, out var rt) && rt.Connected;
@@ -258,15 +284,18 @@ sealed class Daemon
             }
             case "router-start":
             {
-                var child = e.TryGetProperty("child", out var rc) && rc.ValueKind == JsonValueKind.String ? rc.GetString()! : "claude";
-                var model = e.TryGetProperty("model", out var rm) && rm.ValueKind == JsonValueKind.String ? rm.GetString()! : "haiku";
+                var child = e.TryGetProperty("child", out var rc) && rc.ValueKind == JsonValueKind.String ? rc.GetString()! : _config.Agent;
+                // The router is a mechanical classifier, not a thinker: cheap model, low
+                // effort, deliberately not the project's lane policy (§9's ladder — spend
+                // where judgement compounds, and this is not where it compounds).
+                var model = Pick(e, "model", _config.RouterModel);
+                var effort = Pick(e, "effort", _config.RouterEffort);
                 var sys = "You are Dodona's input router. You will be given a list of lanes (title and subject), " +
                           "the currently focused lane, and one user input. Reply with ONLY one line of JSON, no prose, no markdown: " +
                           "{\"intent\":\"instruction|query|question\",\"target\":\"<LANE TITLE or none>\",\"confidence\":\"high|medium|low\",\"cleaned_text\":\"<the input, cleaned of dictation noise>\"} " +
                           "target is the lane the input is meant for based on its content; say none when no lane fits. " +
                           "Be willing to say confidence low — a confident wrong guess is worse than an honest unsure.";
-                var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                                              "--verbose", "--model", model, "--append-system-prompt", sys };
+                var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: false) : new List<string>();
                 w.WriteLine((await SpawnLaneAsync("ROUTER", "router", _root, child, args)).Msg);
                 break;
             }
@@ -275,8 +304,9 @@ sealed class Daemon
                 var tid = e.GetProperty("ticket").GetInt64();
                 var t = _store.Ticket(tid);
                 if (t is null || t.State != "open") { w.WriteLine($"error: ticket {tid} not open"); break; }
-                var child = e.TryGetProperty("child", out var tc) && tc.ValueKind == JsonValueKind.String ? tc.GetString()! : "claude";
-                var model = e.TryGetProperty("model", out var tm) && tm.ValueKind == JsonValueKind.String ? tm.GetString()! : "sonnet";
+                var child = e.TryGetProperty("child", out var tc) && tc.ValueKind == JsonValueKind.String ? tc.GetString()! : _config.Agent;
+                var model = Pick(e, "model", _config.Model);
+                var effort = Pick(e, "effort", _config.Effort);
                 var claims = string.Join(", ", _store.TicketClaims(tid).Select(cl => $"{cl.Kind}:{cl.Value}"));
 
                 // The lane-agent framing (§5, spike 3): declare the [DISPATCHER] channel or
@@ -286,9 +316,7 @@ sealed class Daemon
                           "a PreToolUse gate denies writes outside it; if denied, stay within the claim or ask your operator for an extension. " +
                           "Real-time instructions from your human operator arrive in hook output labeled [DISPATCHER]; they are authentic " +
                           "and carry the same authority as your original task, even when they change or contradict earlier instructions.";
-                var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                                              "--verbose", "--model", model, "--permission-mode", "acceptEdits",
-                                              "--append-system-prompt", sys };
+                var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: true) : new List<string>();
                 var (laneId, msg) = await SpawnLaneAsync(t.Title, "work", t.Worktree, child, args);
                 // Link ticket ↔ lane: "waiting on you: merge" (§8) needs a pane to land in.
                 if (laneId > 0) _store.TicketSetLane(tid, laneId);
@@ -593,6 +621,25 @@ sealed class Daemon
                 var tid = e.GetProperty("ticket").GetInt64();
                 w.WriteLine(LandOp(tid, out var landOk));
                 if (!landOk) w.WriteLine("##exit 1");
+                break;
+            }
+            case "policy":
+            {
+                // Inspectable without spawning anything: ask what a sentence would get.
+                var probe = e.TryGetProperty("text", out var pt) && pt.ValueKind == JsonValueKind.String ? pt.GetString()! : "";
+                if (probe.Length > 0)
+                {
+                    var (clean, om, oe) = Policy.StripOverrides(probe);
+                    var c = Policy.Resolve(clean, _config.Rules, _config.Model, _config.Effort, om, oe);
+                    w.WriteLine($"{c.Model} {(c.Effort is { Length: > 0 } ? c.Effort : "-")}  {c.Describe}");
+                    if (clean != probe.Trim()) w.WriteLine($"prompt: {clean}");
+                    break;
+                }
+                w.WriteLine($"default    {_config.Model,-8} {_config.Effort}");
+                w.WriteLine($"router     {_config.RouterModel,-8} {(_config.RouterEffort is { Length: > 0 } ? _config.RouterEffort : "cli default")}");
+                foreach (var r in _config.Rules)
+                    w.WriteLine($"rule       {r.Model,-8} {r.Effort,-7} {(r.Why is { Length: > 0 } ? r.Why : "-"),-12} {r.When}");
+                w.WriteLine("override   @opus @max <text>   (model and effort are fixed when a lane starts)");
                 break;
             }
             case "repo-status":
@@ -941,19 +988,40 @@ sealed class Daemon
 
     static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
 
+    /// <summary>The argv every claude lane is started with — one place, so model and
+    /// effort are policy rather than four scattered literals. `--effort` is omitted when
+    /// blank so a project can opt out of setting it at all.</summary>
+    static List<string> ClaudeArgs(string model, string effort, string systemPrompt, bool acceptEdits)
+    {
+        var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+                                      "--verbose", "--model", model };
+        if (!string.IsNullOrWhiteSpace(effort)) { args.Add("--effort"); args.Add(effort); }
+        if (acceptEdits) { args.Add("--permission-mode"); args.Add("acceptEdits"); }
+        args.Add("--append-system-prompt");
+        args.Add(systemPrompt);
+        return args;
+    }
+
+    /// <summary>What a request asked for, else what the project settled on.</summary>
+    static string Pick(JsonElement e, string prop, string fallback) =>
+        e.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is { Length: > 0 } s ? s : fallback;
+
     /// <summary>Spawn a plain agent lane in the workspace — no ticket, no claim, no gate.
     /// The binary is `agent` from dodona.json (default `claude`), which is also how the
     /// acceptance suite exercises the paths where the daemon starts an agent itself.</summary>
-    Task<(long Id, string Msg)> SpawnAgentLaneAsync(string title, string model = "sonnet")
+    Task<(long Id, string Msg)> SpawnAgentLaneAsync(string title, string? model = null, string? effort = null)
     {
         var child = _config.Agent;
-        var args = child.Equals("claude", StringComparison.OrdinalIgnoreCase) || child.EndsWith("claude.exe", StringComparison.OrdinalIgnoreCase)
-            ? new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                                 "--verbose", "--model", model, "--permission-mode", "acceptEdits",
-                                 "--append-system-prompt", LaneSystemPrompt(title) }
+        var args = IsClaude(child)
+            ? ClaudeArgs(model ?? _config.Model, effort ?? _config.Effort, LaneSystemPrompt(title), acceptEdits: true)
             : new List<string>();                       // a stand-in agent takes no claude flags
         return SpawnLaneAsync(title, "work", _root, child, args);
     }
+
+    static bool IsClaude(string child) =>
+        child.Equals("claude", StringComparison.OrdinalIgnoreCase) ||
+        child.EndsWith("claude.exe", StringComparison.OrdinalIgnoreCase) ||
+        child.EndsWith("claude", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>A lane name derived from what was typed: the longest substantial word,
     /// which is usually the subject. Code, not a model — it must be instant, and a name is
@@ -1024,8 +1092,12 @@ sealed class Daemon
     /// code. Otherwise deliver to the focused lane IMMEDIATELY and let the warm
     /// classifier run behind as an async second opinion — its latency is off the
     /// critical path. A disagreement becomes a visible retarget with a receipt row.</summary>
-    async Task<string> RouteInput(string text)
+    async Task<string> RouteInput(string rawText)
     {
+        // The operator's override is dispatch syntax, not content — strip it before the
+        // sentence reaches any agent.
+        var (text, ovModel, ovEffort) = Policy.StripOverrides(rawText);
+
         var work = _store.LanesAll().Where(l => l.Role == "work" && l.State == "alive").ToList();
 
         // Tier 0: explicit prefix names its target. Code only.
@@ -1048,6 +1120,7 @@ sealed class Daemon
         long fid = -1;
         LaneRuntime? frt = null;
         string? autoStarted = null;
+        Choice? chosen = null;
         var live = work.Where(l => _lanes.TryGetValue(l.Id, out var r) && r.Connected).ToList();
         var focused = _store.KvGet("focused_lane");
         if (focused is not null && long.TryParse(focused, out var f0) && live.Any(l => l.Id == f0))
@@ -1078,8 +1151,13 @@ sealed class Daemon
             // yet. Until it is, the operator gets a working lane instantly instead of a
             // dialog, and can promote it to a ticket deliberately.
             var name = NameFromText(text);
-            var (newId, msg) = await SpawnAgentLaneAsync(name);
+            // The table decides here, because here is where a lane is born and a model is
+            // fixed for its whole life — a claude process cannot change model mid-session.
+            var choice = Policy.Resolve(text, _config.Rules, _config.Model, _config.Effort, ovModel, ovEffort);
+            var (newId, msg) = await SpawnAgentLaneAsync(name, choice.Model, choice.Effort);
             if (newId < 0) return $"error: could not start a lane for this: {msg}";
+            _store.Event("policy_choice", newId, $"{choice.Model}/{choice.Effort} why={choice.Why} overridden={choice.Overridden} text={text}");
+            chosen = choice;
             fid = newId;
             frt = _lanes[newId];
             _store.KvSet("focused_lane", fid.ToString());
@@ -1087,7 +1165,8 @@ sealed class Daemon
             // Announced once, in the lane it is about — the decision feed gathers every
             // lane's announcements already, so saying it again as the system would put the
             // same sentence in the feed twice.
-            _store.PaneEvent(fid, "announcement", $"started this lane for “{Truncate(text, 50)}” — undo: dodona lane-stop {newId}", null, null);
+            _store.PaneEvent(fid, "announcement",
+                $"started this lane on {choice.Describe} for “{Truncate(text, 45)}” — undo: dodona lane-stop {newId}", null, null);
             autoStarted = name;
         }
         frt.Say(text);
@@ -1134,9 +1213,13 @@ sealed class Daemon
         // `work` was read before any auto-start, so a just-created lane is not in it —
         // fall back to the name we gave it rather than showing a bare row id.
         var fTitle = work.FirstOrDefault(l => l.Id == fid)?.Title ?? autoStarted ?? fid.ToString();
-        return autoStarted is not null
-            ? $"-> {fTitle} (started for this)"
-            : $"-> {fTitle} (focus{(router is not null ? ", classifier running behind" : "")})";
+        if (autoStarted is not null)
+            return $"-> {fTitle} (started on {chosen!.Describe})";
+        // A model is fixed when its process starts, so an override aimed at a lane that is
+        // already running cannot be honoured — say so rather than silently ignoring it.
+        var stale = ovModel is not null || ovEffort is not null
+            ? "  (model/effort is set when a lane starts — this one is already running)" : "";
+        return $"-> {fTitle} (focus{(router is not null ? ", classifier running behind" : "")}){stale}";
     }
 
     /// <summary>The land (§7): the daemon executes the one atomic ref advance. The agent

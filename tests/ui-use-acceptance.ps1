@@ -130,6 +130,34 @@ try {
     $lanes = @($d.slots | Where-Object { -not $_.empty })
     Check 'typing_after_undo_starts_a_fresh_lane' ($lanes.Count -eq 1 -and $lanes[0].title -eq 'TOOLBAR') (($lanes | ConvertTo-Json -Compress))
 
+    # ---- model/effort policy (§9): the table decides, the operator overrides ----
+    Check 'policy_table_is_inspectable' ((Dodona @("policy")) -match 'design-tier') ''
+    Check 'policy_picks_cheap_for_mechanical' ((Dodona @("policy", "fix the spelling in the readme")) -match '^haiku low') ''
+    Check 'policy_picks_max_for_design' ((Dodona @("policy", "redesign the schema")) -match '^opus max') ''
+    Check 'policy_default_is_opus_high' ((Dodona @("policy", "make the toolbar collapsible")) -match '^opus high') ''
+
+    # An override in a typed prompt must be honoured AND must never reach the agent.
+    # Clear the grid first: model and effort are fixed when a process starts, so the
+    # policy only gets a say when a lane is BORN — with a lane already live the sentence
+    # correctly goes to it instead.
+    foreach ($s in @($d.slots | Where-Object { -not $_.empty })) { Dodona @("lane-stop", "$($s.lane)") | Out-Null }
+    Start-Sleep -Seconds 2
+    TypeInDispatcher "@haiku @low say fix the spelling in the readme"
+    Start-Sleep -Seconds 3
+    $d = Dump
+    $spellLane = @($d.slots | Where-Object { -not $_.empty -and $_.title -eq 'SPELLING' })
+    Check 'override_lane_started' ($spellLane.Count -eq 1) (($d.slots | Where-Object { -not $_.empty } | ForEach-Object { $_.title }) -join ',')
+    $delivered = ($spellLane[0].lines -join '|')
+    Check 'override_tokens_stripped_from_prompt' ($delivered -match 'fix the spelling' -and $delivered -notmatch '@haiku' -and $delivered -notmatch '@low') $delivered
+    $choice = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$root\.dodona\store.db')
+r = db.execute('''SELECT detail FROM events WHERE kind='policy_choice' ORDER BY id DESC LIMIT 1''').fetchone()
+print(r[0] if r else 'none')
+") | Out-String
+    Check 'override_recorded_in_causal_chain' ($choice -match 'haiku/low' -and $choice -match 'overridden=True') $choice
+    Check 'choice_announced_to_operator' ((@($d.feed | Where-Object { $_.lane -eq 'SPELLING' -and $_.body -match 'haiku/low' })).Count -ge 1) ($d.feed | ConvertTo-Json -Compress)
+
     Dodona @("ui", "screenshot", "--out", "$out\after-typing.png") | Out-Null
     Dodona @("ui", "close") | Out-Null
     Dodona @("stop-daemon") | Out-Null

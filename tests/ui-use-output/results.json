@@ -13,5 +13,13 @@
     "second_message_delivered":  "PASS",
     "undo_stops_the_lane":  "PASS",
     "undo_keeps_the_transcript":  "PASS",
-    "typing_after_undo_starts_a_fresh_lane":  "PASS"
+    "typing_after_undo_starts_a_fresh_lane":  "PASS",
+    "policy_table_is_inspectable":  "PASS",
+    "policy_picks_cheap_for_mechanical":  "PASS",
+    "policy_picks_max_for_design":  "PASS",
+    "policy_default_is_opus_high":  "PASS",
+    "override_lane_started":  "PASS",
+    "override_tokens_stripped_from_prompt":  "PASS",
+    "override_recorded_in_causal_chain":  "PASS",
+    "choice_announced_to_operator":  "PASS"
 }

@@ -31,7 +31,7 @@ async Task<int> Dispatch() => cmd switch
 {
     "version" => Version(),
     "daemon" => await Daemon.RunAsync(Path.GetFullPath(root), instanceId, ctlPipe, opts.ContainsKey("successor")),
-    "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), model = One("model"), childArgs = Many("child-arg") }),
+    "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), model = One("model"), effort = One("effort"), childArgs = Many("child-arg") }),
     "lane-stop" => Client(new { cmd = "lane-stop", lane = long.Parse(pos[0]) }),
     "say" => Client(new { cmd = "say", lane = long.Parse(pos[0]), text = pos[1] }),
     "tail" => Client(new { cmd = "tail", lane = long.Parse(pos[0]), n = pos.Count > 1 ? int.Parse(pos[1]) : 20 }),
@@ -44,8 +44,8 @@ async Task<int> Dispatch() => cmd switch
     "tickets" => Client(new { cmd = "tickets" }),
     "focus" => Client(new { cmd = "focus", lane = long.Parse(pos[0]) }),
     "input" => Client(new { cmd = "input", text = string.Join(" ", pos) }),
-    "router-start" => Client(new { cmd = "router-start", child = One("child"), model = One("model") ?? "haiku" }),
-    "ticket-agent" => Client(new { cmd = "ticket-agent", ticket = long.Parse(pos[0]), child = One("child"), model = One("model") ?? "sonnet" }),
+    "router-start" => Client(new { cmd = "router-start", child = One("child"), model = One("model"), effort = One("effort") }),
+    "ticket-agent" => Client(new { cmd = "ticket-agent", ticket = long.Parse(pos[0]), child = One("child"), model = One("model"), effort = One("effort") }),
     "token-request" => Client(new { cmd = "token-request", ticket = long.Parse(pos[0]), lease = int.Parse(One("lease") ?? "120") }),
     "token-renew" => Client(new { cmd = "token-renew", ticket = long.Parse(pos[0]), lease = int.Parse(One("lease") ?? "120") }),
     "token-release" => Client(new { cmd = "token-release", ticket = long.Parse(pos[0]) }),
@@ -54,6 +54,7 @@ async Task<int> Dispatch() => cmd switch
     "ack" => Client(new { cmd = "ack", id = long.Parse(pos[0]) }),
     "undo-route" => Client(new { cmd = "undo-route", id = long.Parse(pos[0]) }),
     "ui" => Ui(),
+    "policy" => Client(new { cmd = "policy", text = string.Join(" ", pos) }),
     "repo-status" => Client(new { cmd = "repo-status" }),
     "repo-init" => Client(new { cmd = "repo-init", adopt = opts.ContainsKey("adopt") }),
     "publish" => Publish(),
@@ -307,6 +308,10 @@ static void Help() => Console.WriteLine("""
       dodona lane-start --title <T> [--model sonnet] [--child <exe> [--child-arg <a>]...]
               no --child means a real claude lane in the project (no ticket, no claim gate)
       dodona say <lane> <text> | tail <lane> [n] | status
+    model & effort (§9):
+      dodona policy                         (the table: defaults, rules, override syntax)
+      dodona policy <text>                  (what that sentence would run as, and why)
+              override in any prompt: @opus @max <text>
     project setup:
       dodona repo-status                    (is this folder a repo? what is inside it?)
       dodona repo-init [--adopt]            (--adopt commits the files already there)

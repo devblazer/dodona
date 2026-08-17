@@ -20,6 +20,27 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
 | Published builds | `%LOCALAPPDATA%\Dodona\bin\<stamp>` (or `$env:DODONA_BIN_ROOT`) |
 | Agent session files (Claude Code's own) | `$env:CLAUDE_CONFIG_DIR\projects\<cwd-slug>\<session-id>.jsonl` |
 
+## Model and effort (§9)
+
+Every lane is its own `claude -p` process and inherits **nothing** from anyone's
+interactive session — before this existed, no effort level was passed at all. Now:
+
+- **Defaults** (in `dodona.json`, falling back to built-ins): `model` `opus`, `effort`
+  `high`; the router runs `routerModel` `haiku` / `routerEffort` `low`. An empty string
+  for an effort means "don't pass the flag".
+- **A policy table** picks per prompt when the daemon starts a lane for typed input:
+  first matching rule wins, else the default. The built-in table is three rules
+  (mechanical→haiku/low, tests→sonnet/medium, design-tier→opus/max); a project can
+  replace it with a `policy` array of `{when, model, effort, why}` regex rules.
+- **The operator overrides anywhere**: `@opus @max <text>` at the front of any prompt.
+  Tokens are stripped before the agent sees the sentence.
+- `dodona policy` prints the table; `dodona policy <text>` prints what that sentence
+  would run as, and why. Every choice is an event (`policy_choice`) and is announced in
+  the pane it started.
+- **Model and effort are fixed at process start.** An override aimed at a lane that is
+  already running is answered with exactly that, not silently ignored. `lane-start`,
+  `ticket-agent` and `router-start` accept `--model`/`--effort`.
+
 ## Workspaces and repositories
 
 A project root is a **workspace**: it anchors identity (one store, one daemon, one grid,
