@@ -1,3 +1,3 @@
-daemon pid=42364 build=1.0.0+20260817210930 schema=6 exe=C:\Users\devbl\AppData\Local\Temp\dodona-bin-47a02aa0\20260817-211026\dodona.exe
-lane 1  SKY         role=work    state=alive  connected=True  presence=idle              session=fake-0e415fee1cf74806af8cd7fc593d68cf
+daemon pid=37468 build=1.0.0+20260817212135 schema=6 exe=C:\Users\devbl\AppData\Local\Temp\dodona-bin-75af1a0c\20260817-212416\dodona.exe
+lane 1  SKY         role=work    state=alive  connected=True  presence=idle              session=fake-2265e24401cf4684987cd391cbcbfb48
 lane 2  DODONA      role=dispatcher  state=alive  connected=False  presence=system            session=-

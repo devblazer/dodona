@@ -12,11 +12,15 @@ starts that project's daemon itself, and needs no environment variables:
 
 ```powershell
 dotnet build Dodona.sln -c Release
-# publish all three executables into one folder (%LOCALAPPDATA%\Dodona\bin\<stamp>)
-.\src\Dodona\bin\Release\net8.0\dodona.exe publish --project . --root .
-# then launch the app from that folder
-& "$env:LOCALAPPDATA\Dodona\bin\<stamp>\DodonaUi.exe"
+# publish all three executables into one folder, and put Dodona on the desktop
+.\src\Dodona\bin\Release\net8.0\dodona.exe publish --project . --all --shortcut
 ```
+
+That installs to `%LOCALAPPDATA%\Dodona\bin\<stamp>\` and creates **Dodona** on the
+desktop. Each publish lands in a fresh versioned folder — Windows locks the image of a
+running exe, so in-place replacement is impossible — and once the shortcut exists, every
+later publish re-points it at the newest build automatically. Publishing into an
+overridden `DODONA_BIN_ROOT` (as the acceptance tests do) never touches it.
 
 The picker lists recent projects with live status (`running` / `idle` / `new`), and
 **Browse…** adds one — any git repository will do; tickets are branches and lanes are

@@ -113,6 +113,7 @@ int Publish()
 
     var newExe = Path.Combine(outDir, "dodona.exe");
     if (!File.Exists(newExe)) return Fail($"published, but {newExe} is missing");
+    Shortcut(outDir);
 
     var targets = opts.ContainsKey("all") ? Instance.LiveCtlPipes() : new List<string> { ctlPipe };
     if (targets.Count == 0) { Console.WriteLine($"published {newExe}; no daemon running to swap"); return 0; }
@@ -125,6 +126,46 @@ int Publish()
         worst = Math.Max(worst, code);
     }
     return worst;
+}
+
+/// <summary>
+/// Keep the desktop shortcut pointing at the newest build. Every publish lands in a new
+/// versioned directory (Windows locks a running image, so in-place is impossible) and old
+/// ones are garbage-collected — which would leave a fixed shortcut dangling after the
+/// first hot swap. So: `--shortcut` creates it once, and after that every publish
+/// refreshes it automatically, but only if it already exists. Opt in once, stays correct
+/// forever, and no publish ever writes to the desktop uninvited.
+/// </summary>
+void Shortcut(string outDir)
+{
+    // Only ever repoint the shortcut at a build in the REAL install location. A publish
+    // into an overridden DODONA_BIN_ROOT is a test or an experiment — the acceptance
+    // suite publishes into a temp directory and then deletes it, which would leave the
+    // desktop icon aimed at nothing.
+    var defaultBinRoot = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Dodona", "bin");
+    if (!Path.GetFullPath(outDir).StartsWith(Path.GetFullPath(defaultBinRoot), StringComparison.OrdinalIgnoreCase))
+        return;
+
+    var lnk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Dodona.lnk");
+    if (!opts.ContainsKey("shortcut") && !File.Exists(lnk)) return;
+
+    var target = Path.Combine(outDir, "DodonaUi.exe");
+    if (!File.Exists(target)) { Console.Error.WriteLine($"note: no DodonaUi.exe in {outDir}; shortcut left alone"); return; }
+    try
+    {
+        // A .lnk is a COM shell object; PowerShell is the shortest honest way to write one.
+        var ps = $"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}');" +
+                 $"$s.TargetPath='{target}';$s.WorkingDirectory='{outDir}';" +
+                 $"$s.Description='Dodona — multi-agent orchestrator';$s.Save()";
+        var psi = new System.Diagnostics.ProcessStartInfo("powershell")
+        { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-Command", ps }) psi.ArgumentList.Add(a);
+        using var p = System.Diagnostics.Process.Start(psi)!;
+        p.WaitForExit(15000);
+        Console.WriteLine(p.ExitCode == 0 ? $"desktop shortcut → {target}" : "note: could not write the desktop shortcut");
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"note: could not write the desktop shortcut: {ex.Message}"); }
 }
 
 // The ui verbs (§17) talk to the UI process, not the daemon — the UI testifies about
@@ -215,7 +256,7 @@ static (string? cmd, string root, Dictionary<string, List<string>> opts, List<st
 {
     // Valueless flags must be declared: otherwise `--json` at the end of a line is
     // indistinguishable from a positional argument, and silently becomes one.
-    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt" };
+    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut" };
 
     string? cmd = null;
     string root = Environment.CurrentDirectory;
@@ -265,7 +306,8 @@ static void Help() => Console.WriteLine("""
       dodona token-request <ticket> [--lease sec] | token-renew | token-release | token-status
       dodona land <ticket>
     hot swap (§13/§14 — nothing interrupted, no session lost):
-      dodona publish [--project <dir>] [--all] [--exe <prebuilt>] [--mode now]
+      dodona publish [--project <dir>] [--all] [--exe <prebuilt>] [--mode now] [--shortcut]
+              --shortcut puts Dodona on the desktop; later publishes keep it current
       dodona swap <new dodona.exe> [--mode now] | swap-answer <now|when-it-lands|hold>
       dodona swaps
     ui (§8/§17 — talks to the DodonaUi process, not the daemon):

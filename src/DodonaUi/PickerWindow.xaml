@@ -46,7 +46,7 @@
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>
-                <TextBlock x:Name="EmptyHint" Text="No projects yet — Browse… for a git repository to work in."
+                <TextBlock x:Name="EmptyHint" Text="No projects yet — Browse… for a folder to work in. It does not need a git repository yet."
                            FontSize="12" Foreground="#FF4A4F57" HorizontalAlignment="Center" VerticalAlignment="Center"
                            Visibility="Collapsed"/>
             </Grid>
