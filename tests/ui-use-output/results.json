@@ -1,0 +1,17 @@
+﻿{
+    "starts_empty":  "PASS",
+    "typing_does_not_error":  "PASS",
+    "typing_never_tells_you_to_use_the_cli":  "PASS",
+    "a_lane_now_exists":  "PASS",
+    "lane_named_from_the_text":  "PASS",
+    "lane_is_focused":  "PASS",
+    "the_message_was_delivered":  "PASS",
+    "the_agent_answered":  "PASS",
+    "creation_is_announced":  "PASS",
+    "announcement_offers_undo":  "PASS",
+    "second_sentence_reuses_the_lane":  "PASS",
+    "second_message_delivered":  "PASS",
+    "undo_stops_the_lane":  "PASS",
+    "undo_keeps_the_transcript":  "PASS",
+    "typing_after_undo_starts_a_fresh_lane":  "PASS"
+}

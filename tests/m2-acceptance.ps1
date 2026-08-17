@@ -74,10 +74,12 @@ try {
     $tail = Dodona @("tail", "$water", "10")
     Check 'focus_message_delivered' ($tail -match 'make the waves taller') $tail
 
-    # ---- no focus, no prefix, no router -> honest error ----
+    # ---- a stale focus is not a dead end: pick a live lane and say so (§11) ----
+    # (was: assert an error. Refusing to route a sentence because the focused lane no
+    # longer exists is the machine asking permission to do the obvious thing.)
     Dodona @("focus", "999") | Out-Null
     $r = Dodona @("input", "orphan text")
-    Check 'unroutable_is_honest_error' ($DODONA_EXIT -ne 0 -and $r -match 'no focused lane') $r
+    Check 'stale_focus_falls_back_to_a_live_lane' ($DODONA_EXIT -eq 0 -and $r -match '-> (WATER|SKY)') $r
 
     # ---- routing_decisions rows recorded ----
     $rows = (python -c "

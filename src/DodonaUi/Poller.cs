@@ -48,10 +48,21 @@ sealed class Poller
         var badges = _reader.Badges();
         var focusedLane = long.TryParse(_reader.Kv("focused_lane"), out var f) ? f : -1;
 
-        // Sticky slot assignment: first-seen work lane takes the lowest free slot, keeps it.
+        // Sticky slot assignment: first-seen work lane takes the lowest free slot, keeps it
+        // for as long as it lives, and never moves when a neighbour goes (§8).
+        //
+        // A lane the operator STOPPED leaves the grid and frees its slot — undo has to
+        // look like undo, and with six slots the grid cannot be a graveyard. Its rows are
+        // untouched in the store, so `tail` and the overlay still have the whole
+        // transcript. A lane that went UNREACHABLE stays visible on purpose: that one is
+        // a problem to notice, not a decision you made.
         var slots = new PaneSnap?[6];
         var tray = new List<string>();
-        foreach (var l in lanes.Where(l => l.Role == "work").OrderBy(l => l.Id))
+        var shown = lanes.Where(l => l.Role == "work" && l.State != "dead").ToList();
+        foreach (var goneId in _slotOf.Keys.Where(id => shown.All(l => l.Id != id)).ToList())
+            _slotOf.Remove(goneId);
+
+        foreach (var l in shown.OrderBy(l => l.Id))
         {
             if (!_slotOf.TryGetValue(l.Id, out var slot))
             {

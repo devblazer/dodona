@@ -13,11 +13,26 @@ string instanceId = Instance.Id(root);
 string ctlPipe = Instance.CtlPipe(instanceId);
 string uiPipe = Instance.UiPipe(instanceId);
 
-return cmd switch
+// A missing or malformed argument is a usage mistake, not a crash. Without this a bare
+// `dodona lane-stop` threw an unhandled IndexOutOfRange and printed a stack trace at the
+// operator — which is also exactly what an agent would see when it gets a command
+// slightly wrong, and a stack trace is a terrible thing to try to recover from.
+try
+{
+    return await Dispatch();
+}
+catch (ArgumentOutOfRangeException) { return Usage(); }
+catch (IndexOutOfRangeException) { return Usage(); }
+catch (FormatException) { return Fail($"{cmd}: a numeric argument was expected"); }
+
+int Usage() => Fail($"{cmd}: missing an argument — see `dodona` with no arguments for usage");
+
+async Task<int> Dispatch() => cmd switch
 {
     "version" => Version(),
     "daemon" => await Daemon.RunAsync(Path.GetFullPath(root), instanceId, ctlPipe, opts.ContainsKey("successor")),
-    "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), childArgs = Many("child-arg") }),
+    "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), model = One("model"), childArgs = Many("child-arg") }),
+    "lane-stop" => Client(new { cmd = "lane-stop", lane = long.Parse(pos[0]) }),
     "say" => Client(new { cmd = "say", lane = long.Parse(pos[0]), text = pos[1] }),
     "tail" => Client(new { cmd = "tail", lane = long.Parse(pos[0]), n = pos.Count > 1 ? int.Parse(pos[1]) : 20 }),
     "status" => Client(new { cmd = "status" }),
@@ -289,7 +304,8 @@ static void Help() => Console.WriteLine("""
       dodona daemon [--root <path>] [--successor]
       dodona version [--json]
     lanes:
-      dodona lane-start --title <T> --child <agent exe> [--child-arg <a>]...
+      dodona lane-start --title <T> [--model sonnet] [--child <exe> [--child-arg <a>]...]
+              no --child means a real claude lane in the project (no ticket, no claim gate)
       dodona say <lane> <text> | tail <lane> [n] | status
     project setup:
       dodona repo-status                    (is this folder a repo? what is inside it?)

@@ -1,0 +1,44 @@
+<Window x:Class="DodonaUi.StartLaneWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Start a lane" Width="620" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Background="#FF17191D" FontFamily="Segoe UI" Foreground="#FFD8DCE0">
+    <StackPanel Margin="22">
+        <TextBlock Text="Start a lane" FontSize="22" FontWeight="Light"/>
+        <TextBlock x:Name="Sub" Margin="0,2,0,16" FontSize="12" Foreground="#FF8A9099" TextWrapping="Wrap"
+                   Text="A lane is a conversation with an agent. One word is best — it becomes the pane's name."/>
+
+        <TextBlock Text="Name" FontSize="11" Foreground="#FF8A9099" Margin="0,0,0,3"/>
+        <TextBox x:Name="NameBox" FontSize="15" Padding="7,5" Background="#FF262A30" Foreground="#FFD8DCE0"
+                 BorderBrush="#FF3A3E44" CaretBrush="#FFD8DCE0" CharacterCasing="Upper"/>
+
+        <CheckBox x:Name="TicketBox" Margin="0,16,0,0" Foreground="#FFD8DCE0" Checked="Ticket_Toggled" Unchecked="Ticket_Toggled">
+            <TextBlock TextWrapping="Wrap">
+                <Run Text="Work on a ticket" FontWeight="SemiBold"/>
+                <Run Text="— its own branch and worktree, and a gate that blocks writes outside the claim below."
+                     Foreground="#FF8A9099"/>
+            </TextBlock>
+        </CheckBox>
+
+        <StackPanel x:Name="ClaimPanel" Margin="24,10,0,0" Visibility="Collapsed">
+            <TextBlock Text="Claims — what this ticket is allowed to touch" FontSize="11" Foreground="#FF8A9099" Margin="0,0,0,3"/>
+            <TextBox x:Name="ClaimBox" FontSize="13" Padding="7,5" Background="#FF262A30" Foreground="#FFD8DCE0"
+                     BorderBrush="#FF3A3E44" CaretBrush="#FFD8DCE0" FontFamily="Consolas"/>
+            <TextBlock Margin="0,4,0,0" FontSize="11" Foreground="#FF6B7079" TextWrapping="Wrap"
+                       Text="One per line or space-separated: subtree:src/ui   path:src/app.cs   new:src/ui/settings.cs   symbol:SettingsDialog"/>
+            <TextBlock x:Name="RepoNote" Margin="0,6,0,0" FontSize="11" Foreground="#FF8A9099" TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <TextBlock x:Name="Problem" Margin="0,14,0,0" FontSize="12" Foreground="#FFE0A96D"
+                   TextWrapping="Wrap" Visibility="Collapsed"/>
+
+        <DockPanel Margin="0,20,0,0" LastChildFill="False">
+            <TextBlock x:Name="Busy" DockPanel.Dock="Left" FontSize="12" Foreground="#FF6FA8DC" VerticalAlignment="Center"/>
+            <Button DockPanel.Dock="Right" x:Name="StartBtn" Content="Start" Click="Start_Click" Padding="26,7"
+                    Background="#FF4FC3F7" Foreground="#FF10131A" BorderThickness="0" FontSize="13" FontWeight="SemiBold" IsDefault="True"/>
+            <Button DockPanel.Dock="Right" Content="Cancel" Click="Cancel_Click" Margin="0,0,8,0" Padding="16,7"
+                    Background="#FF31363D" Foreground="#FFD8DCE0" BorderThickness="0" FontSize="13" IsCancel="True"/>
+        </DockPanel>
+    </StackPanel>
+</Window>

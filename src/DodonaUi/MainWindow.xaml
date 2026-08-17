@@ -116,11 +116,17 @@
                 </Border>
 
                 <TextBlock Grid.Row="2" Text="{Binding TrayText}" FontSize="11" Foreground="#FF8A9099" Margin="4,6,0,0"/>
+                <!-- wraps: a status line that matters is usually the one too long to fit -->
                 <TextBlock Grid.Row="3" Text="{Binding Status}" FontSize="11" Foreground="#FF6FA8DC" Margin="4,4,0,4"
-                           TextTrimming="CharacterEllipsis"/>
-                <TextBox Grid.Row="4" x:Name="InputBox" FontSize="13" Padding="6,4" Background="#FF262A30"
-                         Foreground="#FFD8DCE0" BorderBrush="#FF3A3E44" CaretBrush="#FFD8DCE0"
-                         KeyDown="Input_KeyDown"/>
+                           TextWrapping="Wrap" MaxHeight="60"/>
+                <Grid Grid.Row="4">
+                    <TextBox x:Name="InputBox" FontSize="13" Padding="6,4" Background="#FF262A30"
+                             Foreground="#FFD8DCE0" BorderBrush="#FF3A3E44" CaretBrush="#FFD8DCE0"
+                             KeyDown="Input_KeyDown" TextChanged="Input_TextChanged"/>
+                    <TextBlock x:Name="InputHint" IsHitTestVisible="False" Margin="8,0,0,0" FontSize="12"
+                               Foreground="#FF5A6069" VerticalAlignment="Center"
+                               Text="Say what you want done — Enter"/>
+                </Grid>
             </Grid>
         </Grid>
 

@@ -7,6 +7,6 @@
     "tier0_message_delivered":  "PASS",
     "focus_routes_optimistically":  "PASS",
     "focus_message_delivered":  "PASS",
-    "unroutable_is_honest_error":  "PASS",
+    "stale_focus_falls_back_to_a_live_lane":  "PASS",
     "routing_rows_recorded":  "PASS"
 }

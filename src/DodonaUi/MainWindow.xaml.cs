@@ -186,7 +186,8 @@ public partial class MainWindow : Window
 
     void Pane_Click(object sender, MouseButtonEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext is not PaneView p || p.IsEmpty) return;
+        if ((sender as FrameworkElement)?.DataContext is not PaneView p) return;
+        if (p.IsEmpty) { StartLane(); e.Handled = true; return; }   // an empty slot is an invitation
         Send(new { cmd = "focus", lane = p.LaneId });
         e.Handled = true;
     }
@@ -209,9 +210,26 @@ public partial class MainWindow : Window
         if (e.Key != Key.Enter) return;
         var text = InputBox.Text.Trim();
         if (text.Length == 0) return;
+
+        // Always sends. If there is nowhere to route, the daemon starts a lane and says
+        // so — the UI does not get to invent a dialog for that, because deciding where
+        // work goes is the system's job, not a form for the operator to fill in.
         InputBox.Clear();
         Send(new { cmd = "input", text });
     }
+
+    void StartLane(string? suggestedName = null, string? firstMessage = null)
+    {
+        var dlg = new StartLaneWindow(_instanceId, suggestedName, firstMessage) { Owner = this };
+        if (dlg.ShowDialog() != true || dlg.StartedLane < 0) return;
+        _poller.Invalidate();
+        if (firstMessage is { Length: > 0 })
+            Send(new { cmd = "say", lane = dlg.StartedLane, text = firstMessage });
+    }
+
+
+    void Input_TextChanged(object sender, TextChangedEventArgs e) =>
+        InputHint.Visibility = InputBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
 
     void Window_KeyDown(object sender, KeyEventArgs e)
     {

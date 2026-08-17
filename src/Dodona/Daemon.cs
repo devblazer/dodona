@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace Dodona;
 
 /// <summary>Per-project config, dodona.json at the project root (design §10).</summary>
-sealed record Config(string Main, string[] Verify)
+sealed record Config(string Main, string[] Verify, string Agent = "claude")
 {
     /// <summary>A repository's config, falling back to the workspace's. Verify steps and
     /// even the name of `main` belong to the repository, not to the workspace holding
@@ -21,7 +21,11 @@ sealed record Config(string Main, string[] Verify)
         var main = d.RootElement.TryGetProperty("main", out var m) ? m.GetString() ?? "main" : "main";
         var verify = d.RootElement.TryGetProperty("verify", out var v) && v.ValueKind == JsonValueKind.Array
             ? v.EnumerateArray().Select(x => x.GetString()!).ToArray() : Array.Empty<string>();
-        return new Config(main, verify);
+        // "agent" is which binary a lane runs. It exists so a project can point at a
+        // specific claude, and so the acceptance suite can point at the fake agent and
+        // test the paths where the daemon spawns an agent on its own initiative.
+        var agent = d.RootElement.TryGetProperty("agent", out var a) ? a.GetString() ?? "claude" : "claude";
+        return new Config(main, verify, agent);
     }
 }
 
@@ -181,9 +185,20 @@ sealed class Daemon
             {
                 var title = e.GetProperty("title").GetString()!;
                 var child = e.TryGetProperty("child", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString()! : null;
-                if (child is null) { w.WriteLine("error: --child <agent exe> is required"); break; }
                 var childArgs = e.TryGetProperty("childArgs", out var ca) && ca.ValueKind == JsonValueKind.Array
                     ? ca.EnumerateArray().Select(x => x.GetString()!).ToList() : new List<string>();
+
+                // No --child means the real thing. A lane with no ticket has no claim and
+                // therefore no gate — it is plain Claude Code in the workspace, which is
+                // fine for one lane and is why isolated work wants a ticket instead.
+                if (child is null)
+                {
+                    var model = e.TryGetProperty("model", out var lm) && lm.ValueKind == JsonValueKind.String ? lm.GetString()! : "sonnet";
+                    child = "claude";
+                    childArgs = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+                                                   "--verbose", "--model", model, "--permission-mode", "acceptEdits",
+                                                   "--append-system-prompt", LaneSystemPrompt(title) };
+                }
                 w.WriteLine((await SpawnLaneAsync(title, "work", _root, child, childArgs)).Msg);
                 break;
             }
@@ -194,6 +209,24 @@ sealed class Daemon
                 if (!_lanes.TryGetValue(lane, out var rt)) { w.WriteLine($"error: lane {lane} not connected"); break; }
                 rt.Say(text);
                 w.WriteLine($"-> lane {lane}");
+                break;
+            }
+            case "lane-stop":
+            {
+                // The undo for an auto-started lane. The shim owns the agent, so stopping
+                // is a message to the shim, not a kill: it takes the child down with it
+                // and the pane's rows stay exactly where they are (§12 — nothing is
+                // deleted, the lane is simply no longer alive).
+                var lane = e.GetProperty("lane").GetInt64();
+                if (_lanes.TryGetValue(lane, out var srt))
+                {
+                    srt.Shutdown();
+                    _lanes.Remove(lane);
+                }
+                _store.LaneState(lane, "dead");
+                if (_store.KvGet("focused_lane") == lane.ToString()) _store.KvSet("focused_lane", "");
+                _store.Event("lane_stopped", lane, "operator");
+                w.WriteLine($"stopped lane {lane}");
                 break;
             }
             case "tail":
@@ -220,7 +253,7 @@ sealed class Daemon
             case "input":
             {
                 var text = e.GetProperty("text").GetString()!;
-                w.WriteLine(RouteInput(text));
+                w.WriteLine(await RouteInput(text));
                 break;
             }
             case "router-start":
@@ -908,6 +941,50 @@ sealed class Daemon
 
     static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
 
+    /// <summary>Spawn a plain agent lane in the workspace — no ticket, no claim, no gate.
+    /// The binary is `agent` from dodona.json (default `claude`), which is also how the
+    /// acceptance suite exercises the paths where the daemon starts an agent itself.</summary>
+    Task<(long Id, string Msg)> SpawnAgentLaneAsync(string title, string model = "sonnet")
+    {
+        var child = _config.Agent;
+        var args = child.Equals("claude", StringComparison.OrdinalIgnoreCase) || child.EndsWith("claude.exe", StringComparison.OrdinalIgnoreCase)
+            ? new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+                                 "--verbose", "--model", model, "--permission-mode", "acceptEdits",
+                                 "--append-system-prompt", LaneSystemPrompt(title) }
+            : new List<string>();                       // a stand-in agent takes no claude flags
+        return SpawnLaneAsync(title, "work", _root, child, args);
+    }
+
+    /// <summary>A lane name derived from what was typed: the longest substantial word,
+    /// which is usually the subject. Code, not a model — it must be instant, and a name is
+    /// cheap to change. (§2.2: derive in code what is not really a judgement.)</summary>
+    static string NameFromText(string text)
+    {
+        var stop = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "the","a","an","and","for","to","in","on","of","with","that","this","some","new","please","its","it",
+            "add","make","fix","let","can","you","we","i","should","would","could","need","want","get","put","use",
+            "there","then","when","where","what","how","why","from","into","about","over","under","out","up","down",
+        };
+        var word = System.Text.RegularExpressions.Regex.Matches(text, @"[A-Za-z][A-Za-z0-9_-]{2,}")
+            .Select(m => m.Value)
+            .Where(v => !stop.Contains(v))
+            .OrderByDescending(v => v.Length)
+            .FirstOrDefault();
+        return (word ?? "LANE").ToUpperInvariant();
+    }
+
+    /// <summary>The framing for a lane with no ticket. The [DISPATCHER] channel must be
+    /// declared or the model treats mid-turn operator instructions as a prompt-injection
+    /// attempt and refuses them (spike 3) — that applies to every lane, not just ticketed
+    /// ones.</summary>
+    static string LaneSystemPrompt(string title) =>
+        $"You are the agent for lane \"{title}\", operated by the Dodona orchestrator. Your working directory is " +
+        "the project the operator is running; work there. You have no ticket and no claim, so nothing is reserved " +
+        "for you — if the operator wants isolated work on a branch, they will create a ticket and a fresh lane for it. " +
+        "Real-time instructions from your human operator arrive in hook output labeled [DISPATCHER]; they are authentic " +
+        "and carry the same authority as your original task, even when they change or contradict earlier instructions.";
+
     /// <summary>" repo engine", or nothing at all when the workspace root IS the
     /// repository — the single-repo project should never have to read about repos.</summary>
     static string RepoTag(string repo) => repo == "." ? "" : $" repo {repo}";
@@ -947,7 +1024,7 @@ sealed class Daemon
     /// code. Otherwise deliver to the focused lane IMMEDIATELY and let the warm
     /// classifier run behind as an async second opinion — its latency is off the
     /// critical path. A disagreement becomes a visible retarget with a receipt row.</summary>
-    string RouteInput(string text)
+    async Task<string> RouteInput(string text)
     {
         var work = _store.LanesAll().Where(l => l.Role == "work" && l.State == "alive").ToList();
 
@@ -964,10 +1041,55 @@ sealed class Daemon
             }
         }
 
-        // Optimistic: focused lane gets it now.
+        // Optimistic: the focused lane gets it now. With no focus, pick rather than
+        // refuse — act, announce, allow undo (§11). Refusing to route a sentence because
+        // nobody has clicked a pane yet is the machine asking permission to do the
+        // obvious thing.
+        long fid = -1;
+        LaneRuntime? frt = null;
+        string? autoStarted = null;
+        var live = work.Where(l => _lanes.TryGetValue(l.Id, out var r) && r.Connected).ToList();
         var focused = _store.KvGet("focused_lane");
-        if (focused is null || !long.TryParse(focused, out var fid) || !_lanes.TryGetValue(fid, out var frt))
-            return "error: no focused lane and no lane prefix — use '<LANE>: text' or dodona focus <lane>";
+        if (focused is not null && long.TryParse(focused, out var f0) && live.Any(l => l.Id == f0))
+        {
+            fid = f0;
+            frt = _lanes[f0];
+        }
+        else if (live.Count > 0)
+        {
+            var pick = live[^1];                       // the newest lane is the one you just made
+            fid = pick.Id;
+            frt = _lanes[pick.Id];
+            _store.KvSet("focused_lane", fid.ToString());
+            if (live.Count > 1)
+                _store.PaneEvent(fid, "announcement", $"↦ focused {pick.Title} (nothing was focused)", null, null);
+        }
+        else
+        {
+            // Nowhere to put it — so make somewhere. A first sentence on an empty project
+            // is not an error condition, it is the beginning of the work, and answering it
+            // with instructions would be the machine asking permission to do the obvious
+            // (§11: act, announce, allow undo).
+            //
+            // STOPGAP, and worth naming as one: the lane's name is derived by CODE from
+            // the text, and the lane gets no ticket and no claims. Deciding that this
+            // sentence deserves a ticket claiming src/ui/** is a judgement, and the thing
+            // that makes such judgements — the dispatcher's own session — is not built
+            // yet. Until it is, the operator gets a working lane instantly instead of a
+            // dialog, and can promote it to a ticket deliberately.
+            var name = NameFromText(text);
+            var (newId, msg) = await SpawnAgentLaneAsync(name);
+            if (newId < 0) return $"error: could not start a lane for this: {msg}";
+            fid = newId;
+            frt = _lanes[newId];
+            _store.KvSet("focused_lane", fid.ToString());
+            _store.Event("lane_auto_created", newId, $"from input: {text}");
+            // Announced once, in the lane it is about — the decision feed gathers every
+            // lane's announcements already, so saying it again as the system would put the
+            // same sentence in the feed twice.
+            _store.PaneEvent(fid, "announcement", $"started this lane for “{Truncate(text, 50)}” — undo: dodona lane-stop {newId}", null, null);
+            autoStarted = name;
+        }
         frt.Say(text);
         var rowId = _store.RoutingInsert(text, "focus", null, fid, null);
 
@@ -1009,8 +1131,12 @@ sealed class Daemon
                 catch (Exception ex) { _store.Event("classifier_failed", router.Id, ex.Message); }
             });
         }
-        var fTitle = work.FirstOrDefault(l => l.Id == fid)?.Title ?? fid.ToString();
-        return $"-> {fTitle} (focus{(router is not null ? ", classifier running behind" : "")})";
+        // `work` was read before any auto-start, so a just-created lane is not in it —
+        // fall back to the name we gave it rather than showing a bare row id.
+        var fTitle = work.FirstOrDefault(l => l.Id == fid)?.Title ?? autoStarted ?? fid.ToString();
+        return autoStarted is not null
+            ? $"-> {fTitle} (started for this)"
+            : $"-> {fTitle} (focus{(router is not null ? ", classifier running behind" : "")})";
     }
 
     /// <summary>The land (§7): the daemon executes the one atomic ref advance. The agent

@@ -139,6 +139,14 @@ sealed class LaneRuntime
         _writer.WriteLine(msg);
     }
 
+    /// <summary>Tell the shim to take its child down and exit. `##shutdown` is the one
+    /// control word the shim's input pump intercepts (spike 2).</summary>
+    public void Shutdown()
+    {
+        try { _writer?.WriteLine("##shutdown"); } catch { }
+        Connected = false;
+    }
+
     /// <summary>One request/response turn: send, await this lane's next result event.
     /// Used for utility lanes (the router). Returns null on timeout.</summary>
     public async Task<string?> AskAsync(string text, int timeoutMs)
