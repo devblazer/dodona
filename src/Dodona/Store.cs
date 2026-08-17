@@ -299,12 +299,17 @@ sealed class Store : IDisposable
         }
     }
 
-    public bool PaneEvent(long laneId, string kind, string body, long? seq, string? raw)
+    /// <summary>`acked: true` writes a receipt — visible in the pane and the feed but
+    /// never counted as attention. A badge must mean "you are needed", not "something
+    /// happened" (docs/LANE-LIFECYCLE.md §4); a receipt for an act the system just did on
+    /// your behalf is the latter.</summary>
+    public bool PaneEvent(long laneId, string kind, string body, long? seq, string? raw, bool acked = false)
     {
         lock (_lock)
         {
             using var c = _db.CreateCommand();
-            c.CommandText = "INSERT OR IGNORE INTO pane_events(lane_id, ts, kind, body, seq, raw) VALUES ($l, $ts, $k, $b, $s, $r);";
+            c.CommandText = "INSERT OR IGNORE INTO pane_events(lane_id, ts, kind, body, seq, raw, acked) VALUES ($l, $ts, $k, $b, $s, $r, $a);";
+            c.Parameters.AddWithValue("$a", acked ? 1 : 0);
             c.Parameters.AddWithValue("$l", laneId);
             c.Parameters.AddWithValue("$ts", Now());
             c.Parameters.AddWithValue("$k", kind);

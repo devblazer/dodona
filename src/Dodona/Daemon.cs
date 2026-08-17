@@ -17,9 +17,16 @@ namespace Dodona;
 sealed record Config(string Main, string[] Verify, string Agent = "claude",
                      string Model = "opus", string Effort = "high",
                      string RouterModel = "haiku", string RouterEffort = "low",
-                     PolicyRule[]? Policy = null)
+                     PolicyRule[]? Policy = null, string[]? AllowedTools = null)
 {
     public PolicyRule[] Rules => Policy ?? Dodona.Policy.Default;
+
+    /// <summary>What a lane may run without asking, beyond edits (§2.9 made concrete —
+    /// found by dogfooding: acceptEdits covers edits but not shell, headless mode
+    /// auto-denies what it cannot ask about, so the first real lane wrote its change and
+    /// then could not build it. Claude allowedTools syntax, e.g. "Bash(dotnet build:*)".
+    /// Empty means edits only, which is the safe default for a repo you do not know.</summary>
+    public string[] Allowed => AllowedTools ?? Array.Empty<string>();
 
     /// <summary>A repository's config, falling back to the workspace's. Verify steps and
     /// even the name of `main` belong to the repository, not to the workspace holding
@@ -41,6 +48,10 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
         var agent = d.RootElement.TryGetProperty("agent", out var a) ? a.GetString() ?? "claude" : "claude";
         string Str(string key, string fallback) =>
             d.RootElement.TryGetProperty(key, out var x) && x.ValueKind == JsonValueKind.String ? x.GetString() ?? fallback : fallback;
+        string[]? allowed = null;
+        if (d.RootElement.TryGetProperty("allowedTools", out var at) && at.ValueKind == JsonValueKind.Array)
+            allowed = at.EnumerateArray().Select(x => x.GetString()!).Where(x => x.Length > 0).ToArray();
+
         PolicyRule[]? policy = null;
         if (d.RootElement.TryGetProperty("policy", out var p) && p.ValueKind == JsonValueKind.Array)
             policy = p.EnumerateArray().Select(r => new PolicyRule(
@@ -51,7 +62,7 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
 
         return new Config(main, verify, agent,
             Str("model", "opus"), Str("effort", "high"),
-            Str("routerModel", "haiku"), Str("routerEffort", "low"), policy);
+            Str("routerModel", "haiku"), Str("routerEffort", "low"), policy, allowed);
     }
 }
 
@@ -991,12 +1002,19 @@ sealed class Daemon
     /// <summary>The argv every claude lane is started with — one place, so model and
     /// effort are policy rather than four scattered literals. `--effort` is omitted when
     /// blank so a project can opt out of setting it at all.</summary>
-    static List<string> ClaudeArgs(string model, string effort, string systemPrompt, bool acceptEdits)
+    List<string> ClaudeArgs(string model, string effort, string systemPrompt, bool acceptEdits)
     {
         var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                                       "--verbose", "--model", model };
         if (!string.IsNullOrWhiteSpace(effort)) { args.Add("--effort"); args.Add(effort); }
         if (acceptEdits) { args.Add("--permission-mode"); args.Add("acceptEdits"); }
+        if (acceptEdits && _config.Allowed.Length > 0)
+        {
+            // Work lanes get the project's allowlist; the router never does — it has no
+            // business running anything.
+            args.Add("--allowedTools");
+            args.Add(string.Join(",", _config.Allowed));
+        }
         args.Add("--append-system-prompt");
         args.Add(systemPrompt);
         return args;
@@ -1166,7 +1184,8 @@ sealed class Daemon
             // lane's announcements already, so saying it again as the system would put the
             // same sentence in the feed twice.
             _store.PaneEvent(fid, "announcement",
-                $"started this lane on {choice.Describe} for “{Truncate(text, 45)}” — undo: dodona lane-stop {newId}", null, null);
+                $"started this lane on {choice.Describe} for “{Truncate(text, 45)}” — undo: dodona lane-stop {newId}",
+                null, null, acked: true);   // a receipt: it badged the lane the instant it was born, which was a lie
             autoStarted = name;
         }
         frt.Say(text);

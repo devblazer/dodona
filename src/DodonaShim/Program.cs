@@ -34,6 +34,12 @@ var psi = new ProcessStartInfo(args[1])
     RedirectStandardError = true,
     UseShellExecute = false,
     WorkingDirectory = Environment.CurrentDirectory,
+    // Claude speaks UTF-8; .NET's default for redirected stdio is the OEM codepage, so
+    // without these every em dash the model types is stored as mojibake ("ΓÇö").
+    // Found by dogfooding: the first real lane's transcript came back garbled.
+    StandardOutputEncoding = System.Text.Encoding.UTF8,
+    StandardErrorEncoding = System.Text.Encoding.UTF8,
+    StandardInputEncoding = new System.Text.UTF8Encoding(false),   // no BOM into the child
 };
 for (int i = 2; i < args.Length; i++) psi.ArgumentList.Add(args[i]);
 var child = Process.Start(psi)!;

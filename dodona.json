@@ -1,0 +1,12 @@
+{
+  "main": "main",
+  "verify": ["dotnet build Dodona.sln -c Release -warnaserror"],
+  "model": "opus",
+  "effort": "high",
+  "allowedTools": [
+    "Bash(dotnet build:*)", "Bash(dotnet test:*)", "Bash(dotnet run:*)", "Bash(dotnet publish:*)",
+    "PowerShell(dotnet build:*)", "PowerShell(dotnet test:*)", "PowerShell(dotnet run:*)", "PowerShell(dotnet publish:*)",
+    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
+    "PowerShell(git status:*)", "PowerShell(git diff:*)", "PowerShell(git log:*)"
+  ]
+}

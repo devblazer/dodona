@@ -41,14 +41,18 @@ function Dump() { Dodona @('ui', 'dump') | ConvertFrom-Json }
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms
 $AE = [System.Windows.Automation.AutomationElement]
 
-# Match the window by prefix, never by its full title: the title contains an em dash, and
-# a literal one in this file is read as ANSI by PS 5.1 and breaks the parser.
+# Match THIS test's window by its project name — never a bare 'Dodona*' prefix, which
+# grabs whichever Dodona window enumerates first, including the operator's own live one.
+# (It did: the suite once seized the user's open session mid-dogfood.) The title's em
+# dash still can't appear literally here — PS 5.1 reads this file as ANSI — so wildcard
+# around the project leaf instead.
 function TypeInDispatcher([string]$text) {
+    $leaf = Split-Path $root -Leaf
     $all = $AE::RootElement.FindAll('Children',
         (New-Object System.Windows.Automation.PropertyCondition $AE::ControlTypeProperty, ([System.Windows.Automation.ControlType]::Window)))
     $win = $null
-    foreach ($w in $all) { if ($w.Current.Name -like 'Dodona*' -and $w.Current.Name.Length -gt 'Dodona'.Length) { $win = $w; break } }
-    if (-not $win) { throw "no Dodona grid window found" }
+    foreach ($w in $all) { if ($w.Current.Name -like "Dodona*$leaf") { $win = $w; break } }
+    if (-not $win) { throw "no Dodona grid window titled for $leaf" }
     $box = $win.FindFirst('Descendants',
         (New-Object System.Windows.Automation.PropertyCondition $AE::ControlTypeProperty, ([System.Windows.Automation.ControlType]::Edit)))
     if (-not $box) { throw "no input box in the window" }

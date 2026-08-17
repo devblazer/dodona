@@ -119,28 +119,14 @@
                 <!-- wraps: a status line that matters is usually the one too long to fit -->
                 <TextBlock Grid.Row="3" Text="{Binding Status}" FontSize="11" Foreground="#FF6FA8DC" Margin="4,4,0,4"
                            TextWrapping="Wrap" MaxHeight="60"/>
-                <!-- What you say to the dispatcher is a paragraph, not a command line: the box
-                     holds several lines, grows with what you type, and the grip drags its floor
-                     taller. The pixels come out of the feed — the only star row in this column —
-                     so the lane grid never reflows (§8). -->
-                <DockPanel Grid.Row="4">
-                    <Border DockPanel.Dock="Top" Height="7" Background="Transparent" Cursor="SizeNS"
-                            ToolTip="Drag to resize — double-click to reset"
-                            MouseLeftButtonDown="Grip_Down" MouseMove="Grip_Move" MouseLeftButtonUp="Grip_Up">
-                        <Rectangle Width="30" Height="2" RadiusX="1" RadiusY="1" Fill="#FF4A4F57"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </Border>
-                    <Grid>
-                        <TextBox x:Name="InputBox" FontSize="13" Padding="6,4" Background="#FF262A30"
-                                 Foreground="#FFD8DCE0" BorderBrush="#FF3A3E44" CaretBrush="#FFD8DCE0"
-                                 AcceptsReturn="True" TextWrapping="Wrap" MinHeight="76" MaxHeight="196"
-                                 VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top"
-                                 KeyDown="Input_KeyDown" TextChanged="Input_TextChanged"/>
-                        <TextBlock x:Name="InputHint" IsHitTestVisible="False" Margin="8,7,8,0" FontSize="12"
-                                   Foreground="#FF5A6069" VerticalAlignment="Top" TextWrapping="Wrap"
-                                   Text="Say what you want done — Enter sends, Shift+Enter is a new line"/>
-                    </Grid>
-                </DockPanel>
+                <Grid Grid.Row="4">
+                    <TextBox x:Name="InputBox" FontSize="13" Padding="6,4" Background="#FF262A30"
+                             Foreground="#FFD8DCE0" BorderBrush="#FF3A3E44" CaretBrush="#FFD8DCE0"
+                             KeyDown="Input_KeyDown" TextChanged="Input_TextChanged"/>
+                    <TextBlock x:Name="InputHint" IsHitTestVisible="False" Margin="8,0,0,0" FontSize="12"
+                               Foreground="#FF5A6069" VerticalAlignment="Center"
+                               Text="Say what you want done — Enter"/>
+                </Grid>
             </Grid>
         </Grid>
 
