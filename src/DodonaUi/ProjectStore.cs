@@ -15,8 +15,8 @@ public sealed record ProjectEntry(string Path, string LastOpened)
 {
     public string Name => System.IO.Path.GetFileName(Path.TrimEnd('\\', '/')) is { Length: > 0 } n ? n : Path;
     public bool Exists => Directory.Exists(Path);
-    public bool IsGitRepo => Directory.Exists(System.IO.Path.Combine(Path, ".git")) ||
-                             File.Exists(System.IO.Path.Combine(Path, ".git"));   // worktree checkouts use a file
+    public bool IsGitRepo => RepoScan.IsRepoRoot(Path);
+    public bool IsWorkspace => !IsGitRepo && RepoScan.FindNested(Path).Count > 0;
     public bool HasStore => File.Exists(System.IO.Path.Combine(Path, ".dodona", "store.db"));
     public bool IsLive => Instance.IsLive(Instance.Id(Path));
 }

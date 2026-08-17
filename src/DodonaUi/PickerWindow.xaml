@@ -64,6 +64,11 @@
             <Button DockPanel.Dock="Right" x:Name="OpenBtn" Content="Open" Click="Open_Click" Padding="26,7"
                     Background="#FF4FC3F7" Foreground="#FF10131A" BorderThickness="0" FontSize="13" FontWeight="SemiBold"
                     IsEnabled="False"/>
+            <!-- git is not required to OPEN a project — only to cut a ticket's branch and
+                 worktree. So a folder without one is offered a repo, never a closed door. -->
+            <Button DockPanel.Dock="Right" x:Name="InitBtn" Content="Create repository…" Click="Init_Click" Margin="0,0,8,0"
+                    Padding="14,7" Background="#FF31363D" Foreground="#FFD8DCE0" BorderThickness="0" FontSize="13"
+                    Visibility="Collapsed"/>
         </DockPanel>
     </Grid>
 </Window>

@@ -22,12 +22,18 @@ public partial class PickerWindow : Window
         public string Name => Entry.Name;
         public string Path => Entry.Path;
         public string Detail => Entry.Exists ? $"{Entry.Path}    ·    opened {Entry.LastOpened}" : $"{Entry.Path}    ·    MISSING";
-        public string Status => !Entry.Exists ? "gone" : Entry.IsLive ? "running" : !Entry.IsGitRepo ? "not git" : Entry.HasStore ? "idle" : "new";
+        public string Status => !Entry.Exists ? "gone"
+            : Entry.IsLive ? "running"
+            : Entry.IsWorkspace ? "workspace"
+            : !Entry.IsGitRepo ? "no repo"
+            : Entry.HasStore ? "idle" : "new";
         public Brush StatusBrush => Status switch
         {
             "running" => new SolidColorBrush(Color.FromRgb(0x81, 0xC7, 0x84)),
             "idle" => new SolidColorBrush(Color.FromRgb(0x8A, 0x90, 0x99)),
             "new" => new SolidColorBrush(Color.FromRgb(0x4F, 0xC3, 0xF7)),
+            "workspace" => new SolidColorBrush(Color.FromRgb(0xBA, 0x68, 0xC8)),
+            "no repo" => new SolidColorBrush(Color.FromRgb(0xE0, 0xA9, 0x6D)),   // a note, not an error
             _ => new SolidColorBrush(Color.FromRgb(0xE5, 0x73, 0x73)),
         };
         public Brush NameBrush => Entry.Exists ? Brushes.White : new SolidColorBrush(Color.FromRgb(0x8A, 0x90, 0x99));
@@ -54,10 +60,38 @@ public partial class PickerWindow : Window
         var row = Selected;
         OpenBtn.IsEnabled = row is not null && row.Entry.Exists;
         ForgetBtn.IsEnabled = row is not null;
-        Warn(row is null ? null
-            : !row.Entry.Exists ? "That folder no longer exists."
-            : !row.Entry.IsGitRepo ? "Not a git repository. Dodona needs git — tickets are branches and lanes are worktrees."
-            : null);
+        // Offered when there is no repo to use — but never inside someone else's repo,
+        // where a nested one would be a mess to undo and never what was meant.
+        InitBtn.Visibility = row is not null && row.Entry.Exists
+            && (!RepoScan.IsRepoRoot(row.Path) || !RepoScan.LooksCommitted(row.Path))
+            && RepoScan.EnclosingRepo(row.Path) is null
+            ? Visibility.Visible : Visibility.Collapsed;
+        Warn(row is null ? null : Describe(row.Path));
+    }
+
+    /// <summary>Say what this folder is and what will happen — never bar the door. Git is
+    /// needed when a ticket cuts a branch and a worktree, which may be much later than
+    /// now, and a workspace whose repos live one level down is a normal shape.</summary>
+    static string? Describe(string path)
+    {
+        if (!Directory.Exists(path)) return "That folder no longer exists.";
+        if (RepoScan.IsRepoRoot(path))
+            return RepoScan.LooksCommitted(path) ? null
+                : "This repository has no commits yet, so there is no branch to work from. Create repository… makes the first one.";
+
+        if (RepoScan.EnclosingRepo(path) is string outer)
+            return $"This is inside the repository {outer}. Open that as the project instead — " +
+                   "claims, branches and the merge queue all belong to the repository, not to a folder within it.";
+
+        var nested = RepoScan.FindNested(path);
+        if (nested.Count > 0)
+            return $"A workspace: not a repository itself, but it contains {nested.Count} " +
+                   $"({string.Join(", ", nested.Take(4).Select(r => Path.GetRelativePath(path, r)))}" +
+                   $"{(nested.Count > 4 ? ", …" : "")}). Open it to run lanes across the whole workspace now; " +
+                   "tickets branch a repository, so today they need one of those opened as the project.";
+
+        return "No git repository here yet — that is fine. Open it and start working; " +
+               "git is needed when a ticket cuts a branch, and Create repository… does that whenever you like.";
     }
 
     void Warn(string? text)
@@ -90,15 +124,40 @@ public partial class PickerWindow : Window
         if (Selected is Row row) Open(row.Path);
     }
 
+    /// <summary>Create the repository the selected folder is missing. The daemon does the
+    /// git — git is the daemon's business (§12) — so this starts one first.</summary>
+    void Init_Click(object sender, RoutedEventArgs e)
+    {
+        if (Selected is not Row row || !row.Entry.Exists) return;
+        var root = Instance.Canonical(row.Path);
+        var hasFiles = RepoScan.HasContent(root);
+
+        var question = hasFiles
+            ? $"Create a git repository in\n{root}\n\nThe files already there will be committed as the initial commit, " +
+              "and .dodona/ will be added to .gitignore.\n\nChoose No to create the repository with an empty first " +
+              "commit instead, leaving those files untracked."
+            : $"Create a git repository in\n{root}\n\nIt will start on 'main' with an empty initial commit, " +
+              "and .dodona/ will be added to .gitignore.";
+
+        var answer = MessageBox.Show(question, "Dodona",
+            hasFiles ? MessageBoxButton.YesNoCancel : MessageBoxButton.OKCancel, MessageBoxImage.Question);
+        if (answer is MessageBoxResult.Cancel or MessageBoxResult.None) return;
+        var adopt = hasFiles && answer == MessageBoxResult.Yes;
+
+        IsEnabled = false;
+        Warn("Creating the repository…");
+        var id = Instance.Id(root);
+        var reason = DaemonClient.Ensure(root, id);
+        var result = reason ?? DaemonClient.Send(id, new { cmd = "repo-init", adopt });
+        IsEnabled = true;
+        Warn(result);
+        Refresh();
+    }
+
     void Open(string path)
     {
         if (!Directory.Exists(path)) { Warn("That folder does not exist."); return; }
         var root = Instance.Canonical(path);
-        if (!Directory.Exists(Path.Combine(root, ".git")) && !File.Exists(Path.Combine(root, ".git")))
-        {
-            Warn($"{root} is not a git repository. Run `git init` there first — Dodona's tickets are branches and its lanes are worktrees.");
-            return;
-        }
 
         // Already open? Show that window instead of racing it for the UI pipe.
         var id = Instance.Id(root);

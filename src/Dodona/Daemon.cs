@@ -259,6 +259,31 @@ sealed class Daemon
                 }
                 if (claims.Count == 0) { w.WriteLine("error: at least one --claim required"); break; }
 
+                // Git is needed HERE — at the first branch and worktree — not at the door.
+                // A project can be opened, and lanes can run in it, long before it has a
+                // repo; refusing to open would be refusing too early (and for too long).
+                if (!Git.IsRepo(_root))
+                {
+                    var nested = Git.FindRepos(_root);
+                    w.WriteLine($"error: {_root} is not a git repository, and a ticket is a branch + worktree");
+                    if (nested.Count > 0)
+                    {
+                        w.WriteLine($"       it does contain {nested.Count} repositor{(nested.Count == 1 ? "y" : "ies")}:");
+                        foreach (var r in nested) w.WriteLine($"         {Path.GetRelativePath(_root, r)}");
+                        w.WriteLine("       open one of those as the project, or see `dodona repo-init` to make this folder itself a repo");
+                    }
+                    else w.WriteLine("       run `dodona repo-init` to create one here (lanes work meanwhile; only tickets need git)");
+                    w.WriteLine("##exit 1");
+                    break;
+                }
+                if (!Git.HasCommit(_root))
+                {
+                    w.WriteLine($"error: {_root} is a git repository with no commits, so there is no '{_config.Main}' to branch from");
+                    w.WriteLine("       run `dodona repo-init` to make the first commit");
+                    w.WriteLine("##exit 1");
+                    break;
+                }
+
                 var (id, conflicts) = _store.TicketCreate(null, title, mode, claims);
                 if (id < 0)
                 {
@@ -450,6 +475,67 @@ sealed class Daemon
                 if (!landOk) w.WriteLine("##exit 1");
                 break;
             }
+            case "repo-status":
+            {
+                // What the picker (and anyone else) needs to know before offering a fix.
+                var isRepo = Git.IsRepo(_root);
+                var nested = isRepo ? new List<string>() : Git.FindRepos(_root);
+                var entries = Directory.Exists(_root)
+                    ? Directory.EnumerateFileSystemEntries(_root).Where(p => Path.GetFileName(p) is not ".dodona" and not ".git").Take(1).Count()
+                    : 0;
+                w.WriteLine(JsonSerializer.Serialize(new
+                {
+                    root = _root,
+                    isRepo,
+                    hasCommit = isRepo && Git.HasCommit(_root),
+                    empty = entries == 0,
+                    nested = nested.Select(r => Path.GetRelativePath(_root, r)).ToList(),
+                    main = _config.Main,
+                }));
+                break;
+            }
+            case "repo-init":
+            {
+                if (Git.IsRepo(_root) && Git.HasCommit(_root)) { w.WriteLine($"error: {_root} is already a git repository with commits"); break; }
+                var adopt = e.TryGetProperty("adopt", out var ad) && ad.ValueKind == JsonValueKind.True;
+
+                if (!Git.IsRepo(_root))
+                {
+                    var (ic, io) = Git.Run(_root, "init", "-b", _config.Main);
+                    if (ic != 0) { w.WriteLine($"error: git init failed: {io}"); w.WriteLine("##exit 1"); break; }
+                    w.WriteLine($"initialized empty repository on '{_config.Main}'");
+                }
+
+                // Dodona's own state is never repo content: worktrees, the store and the
+                // deployed gate files all live under .dodona/ and would otherwise be
+                // committed by an agent's `git add -A` (the bug M1's test caught).
+                var ignore = Path.Combine(_root, ".gitignore");
+                var ignoreText = File.Exists(ignore) ? File.ReadAllText(ignore) : "";
+                if (!ignoreText.Split('\n').Any(l => l.Trim() == ".dodona/"))
+                {
+                    File.AppendAllText(ignore, (ignoreText.Length > 0 && !ignoreText.EndsWith("\n") ? "\n" : "") + ".dodona/\n");
+                    w.WriteLine("added .dodona/ to .gitignore");
+                }
+
+                if (!Git.HasCommit(_root))
+                {
+                    // An empty repo has no branch, so no worktree can be cut from it. What
+                    // goes into the first commit is the user's call, not ours: adopt takes
+                    // the files that are already here, otherwise the commit is empty and
+                    // they stay untracked.
+                    if (adopt) Git.Run(_root, "add", "-A");
+                    var args = new List<string> { "commit", "-m", adopt ? "Initial commit" : "Initial commit (empty)" };
+                    if (!adopt) args.Insert(1, "--allow-empty");
+                    var (cc, co) = Git.Run(_root, args.ToArray());
+                    if (cc != 0) { w.WriteLine($"error: initial commit failed: {co}"); w.WriteLine("##exit 1"); break; }
+                    w.WriteLine(adopt ? "committed the existing files as the initial commit" : "made an empty initial commit; existing files left untracked");
+                }
+                _store.Event("repo_init", null, $"{_root} main={_config.Main} adopt={adopt}");
+                Announce($"[dodona] git repository ready on '{_config.Main}' — tickets can branch now");
+                w.WriteLine($"ready: {_root} is a git repository on '{_config.Main}'");
+                break;
+            }
+
             // ---------------- hot swap (M4, §13/§14) ----------------
             case "swap":
             {

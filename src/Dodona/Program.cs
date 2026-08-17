@@ -38,6 +38,8 @@ return cmd switch
     "ack" => Client(new { cmd = "ack", id = long.Parse(pos[0]) }),
     "undo-route" => Client(new { cmd = "undo-route", id = long.Parse(pos[0]) }),
     "ui" => Ui(),
+    "repo-status" => Client(new { cmd = "repo-status" }),
+    "repo-init" => Client(new { cmd = "repo-init", adopt = opts.ContainsKey("adopt") }),
     "publish" => Publish(),
     "swap" => Client(new { cmd = "swap", exe = Path.GetFullPath(pos[0]), mode = One("mode") ?? "ask" }),
     "swap-answer" => Client(new { cmd = "swap-answer", answer = pos[0] }),
@@ -212,7 +214,7 @@ static (string? cmd, string root, Dictionary<string, List<string>> opts, List<st
 {
     // Valueless flags must be declared: otherwise `--json` at the end of a line is
     // indistinguishable from a positional argument, and silently becomes one.
-    var boolFlags = new HashSet<string> { "json", "successor", "all" };
+    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt" };
 
     string? cmd = null;
     string root = Environment.CurrentDirectory;
@@ -247,6 +249,9 @@ static void Help() => Console.WriteLine("""
     lanes:
       dodona lane-start --title <T> --child <agent exe> [--child-arg <a>]...
       dodona say <lane> <text> | tail <lane> [n] | status
+    project setup:
+      dodona repo-status                    (is this folder a repo? what is inside it?)
+      dodona repo-init [--adopt]            (--adopt commits the files already there)
     tickets & claims (§6/§11):
       dodona ticket-create --title <T> --claim <spec>... [--mode on-approval|auto]
               spec: path:<file> | new:<file> | subtree:<dir> | symbol:<name>
