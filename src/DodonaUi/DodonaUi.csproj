@@ -26,6 +26,11 @@
          would mean two merge tokens), while the UI stays runtime-decoupled and
          disposable (§13). -->
     <Compile Include="..\Dodona\Instance.cs" Link="Instance.cs" />
+    <!-- Ver too, and for the same reason: the UI is its own build with its own hot swap
+         (§13), so it has to be able to say which build it is. Ver.Build reads
+         typeof(Ver).Assembly, so compiled in here it reports the UI's identity, not the
+         daemon's — which is the whole point when the two can differ. -->
+    <Compile Include="..\Dodona\Ver.cs" Link="Ver.cs" />
   </ItemGroup>
 
 </Project>

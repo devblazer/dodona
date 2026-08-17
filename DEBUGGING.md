@@ -214,13 +214,52 @@ WAL reads, all writes via the daemon's control pipe. It answers on its own pipe
 ```
 dodona ui dump --root <root>                     # panes/badges/presence/feed/toasts as JSON
 dodona ui screenshot [--pane WATER] --out <png>  # self-rendered, always 1600x900 full-window
-dodona ui pose <full|badges|blocked|feed|empty-slot|tray|overlay>   # deterministic fixtures
+dodona ui pose <full|badges|blocked|feed|empty-slot|tray|overlay|long>  # deterministic fixtures
 dodona ui pose live                              # resume store polling
 dodona ui overlay <PANE|off> | dodona ui close
 ```
 
 Most "does the UI show X" questions are text questions — ask `ui dump` and read JSON.
-Screenshots are for layout and visual judgment only. A dump reflects the live view
+Screenshots are for layout and visual judgment only. `pose long` is the one to reach for
+when judging legibility: it is the only fixture with more transcript than a pane has
+pixels, and lines longer than a pane is wide.
+
+A pane row's `kind` is rendered as colour — `you>` blue, `agent>` violet, `✓` green, `·`
+amber, `wire`/`system` dim mono. In the decision feed every row is an announcement, so
+colour there means **lane**: the title is tinted with the lane's slot colour (same one as
+its pane chip). Rows from the **dispatcher lane are the system's own voice** and get the
+oak's trunk colour with a *round* chip — Dodona is not a seventh lane, and shape says so
+where a hue could be mistaken for one. A grey square chip means a work lane with no grid
+slot (it is in the tray).
+
+`ui dump` is unaffected by any of this: `lines` stays an array of `prefix + body` strings,
+because what the UI testifies to must not change shape because it got prettier.
+
+**The UI hot-swaps too, separately from the daemon.** Windows locks a running image, so
+a published UI used to sit on disk while the operator kept looking at the old window —
+a swapped daemon behind a stale window is indistinguishable from nothing having happened.
+`dodona publish` now swaps the daemon and *then* refreshes every live UI, so a UI change
+shows up without closing anything.
+
+The UI handoff is much cheaper than the daemon's: a UI owns no lanes, no agents and no
+store writes — its only exclusive resource is its pipe. So the protocol is just:
+
+```
+dodona ui update <DodonaUi.exe>     # what publish sends; also usable by hand
+```
+
+1. the incumbent opens `dodona-<instance>-uihandoff` and spawns `<exe> --root <root> --successor`
+2. the successor builds its window, then says `ready <build>` on that pipe — "ready" means
+   the new build actually runs, so a binary that cannot open a window never takes over
+3. the incumbent replies and exits, releasing `dodona-<instance>-ui`
+4. the successor's pipe loop (`--successor` ⇒ retry for 15s instead of "already running")
+   binds it and takes over
+
+Same safety rule as the daemon: **if the successor never answers, the existing window
+stays** and the verb reports why. Failure modes: `error: successor never connected`
+(new binary died before showing a window — nothing changed), or the successor exiting
+with the "Another Dodona UI is already running" box (the incumbent did not exit; its
+pipe was never freed). A dump reflects the live view
 model, so after mutating the store give the 250ms poller a beat (~500ms) before asking.
 `dodona ack <pane_event_id>` clears a feed row's badge; `dodona undo-route <decision_id>`
 marks the routing row undone and sends a `[DISPATCHER]` retraction to the lane that

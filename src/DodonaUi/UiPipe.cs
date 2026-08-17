@@ -12,8 +12,12 @@ namespace DodonaUi;
 /// </summary>
 static class UiPipe
 {
-    public static void Start(string pipeName, MainWindow win) => Task.Run(async () =>
+    /// <param name="awaitPredecessor">This UI is a successor mid-handoff: the outgoing UI
+    /// still owns the pipe and is about to exit, so a taken name is expected for a moment
+    /// rather than a second window competing for one root. Retry instead of complaining.</param>
+    public static void Start(string pipeName, MainWindow win, bool awaitPredecessor = false) => Task.Run(async () =>
     {
+        var waitedMs = 0;
         while (true)
         {
             NamedPipeServerStream server;
@@ -21,9 +25,19 @@ static class UiPipe
             {
                 server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
                     PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                waitedMs = 0;
             }
             catch
             {
+                // Handoff: the name frees the instant the outgoing process exits, which is
+                // some tens of ms after it says go. 15s is far past that and still finite,
+                // so a successor whose predecessor never dies fails loudly.
+                if (awaitPredecessor && waitedMs < 15000)
+                {
+                    await Task.Delay(100);
+                    waitedMs += 100;
+                    continue;
+                }
                 // Another UI already owns this root — one grid per store (§14).
                 await win.Dispatcher.BeginInvoke(() =>
                 {

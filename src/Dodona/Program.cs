@@ -141,14 +141,28 @@ int Publish()
     Shortcut(outDir);
 
     var targets = opts.ContainsKey("all") ? Instance.LiveCtlPipes() : new List<string> { ctlPipe };
-    if (targets.Count == 0) { Console.WriteLine($"published {newExe}; no daemon running to swap"); return 0; }
-
     int worst = 0;
+    if (targets.Count == 0) Console.WriteLine($"published {newExe}; no daemon running to swap");
     foreach (var target in targets)
     {
         Console.WriteLine($"— swapping instance on {target}");
         var code = Client(new { cmd = "swap", exe = newExe, mode = One("mode") ?? "ask" }, target);
         worst = Math.Max(worst, code);
+    }
+
+    // The UI is its own process and its own build. Swapping only the daemon leaves the
+    // operator looking at the old window — which is exactly what "nothing happened" looks
+    // like, and is how a published UI change goes unnoticed. Refresh windows too.
+    // Deliberately after the daemon: the new UI should come up against the new daemon.
+    var newUiExe = Path.Combine(outDir, "DodonaUi.exe");
+    if (File.Exists(newUiExe))
+    {
+        var uiTargets = opts.ContainsKey("all") ? Instance.LiveUiPipes() : new List<string> { uiPipe };
+        foreach (var target in uiTargets.Where(t => Instance.LiveUiPipes().Contains(t, StringComparer.OrdinalIgnoreCase)))
+        {
+            Console.WriteLine($"— updating UI on {target}");
+            worst = Math.Max(worst, Client(new { verb = "update", exe = newUiExe }, target));
+        }
     }
     return worst;
 }
@@ -197,13 +211,14 @@ void Shortcut(string outDir)
 // what it is actually showing. Same line protocol, different pipe.
 int Ui()
 {
-    if (pos.Count == 0) return Fail("ui verb required: dump | screenshot | pose <name> | overlay <PANE|off> | close");
+    if (pos.Count == 0) return Fail("ui verb required: dump | screenshot | pose <name> | overlay <PANE|off> | update <exe> | close");
     return pos[0] switch
     {
         "dump" => Client(new { verb = "dump" }, uiPipe),
         "screenshot" => Client(new { verb = "screenshot", @out = Path.GetFullPath(One("out") ?? "dodona-ui.png"), pane = One("pane") }, uiPipe),
         "pose" => pos.Count > 1 ? Client(new { verb = "pose", name = pos[1] }, uiPipe) : Fail("ui pose <name|live>"),
         "overlay" => pos.Count > 1 ? Client(new { verb = "overlay", pane = pos[1] }, uiPipe) : Fail("ui overlay <PANE|off>"),
+        "update" => pos.Count > 1 ? Client(new { verb = "update", exe = Path.GetFullPath(pos[1]) }, uiPipe) : Fail("ui update <DodonaUi.exe>"),
         "close" => Client(new { verb = "close" }, uiPipe),
         _ => Fail($"unknown ui verb: {pos[0]}"),
     };
@@ -338,11 +353,12 @@ static void Help() => Console.WriteLine("""
     hot swap (§13/§14 — nothing interrupted, no session lost):
       dodona publish [--project <dir>] [--all] [--exe <prebuilt>] [--mode now] [--shortcut]
               --shortcut puts Dodona on the desktop; later publishes keep it current
+              swaps live daemons, then refreshes live UIs (they are separate processes)
       dodona swap <new dodona.exe> [--mode now] | swap-answer <now|when-it-lands|hold>
       dodona swaps
     ui (§8/§17 — talks to the DodonaUi process, not the daemon):
       dodona ui dump | ui screenshot [--pane <PANE>] --out <png> | ui pose <name|live>
-      dodona ui overlay <PANE|off> | ui close
+      dodona ui overlay <PANE|off> | ui update <DodonaUi.exe> | ui close
       dodona ack <pane_event_id> | undo-route <routing_decision_id>
       dodona stop-daemon
     All commands accept --root <path> (default: cwd).

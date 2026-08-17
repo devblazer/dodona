@@ -1,3 +1,6 @@
+using System.IO;                 // explicit: this file also compiles into the WPF project,
+                                 // whose implicit usings are narrower than the console one's
+
 namespace Dodona;
 
 /// <summary>

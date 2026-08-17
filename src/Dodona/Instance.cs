@@ -53,18 +53,27 @@ static class Instance
     public static string CtlPipe(string id) => $"dodona-{id}-ctl";
     public static string UiPipe(string id) => $"dodona-{id}-ui";
     public static string HandoffPipe(string id) => $"dodona-{id}-handoff";
+    public static string UiHandoffPipe(string id) => $"dodona-{id}-uihandoff";
     public static string LanePipe(string id, long laneId) => $"dodona-{id}-lane{laneId}";
 
     /// <summary>Every instance running right now, found the way Windows lets you: the
     /// pipe namespace is a directory. No shared registry, no lock file, nothing global
     /// (§14) — liveness is read off the OS instead of stored.</summary>
-    public static List<string> LiveCtlPipes()
+    public static List<string> LiveCtlPipes() => LivePipes("-ctl");
+
+    /// <summary>Every UI running right now. A UI is a separate process from its daemon
+    /// and can outlive or predate it, so publish has to find them the same way and
+    /// refresh them separately (§13) — a swapped daemon behind a stale window is the one
+    /// combination that looks like nothing happened.</summary>
+    public static List<string> LiveUiPipes() => LivePipes("-ui");
+
+    static List<string> LivePipes(string suffix)
     {
         try
         {
             return Directory.GetFiles(@"\\.\pipe\")
                 .Select(Path.GetFileName)
-                .Where(n => n is not null && n.StartsWith("dodona-") && n.EndsWith("-ctl"))
+                .Where(n => n is not null && n.StartsWith("dodona-") && n.EndsWith(suffix))
                 .Select(n => n!)
                 .Distinct()
                 .ToList();

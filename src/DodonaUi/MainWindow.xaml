@@ -7,6 +7,64 @@
         KeyDown="Window_KeyDown" MouseLeftButtonDown="Window_Drag">
     <!-- WindowStyle=None: the content IS the window, so screenshots are exactly
          1600x900 on every machine — the capture loop must be deterministic (§17). -->
+    <Window.Resources>
+        <!-- The stock scrollbar is a light-grey slab with arrow buttons: on a dark pane it
+             reads as chrome competing with the text. This one is an 8px rail that only
+             shows when there is somewhere to go. Every scroller here is vertical-only. -->
+        <Style TargetType="ScrollBar">
+            <Setter Property="Width" Value="8"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Grid Background="Transparent">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb>
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Border x:Name="Bar" CornerRadius="3" Margin="2,0"
+                                                        Background="#FF444B55"/>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Bar" Property="Background" Value="#FF6B7482"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                                <!-- click-the-rail still pages; it just has no chrome -->
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.PageDownCommand" Opacity="0" Focusable="False"/>
+                                </Track.IncreaseRepeatButton>
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.PageUpCommand" Opacity="0" Focusable="False"/>
+                                </Track.DecreaseRepeatButton>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- One transcript row, shared by the pane and the overlay. Wraps (a truncated
+             line is an unreadable line), and carries the speaker as colour: a left rule
+             and a bold prefix in the speaker's ink, the body in a matching tone. FontSize
+             is inherited from the host so the overlay can render the same rows larger. -->
+        <DataTemplate x:Key="TranscriptLine">
+            <Border Margin="0,1" Padding="7,3,6,4" CornerRadius="3"
+                    Background="{Binding RowBrush}"
+                    BorderBrush="{Binding AccentBrush}" BorderThickness="2,0,0,0">
+                <TextBlock TextWrapping="Wrap" Foreground="{Binding BodyBrush}"
+                           FontFamily="{Binding FaceValue}"
+                           LineHeight="16" LineStackingStrategy="BlockLineHeight"><Run
+                        Text="{Binding Prefix, Mode=OneWay}" FontWeight="Bold"
+                        Foreground="{Binding AccentBrush}"/><Run Text="{Binding Body, Mode=OneWay}"/></TextBlock>
+            </Border>
+        </DataTemplate>
+    </Window.Resources>
+
     <Grid x:Name="Root" Background="#FF17191D">
         <Grid Margin="8">
             <Grid.ColumnDefinitions>
@@ -47,18 +105,20 @@
                                         <TextBlock Text="{Binding BadgeText, Mode=OneWay}" FontSize="11" Foreground="White" FontWeight="Bold"/>
                                     </Border>
                                     <TextBlock DockPanel.Dock="Right" Text="{Binding Presence, Mode=OneWay}" FontSize="11"
-                                               Foreground="#FF8A9099" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                               Foreground="#FF9BA3AD" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                 </DockPanel>
 
-                                <!-- body: replay of the last N pane_events rows -->
-                                <ItemsControl Grid.Row="1" ItemsSource="{Binding Lines}" Visibility="{Binding BodyVisibility}">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <TextBlock Text="{Binding Mode=OneWay}" FontSize="12" FontFamily="Consolas"
-                                                       Foreground="#FFB9BFC7" TextTrimming="CharacterEllipsis"/>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
+                                <!-- body: replay of the last N pane_events rows. It scrolls — a pane
+                                     holds more transcript than it has pixels, and the answer to that
+                                     is a scrollbar, not an ellipsis. Follows the tail unless the
+                                     operator has scrolled up (Transcript_ScrollChanged). -->
+                                <ScrollViewer Grid.Row="1" Visibility="{Binding BodyVisibility}"
+                                              VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                              PanningMode="VerticalOnly" ScrollChanged="Transcript_ScrollChanged">
+                                    <ItemsControl ItemsSource="{Binding Lines}" TextElement.FontSize="12"
+                                                  ItemTemplate="{StaticResource TranscriptLine}"/>
+                                </ScrollViewer>
 
                                 <!-- an empty slot stays a slot -->
                                 <TextBlock Grid.Row="0" Grid.RowSpan="2" Text="— empty slot —" FontSize="12"
@@ -97,15 +157,19 @@
                         <ItemsControl ItemsSource="{Binding Feed}" Margin="6">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Border Margin="0,2" Padding="6,4" Background="#FF262A30" CornerRadius="4" Opacity="{Binding RowOpacity}">
+                                    <Border Margin="0,2" Padding="6,4" Background="#FF262A30" CornerRadius="4" Opacity="{Binding RowOpacity}"
+                                            BorderBrush="{Binding ChipBrush}" BorderThickness="2,0,0,0">
                                         <DockPanel>
-                                            <Rectangle DockPanel.Dock="Left" Width="8" Height="8" RadiusX="2" RadiusY="2"
+                                            <!-- round chip = Dodona itself, square = a lane (ChipRadius) -->
+                                            <Rectangle DockPanel.Dock="Left" Width="8" Height="8"
+                                                       RadiusX="{Binding ChipRadius}" RadiusY="{Binding ChipRadius}"
                                                        Fill="{Binding ChipBrush}" Margin="0,4,6,0" VerticalAlignment="Top"/>
                                             <Button DockPanel.Dock="Right" Content="ack" FontSize="10" Padding="6,0" Margin="6,0,0,0"
                                                     VerticalAlignment="Top" Visibility="{Binding AckVisibility}"
                                                     Click="Feed_Ack" Background="#FF31363D" Foreground="#FFD8DCE0" BorderThickness="0"/>
                                             <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="#FFC6CCD4">
-                                                <Run FontWeight="Bold" Text="{Binding LaneTitle, Mode=OneWay}"/><Run Text="  "/><Run Text="{Binding Body, Mode=OneWay}"/>
+                                                <Run FontWeight="Bold" Text="{Binding LaneTitle, Mode=OneWay}"
+                                                     Foreground="{Binding ChipBrush}"/><Run Text="  "/><Run Text="{Binding Body, Mode=OneWay}"/>
                                             </TextBlock>
                                         </DockPanel>
                                     </Border>
@@ -145,15 +209,11 @@
                         <TextBlock DockPanel.Dock="Right" Text="Esc to restore" FontSize="11" Foreground="#FF8A9099"
                                    HorizontalAlignment="Right" VerticalAlignment="Center"/>
                     </DockPanel>
-                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-                        <ItemsControl ItemsSource="{Binding OverlayPane.Lines, FallbackValue={x:Null}}">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <TextBlock Text="{Binding Mode=OneWay}" FontSize="13" FontFamily="Consolas"
-                                               Foreground="#FFC6CCD4" TextWrapping="Wrap"/>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled" PanningMode="VerticalOnly"
+                                  ScrollChanged="Overlay_ScrollChanged">
+                        <ItemsControl ItemsSource="{Binding OverlayPane.Lines, FallbackValue={x:Null}}"
+                                      TextElement.FontSize="13" ItemTemplate="{StaticResource TranscriptLine}"/>
                     </ScrollViewer>
                 </Grid>
             </Border>

@@ -75,12 +75,20 @@ sealed class Poller
                 badges.GetValueOrDefault(l.Id),
                 l.Presence.StartsWith("waiting on you", StringComparison.OrdinalIgnoreCase),
                 l.Id == focusedLane,
-                _reader.Tail(l.Id, 12));
+                // 12 was what fitted a pane that could not scroll. It can now, so a pane
+                // carries real scrollback — bounded, because this whole snapshot is
+                // serialized and compared every 250ms.
+                _reader.Tail(l.Id, 40));
         }
 
         var laneTitle = lanes.ToDictionary(l => l.Id, l => l.Title);
+        // By role, not by title: "the system speaking in its own voice" is what the
+        // dispatcher role MEANS, and matching the string "DODONA" would only work until
+        // someone renamed it.
+        var laneRole = lanes.ToDictionary(l => l.Id, l => l.Role);
         var feed = _reader.Feed(30)
-            .Select(x => new FeedSnap(x.Id, laneTitle.GetValueOrDefault(x.LaneId, $"lane {x.LaneId}"), x.Ts, x.Body, x.Acked))
+            .Select(x => new FeedSnap(x.Id, laneTitle.GetValueOrDefault(x.LaneId, $"lane {x.LaneId}"), x.Ts, x.Body,
+                                      x.Acked, laneRole.GetValueOrDefault(x.LaneId) == "dispatcher"))
             .ToList();
 
         PaneSnap? overlay = null;
@@ -90,7 +98,7 @@ sealed class Poller
             if (l is not null)
                 overlay = new PaneSnap(l.Id, l.Title, l.State, l.Presence, badges.GetValueOrDefault(l.Id),
                     l.Presence.StartsWith("waiting on you", StringComparison.OrdinalIgnoreCase),
-                    l.Id == focusedLane, _reader.Tail(l.Id, 40, all: true));
+                    l.Id == focusedLane, _reader.Tail(l.Id, 120, all: true));
         }
 
         return new Snapshot(slots, tray, feed, overlay);

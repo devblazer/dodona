@@ -12,10 +12,100 @@ namespace DodonaUi;
 public record LineSnap(string Kind, string Body);
 public record PaneSnap(long LaneId, string Title, string State, string Presence, int Badge,
                        bool Blocked, bool Focused, List<LineSnap> Lines);
-public record FeedSnap(long Id, string LaneTitle, string Ts, string Body, bool Acked);
+public record FeedSnap(long Id, string LaneTitle, string Ts, string Body, bool Acked, bool IsSystem);
 public record Snapshot(PaneSnap?[] Slots, List<string> Tray, List<FeedSnap> Feed, PaneSnap? Overlay);
 
 // ---------------------------------------------------------------- bindable views
+
+/// <summary>
+/// Who is speaking, as colour. A pane is a conversation between two parties plus a
+/// machine, and telling them apart should not require reading the prefix. Brushes are
+/// frozen and shared: a pane rebuilds on every poll, so one set for the app, never one
+/// per row per tick.
+/// </summary>
+static class Ink
+{
+    static Brush B(string hex)
+    {
+        var b = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
+        b.Freeze();
+        return b;
+    }
+
+    // accent (prefix + the left rule) · body text · row wash. The washes are deliberately
+    // near-black: they group a turn without turning the pane into a colour chart.
+    static readonly Brush YouAccent   = B("#FF7FB0F0"), YouBody   = B("#FFE6ECF4"), YouRow   = B("#FF1E2634");
+    static readonly Brush AgentAccent = B("#FFB69CF0"), AgentBody = B("#FFCCD3DB"), AgentRow = B("#FF25252F");
+    static readonly Brush DoneAccent  = B("#FF7FC98A"), DoneBody  = B("#FFAAD0AF"), DoneRow  = B("#FF1D2721");
+    static readonly Brush NoteAccent  = B("#FFE0A94E"), NoteBody  = B("#FFD9C39A"), NoteRow  = B("#FF2A2419");
+    static readonly Brush BadAccent   = B("#FFE07A7A"), BadBody   = B("#FFD9A8A8"), BadRow   = B("#FF2E1F20");
+    static readonly Brush DimAccent   = B("#FF5C636D"), DimBody   = B("#FF8B929C"), DimRow   = B("#FF212429");
+
+    // Prose in a proportional face, machine text in mono — the transcript is mostly
+    // sentences, and sentences do not read well in a 12px terminal font at pane width.
+    static readonly FontFamily Prose = new("Segoe UI"), Mono = new("Consolas");
+
+    public static Brush Accent(string kind) => kind switch
+    {
+        "user_input" => YouAccent, "agent_line" => AgentAccent, "result" => DoneAccent,
+        "announcement" => NoteAccent, "error" => BadAccent, _ => DimAccent,
+    };
+
+    public static Brush Body(string kind) => kind switch
+    {
+        "user_input" => YouBody, "agent_line" => AgentBody, "result" => DoneBody,
+        "announcement" => NoteBody, "error" => BadBody, _ => DimBody,
+    };
+
+    public static Brush Row(string kind) => kind switch
+    {
+        "user_input" => YouRow, "agent_line" => AgentRow, "result" => DoneRow,
+        "announcement" => NoteRow, "error" => BadRow, _ => DimRow,
+    };
+
+    public static FontFamily Face(string kind) => kind is "wire" or "system" ? Mono : Prose;
+
+    /// <summary>Dodona's own voice. The icon is an oak: six lane colours as leaves on one
+    /// trunk, and this is that trunk (brightened to read on the dark plate). The system is
+    /// deliberately NOT one of the six — it is what they grow from, and a feed row from
+    /// DODONA should never look like a seventh lane.</summary>
+    public static readonly Brush System = B("#FFC79A63");
+}
+
+/// <summary>One transcript row, kept as (kind, prefix, body) rather than a formatted
+/// string so the view can colour the speaker.</summary>
+public sealed class LineView
+{
+    public string Kind { get; init; } = "";
+    public string Prefix { get; init; } = "";
+    public string Body { get; init; } = "";
+
+    /// <summary>Prefix + body — byte-for-byte what the pane rendered as a single string
+    /// before it had colour. `ui dump` still emits this: colour is a view concern, and
+    /// what the UI testifies to must not change shape because it got prettier (§17).</summary>
+    public string Text => Prefix + Body;
+
+    public Brush AccentBrush => Ink.Accent(Kind);
+    public Brush BodyBrush => Ink.Body(Kind);
+    public Brush RowBrush => Ink.Row(Kind);
+    public FontFamily FaceValue => Ink.Face(Kind);
+
+    public static LineView From(LineSnap l) => new()
+    {
+        Kind = l.Kind,
+        Body = l.Body,
+        Prefix = l.Kind switch
+        {
+            "user_input" => "you> ",
+            "agent_line" => "agent> ",
+            "result" => "✓ ",
+            "announcement" => "· ",
+            _ => $"{l.Kind}> ",
+        },
+    };
+
+    public override string ToString() => Text;
+}
 
 public sealed class PaneView
 {
@@ -31,7 +121,7 @@ public sealed class PaneView
     public int Badge { get; init; }
     public bool Blocked { get; init; }
     public bool Focused { get; init; }
-    public List<string> Lines { get; init; } = new();
+    public List<LineView> Lines { get; init; } = new();
 
     public string ColorHex => Palette[Slot % Palette.Length];
     public Brush LaneBrush => new SolidColorBrush((Color)ColorConverter.ConvertFromString(ColorHex));
@@ -46,20 +136,11 @@ public sealed class PaneView
     public Visibility EmptyVisibility => IsEmpty ? Visibility.Visible : Visibility.Collapsed;
     public double TitleOpacity => State == "alive" || IsEmpty ? 1.0 : 0.45;
 
-    public static string FormatLine(LineSnap l) => l.Kind switch
-    {
-        "user_input" => $"you> {l.Body}",
-        "agent_line" => $"agent> {l.Body}",
-        "result" => $"✓ {l.Body}",
-        "announcement" => $"· {l.Body}",
-        _ => $"{l.Kind}> {l.Body}",
-    };
-
     public static PaneView From(PaneSnap s, int slot) => new()
     {
         Slot = slot, LaneId = s.LaneId, Title = s.Title, State = s.State, Presence = s.Presence,
         Badge = s.Badge, Blocked = s.Blocked, Focused = s.Focused,
-        Lines = s.Lines.Select(FormatLine).ToList(),
+        Lines = s.Lines.Select(LineView.From).ToList(),
     };
 }
 
@@ -69,9 +150,17 @@ public sealed class FeedView
     public string LaneTitle { get; init; } = "";
     public string Body { get; init; } = "";
     public bool Acked { get; init; }
+    public bool IsSystem { get; init; }
     public Brush ChipBrush { get; init; } = Brushes.Gray;
     public double RowOpacity => Acked ? 0.45 : 1.0;
     public Visibility AckVisibility => Acked ? Visibility.Collapsed : Visibility.Visible;
+
+    // Every feed row is an announcement, so colouring by kind would say nothing here —
+    // the axis that matters is WHICH LANE, and it was carried by an 8px chip alone. The
+    // name now carries it too, so the feed is scannable by lane without reading a word.
+    // Dodona's own rows are round rather than square: the system is not a seventh lane,
+    // and shape says so where a hue could still be mistaken for one.
+    public double ChipRadius => IsSystem ? 5 : 2;
 }
 
 public sealed class ToastView
@@ -127,8 +216,16 @@ public sealed class MainVm : INotifyPropertyChanged
         var titleToBrush = Slots.Where(x => !x.IsEmpty).ToDictionary(x => x.Title, x => x.LaneBrush, StringComparer.OrdinalIgnoreCase);
         Feed.Clear();
         foreach (var f in s.Feed)
-            Feed.Add(new FeedView { Id = f.Id, LaneTitle = f.LaneTitle, Body = f.Body, Acked = f.Acked,
-                                    ChipBrush = titleToBrush.TryGetValue(f.LaneTitle, out var b) ? b : Brushes.Gray });
+            Feed.Add(new FeedView
+            {
+                Id = f.Id, LaneTitle = f.LaneTitle, Body = f.Body, Acked = f.Acked, IsSystem = f.IsSystem,
+                // The dispatcher lane holds no grid slot, so it has no slot colour to look
+                // up — before this it fell through to grey, which made the system's own
+                // voice the least identifiable thing in the feed.
+                ChipBrush = f.IsSystem ? Ink.System
+                          : titleToBrush.TryGetValue(f.LaneTitle, out var b) ? b
+                          : Brushes.Gray,
+            });
 
         Tray.Clear();
         foreach (var t in s.Tray) Tray.Add(t);

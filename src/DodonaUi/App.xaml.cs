@@ -33,7 +33,9 @@ public partial class App : Application
             // the forensic mode: point a UI at a copied store and look, without summoning
             // anything. --pose implies it (a pose does not read the store at all).
             if (!e.Args.Contains("--attach") && pose is null) DaemonClient.Ensure(canonical, id);
-            var main = new MainWindow(canonical, id);
+            // --successor: launched by the UI we are replacing (§13). It still holds the ui
+            // pipe for a moment longer, and it is waiting to hear that we came up.
+            var main = new MainWindow(canonical, id, e.Args.Contains("--successor"));
             win = main;
             main.Show();
             if (pose is not null) main.ApplyPose(pose);

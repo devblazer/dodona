@@ -1,6 +1,8 @@
 using System.IO;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Dodona;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -22,7 +24,7 @@ public partial class MainWindow : Window
     /// already-open project instead of opening it twice.</summary>
     public string InstanceId => _instanceId;
 
-    public MainWindow(string root, string instanceId)
+    public MainWindow(string root, string instanceId, bool successor = false)
     {
         _root = root;
         _instanceId = instanceId;
@@ -35,8 +37,25 @@ public partial class MainWindow : Window
         _reader = new StoreReader(root);
         _poller = new Poller(_reader);
         _ = _poller.RunAsync(_vm, snap => Dispatcher.InvokeAsync(() => ApplySnapshot(snap)).Task, _cts.Token);
-        UiPipe.Start($"dodona-{instanceId}-ui", this);
+        UiPipe.Start(Instance.UiPipe(instanceId), this, successor);
+        if (successor) _ = Task.Run(SignalReadyAsync);
         Closed += (_, _) => { _cts.Cancel(); _reader.Dispose(); };
+    }
+
+    /// <summary>Tell the outgoing UI we are up (§13). Sent only once the window exists, so
+    /// "ready" means the new build actually runs — the incumbent will not stand down for a
+    /// binary that cannot open a window.</summary>
+    async Task SignalReadyAsync()
+    {
+        try
+        {
+            using var c = new NamedPipeClientStream(".", Instance.UiHandoffPipe(_instanceId),
+                                                    PipeDirection.InOut, PipeOptions.Asynchronous);
+            await c.ConnectAsync(15000);
+            var w = new StreamWriter(c) { AutoFlush = true };
+            await w.WriteLineAsync($"ready {Ver.Build} (pid {Environment.ProcessId})");
+        }
+        catch { /* nobody waiting: we were launched normally, not as a successor */ }
     }
 
     void ApplySnapshot(Snapshot snap)
@@ -83,6 +102,8 @@ public partial class MainWindow : Window
                 var pane = e.GetProperty("pane").GetString()!;
                 return SetOverlay(pane.Equals("off", StringComparison.OrdinalIgnoreCase) ? null : pane);
             }
+            case "update":
+                return Update(e.GetProperty("exe").GetString()!);
             case "close":
                 Dispatcher.BeginInvoke(() => Application.Current.Shutdown());
                 return "closing";
@@ -107,7 +128,7 @@ public partial class MainWindow : Window
                 {
                     slot = s.Slot, empty = false, lane = s.LaneId, title = s.Title, color = s.ColorHex,
                     state = s.State, presence = s.Presence, badge = s.Badge, blocked = s.Blocked,
-                    focused = s.Focused, lines = s.Lines,
+                    focused = s.Focused, lines = s.Lines.Select(l => l.Text).ToList(),
                 }).ToList(),
             tray = _vm.Tray.ToList(),
             feed = _vm.Feed.Select(f => new { id = f.Id, lane = f.LaneTitle, body = f.Body, acked = f.Acked }).ToList(),
@@ -135,6 +156,47 @@ public partial class MainWindow : Window
             return PaneGrid.ItemContainerGenerator.ContainerFromIndex(i) as FrameworkElement;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Swap this window for a newer build (§13). The daemon hot-swaps but the UI could
+    /// not: Windows locks a running image, so a published UI sat on disk while the
+    /// operator kept looking at the old one — a swapped daemon behind a stale window is
+    /// indistinguishable from nothing having happened.
+    ///
+    /// A UI handoff is far cheaper than the daemon's: this process owns no lanes, no
+    /// store writes and no agents. Its only exclusive resource is the ui pipe, so the
+    /// whole protocol is "start the new one, wait for it to say it is up, then let go".
+    /// Same safety rule as the daemon: if the successor never answers, THIS window stays.
+    /// </summary>
+    string Update(string exe)
+    {
+        if (!File.Exists(exe)) return $"error: no such UI binary: {exe}";
+        if (string.Equals(Path.GetFullPath(exe), Environment.ProcessPath, StringComparison.OrdinalIgnoreCase))
+            return $"already running {exe}";
+
+        try
+        {
+            using var server = new NamedPipeServerStream(Instance.UiHandoffPipe(_instanceId), PipeDirection.InOut, 1,
+                                                         PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+            var psi = new System.Diagnostics.ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = _root };
+            foreach (var a in new[] { "--root", _root, "--successor" }) psi.ArgumentList.Add(a);
+            using var p = System.Diagnostics.Process.Start(psi);
+
+            // Blocking the UI thread here is deliberate: nothing this window could usefully
+            // do mid-handoff, and the pipe reply must not race the shutdown below.
+            if (!server.WaitForConnectionAsync().Wait(30000))
+                return $"error: successor never connected; staying on {Ver.Build}";
+            var ready = new StreamReader(server).ReadLine();
+            if (ready is null || !ready.StartsWith("ready"))
+                return $"error: successor said '{ready}'; staying on {Ver.Build}";
+
+            // Exit only now. The successor is retrying the ui pipe and takes it the
+            // moment this process dies (UiPipe.Start awaitPredecessor).
+            Dispatcher.BeginInvoke(() => Application.Current.Shutdown());
+            return $"updated: {Ver.Build} → {ready}";
+        }
+        catch (Exception ex) { return $"error: update failed ({ex.Message}); staying on {Ver.Build}"; }
     }
 
     public string ApplyPose(string name)
@@ -174,10 +236,45 @@ public partial class MainWindow : Window
         _vm.OverlayPane = pane;                    // immediate, with the pane's current lines
         if (_vm.PoseName is null)
         {
-            _poller.OverlayTitle = pane.Title;     // next poll deepens it to 40 raw rows
+            _poller.OverlayTitle = pane.Title;     // next poll deepens it to 120 raw rows
             _poller.Invalidate();
         }
         return $"overlay {pane.Title}";
+    }
+
+    // ------------------------------------------------------------- transcript scrolling
+    // A snapshot rebuilds all six PaneViews, so the ItemsControl regenerates its
+    // containers and every ScrollViewer would snap back to the top four times a second.
+    // Position is therefore remembered per SLOT (which is sticky, §8) rather than per
+    // element: NaN means "follow the tail", a number means the operator scrolled up and
+    // wants to stay there. Reading a lane while it talks has to be possible.
+
+    readonly Dictionary<int, double> _paneScroll = new();
+    double _overlayScroll = double.NaN;
+
+    void Transcript_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (sender is not ScrollViewer sv || sv.DataContext is not PaneView p) return;
+        _paneScroll[p.Slot] = Follow(sv, e, _paneScroll.TryGetValue(p.Slot, out var at) ? at : double.NaN);
+    }
+
+    void Overlay_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (sender is not ScrollViewer sv) return;
+        _overlayScroll = Follow(sv, e, _overlayScroll);
+    }
+
+    /// <summary>Content grew (or the container was rebuilt) → put the view back where it
+    /// was, or at the end if we were following. Otherwise the operator just scrolled, so
+    /// record it — landing at the bottom re-arms following. Returns the new saved offset.</summary>
+    static double Follow(ScrollViewer sv, ScrollChangedEventArgs e, double saved)
+    {
+        if (e.ExtentHeightChange != 0 || e.ViewportHeightChange != 0)
+        {
+            sv.ScrollToVerticalOffset(double.IsNaN(saved) ? sv.ScrollableHeight : saved);
+            return saved;
+        }
+        return sv.VerticalOffset >= sv.ScrollableHeight - 1 ? double.NaN : sv.VerticalOffset;
     }
 
     // ------------------------------------------------------------- interactions

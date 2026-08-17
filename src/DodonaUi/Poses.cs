@@ -8,7 +8,7 @@ namespace DodonaUi;
 /// </summary>
 static class Poses
 {
-    public static readonly string[] Names = { "full", "badges", "blocked", "feed", "empty-slot", "tray", "overlay" };
+    public static readonly string[] Names = { "full", "badges", "blocked", "feed", "empty-slot", "tray", "overlay", "long" };
 
     static PaneSnap Pane(long id, string title, string presence, int badge = 0, bool blocked = false,
                          bool focused = false, params string[] lines) =>
@@ -69,7 +69,7 @@ static class Poses
                 s[1] = s[1]! with { Presence = "waiting on you: merge", Blocked = true, Badge = 1 };
                 var feed = Feed(2);
                 feed.Insert(0, new FeedSnap(901, "SKYBOX", "2026-08-17T12:00:00Z",
-                    "waiting on you: merge ticket 7 'sunset gradient' — dodona approve 7", false));
+                    "waiting on you: merge ticket 7 'sunset gradient' — dodona approve 7", false, false));
                 return (new Snapshot(s, new(), feed, null), null,
                         new ToastView { Ts = "2026-08-17T12:00:00Z", Lane = "SKYBOX", Reason = "blocked on you: merge" });
             }
@@ -85,6 +85,18 @@ static class Poses
             }
             case "tray":
                 return (new Snapshot(SixPanes(), new List<string> { "TERRAIN", "SFX" }, Feed(3), null), null, null);
+
+            // The case a pane is actually in most of the time: far more transcript than
+            // pixels, and lines longer than a pane is wide. This is the fixture that
+            // catches a pane which trims instead of wrapping, or clips instead of
+            // scrolling — both of which it did before there was a pose for it.
+            case "long":
+            {
+                var s = SixPanes();
+                s[0] = s[0]! with { Lines = LongTranscript() };
+                s[1] = s[1]! with { Lines = LongTranscript().Take(9).ToList() };
+                return (new Snapshot(s, new(), Feed(4), null), null, null);
+            }
 
             case "overlay":
             {
@@ -109,18 +121,40 @@ static class Poses
         }
     }
 
+    static List<LineSnap> LongTranscript() => new()
+    {
+        new("user_input", "the shoreline foam looks wrong when the camera is low — it reads as a flat white band instead of individual crests"),
+        new("agent_line", "Looking at it now. The foam mask is generated from wave height alone, so at grazing angles every crest above the threshold merges into one silhouette. Two candidates: fade the mask by view angle, or drive it from height *and* curvature so only breaking crests foam."),
+        new("agent_line", "Going with curvature — the angle fade would kill foam in the distance too, and that reads as fog."),
+        new("result", "done: foam mask now height×curvature, shoreline crests separate at grazing angles"),
+        new("user_input", "better. now it flickers on the third wave from shore"),
+        new("agent_line", "That band is exactly where curvature crosses the threshold, so adjacent frames land either side of it. Adding hysteresis: 0.02 of slack between the on and off thresholds."),
+        new("result", "done: foam threshold hysteresis added, flicker gone in a 600-frame capture"),
+        new("announcement", "claim extended: path:src/water/foam.hlsl"),
+        new("user_input", "run the sim tests before you hand it back"),
+        new("agent_line", "Running. 41 of 43 green; the two reds are the golden-image tests for the shoreline, which is the thing we just changed on purpose. Re-baselining those two and leaving the rest untouched."),
+        new("result", "done: 43 tests green, 2 shoreline goldens re-baselined"),
+        new("user_input", "what did the re-baseline actually change"),
+        new("agent_line", "Pixel diff is confined to the first three wave bands; mean delta 0.03, max 0.21 at the crests. Nothing moved offshore, which is what you would want if only the mask changed."),
+    };
+
     static List<FeedSnap> Feed(int n)
     {
+        // The DODONA rows are the system speaking in its own voice (Daemon.Announce) —
+        // the dispatcher lane holds no grid slot, so this is the only fixture coverage
+        // for a feed row that has no lane colour to inherit.
         var all = new List<FeedSnap>
         {
-            new(801, "WATER",   "2026-08-17T11:55:00Z", "→ retargeted to WATER (classifier, high)", false),
-            new(802, "UI",      "2026-08-17T11:56:00Z", "ticket 5 approved — merge unblocked", true),
-            new(803, "AUDIO",   "2026-08-17T11:57:00Z", "landed ticket 4 on main; verify green", false),
-            new(804, "SKYBOX",  "2026-08-17T11:58:00Z", "claim extended: path:src/sky/clouds.hlsl", true),
-            new(805, "NETCODE", "2026-08-17T11:59:00Z", "↩ undone: \"tighten the fog\" retracted", false),
-            new(806, "BUILD",   "2026-08-17T12:00:00Z", "verify RED at 'dotnet test' — blocked ticket 9 created", false),
-            new(807, "WATER",   "2026-08-17T12:01:00Z", "worktree pruned for ticket 3", true),
-            new(808, "UI",      "2026-08-17T12:02:00Z", "waiting on you: merge ticket 8 'minimap' — dodona approve 8", false),
+            new(801, "WATER",   "2026-08-17T11:55:00Z", "→ retargeted to WATER (classifier, high)", false, false),
+            new(802, "UI",      "2026-08-17T11:56:00Z", "ticket 5 approved — merge unblocked", true, false),
+            new(803, "DODONA",  "2026-08-17T11:56:30Z", "[dodona] swapped to build 1.0.0+20260817 — 6 lane(s) adopted, nothing interrupted", false, true),
+            new(804, "AUDIO",   "2026-08-17T11:57:00Z", "landed ticket 4 on main; verify green", false, false),
+            new(805, "SKYBOX",  "2026-08-17T11:58:00Z", "claim extended: path:src/sky/clouds.hlsl", true, false),
+            new(806, "NETCODE", "2026-08-17T11:59:00Z", "↩ undone: \"tighten the fog\" retracted", false, false),
+            new(807, "DODONA",  "2026-08-17T11:59:30Z", "[dodona] update ready — a lane is mid-turn. swap now / when it lands / hold", false, true),
+            new(808, "BUILD",   "2026-08-17T12:00:00Z", "verify RED at 'dotnet test' — blocked ticket 9 created", false, false),
+            new(809, "WATER",   "2026-08-17T12:01:00Z", "worktree pruned for ticket 3", true, false),
+            new(810, "UI",      "2026-08-17T12:02:00Z", "waiting on you: merge ticket 8 'minimap' — dodona approve 8", false, false),
         };
         return all.Take(n).ToList();
     }
