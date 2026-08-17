@@ -39,6 +39,19 @@ guarded (the closing side flushes into a dead pipe → WerFault park), and a dup
 handle read and written concurrently needs `PipeOptions.Asynchronous` or the pending
 read blocks the write forever.
 
-Next: **M1** — claims + hook gate + fenced merge token + `dodona.json` verify config;
-two real lanes on MassWorks, `merge: on-approval` only. Spike 4 (quota calibration)
-still parked, by choice.
+## M1 — claims, gate, fenced merge token: **DONE, acceptance 29/29**
+
+Claim algebra (`path:|new:|subtree:|symbol:`, §6) with plan-time conflict refusal;
+PreToolUse claim gate deployed per worktree (fails open, logged); tickets with
+branch+worktree lifecycle; FIFO merge-token lease with expiry reclaim; daemon-executed
+ff-only land; claims released in the land transaction; post-land verify from
+`dodona.json`. Acceptance: [tests/m1-acceptance.ps1](tests/m1-acceptance.ps1) — a
+scripted git fixture playing the agents' role, zero model calls.
+
+Bug the test caught: gate files deployed into worktrees were committable by `git add -A`
+and landed on main, colliding with every other ticket's gate on rebase — deployment
+files now live in `.git/info/exclude`, invisible to git by construction.
+
+Next: **M2** — dispatcher session, tier-0 prefix routing, optimistic delivery + warm
+tier-1 classifier, code-derived presence, selective compression; first real claude lanes.
+Spike 4 (quota calibration) still parked, by choice.

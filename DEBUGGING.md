@@ -17,7 +17,7 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
 | Lane pipes (shim alive) | `dodona-<instance>-lane<N>` |
 | Agent session files (Claude Code's own) | `$env:CLAUDE_CONFIG_DIR\projects\<cwd-slug>\<session-id>.jsonl` |
 
-## The schema (v1 — `PRAGMA user_version`)
+## The schema (v2 — `PRAGMA user_version`)
 
 - **`lanes`** — `id, title, state (alive|unreachable|dead), pipe_name, session_id,
   created_ts`. The session_id is the resume handle; the pipe is the reattach handle.
@@ -26,10 +26,34 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
   shim's delivery sequence (NULL for locally-generated rows); `UNIQUE(lane_id, seq)` is
   what makes shim redelivery exactly-once. `raw` is the untouched wire line — the raw
   truth when `body`'s extraction looks wrong.
+- **`tickets`** — `id, lane_id, title, branch (ticket/<id>), worktree, state
+  (open|landed|abandoned), merge_mode (on-approval|auto), approved, created_ts,
+  landed_ts`. A branch is a thing that lands; that is what a ticket is.
+- **`claims`** — `ticket_id, kind (path|newfile|subtree|symbol), value`. Deleted in the
+  same transaction that marks the ticket landed — a lingering claim row for a landed
+  ticket is a bug. Values are normalized: forward slashes, lowercase, no leading slash.
+- **`merge_token`** — one row, id 1: `holder_ticket, generation, granted_ts, expires_ts,
+  main_sha`. Expired holders are reclaimed at the next request; `generation` increments
+  per grant. `main_sha` is what main was when the grant happened.
+- **`token_queue`** — FIFO of tickets waiting for the token.
 - **`events`** — the causal chain: `ts, kind, lane_id, detail`. Every daemon action
-  writes here: `daemon_start`, `reconcile_done`, `shim_spawned`, `lane_connected`,
-  `lane_unreachable`, `lane_pipe_lost`, `say`, `daemon_stop`. **If a state change
-  happened with no event row naming why, that is a bug — report it as one.**
+  writes here. Lane kinds: `daemon_start`, `reconcile_done`, `shim_spawned`,
+  `lane_connected`, `lane_unreachable`, `lane_pipe_lost`, `say`, `daemon_stop`.
+  Ticket/merge kinds: `ticket_created`, `claim_conflict`, `claim_extended`,
+  `ticket_approved`, `token_granted`, `token_queued`, `token_refused_unapproved`,
+  `token_released`, `token_expired_reclaimed`, `landed`, `land_refused`,
+  `land_inconsistent`, `verify_green`, `verify_red`, `worktree_pruned`,
+  `worktree_prune_failed`, `ticket_git_failed`. **If a state change happened with no
+  event row naming why, that is a bug — report it as one.**
+
+## The claim gate
+
+Each ticket worktree carries a generated `dodona-gate.ps1` + `.claude/settings.json`
+(PreToolUse on Edit|Write|MultiEdit|NotebookEdit). The gate asks the daemon
+(`dodona claim-check`) and **fails open** with a line in `<worktree>\.dodona-bypass.log`
+when the daemon is unreachable — the merge-time backstop catches what slips. A non-empty
+bypass log is worth reading. Gate files are registered in `<root>\.git\info\exclude`
+so agents can never commit them.
 
 ## Worked queries
 
