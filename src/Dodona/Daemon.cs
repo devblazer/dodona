@@ -17,7 +17,8 @@ namespace Dodona;
 sealed record Config(string Main, string[] Verify, string Agent = "claude",
                      string Model = "opus", string Effort = "high",
                      string RouterModel = "haiku", string RouterEffort = "low",
-                     PolicyRule[]? Policy = null, string[]? AllowedTools = null)
+                     PolicyRule[]? Policy = null, string[]? AllowedTools = null,
+                     string PermissionMode = "bypassPermissions")
 {
     public PolicyRule[] Rules => Policy ?? Dodona.Policy.Default;
 
@@ -62,7 +63,8 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
 
         return new Config(main, verify, agent,
             Str("model", "opus"), Str("effort", "high"),
-            Str("routerModel", "haiku"), Str("routerEffort", "low"), policy, allowed);
+            Str("routerModel", "haiku"), Str("routerEffort", "low"), policy, allowed,
+            Str("permissionMode", "bypassPermissions"));
     }
 }
 
@@ -1007,7 +1009,18 @@ sealed class Daemon
         var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                                       "--verbose", "--model", model };
         if (!string.IsNullOrWhiteSpace(effort)) { args.Add("--effort"); args.Add(effort); }
-        if (acceptEdits) { args.Add("--permission-mode"); args.Add("acceptEdits"); }
+        // A lane has no way to ASK. The operator's own session carries a permission-prompt
+        // tool wired to a dialog, so an unapproved command becomes a question; a headless
+        // `-p` lane has no such channel, so the same command is denied outright and the
+        // agent is simply stuck — it edits fine and then cannot build what it edited.
+        // Hence the default matches what the operator's IDE grants in auto mode.
+        //
+        // This does NOT loosen Dodona's own guarantees, and that is not an assumption:
+        // measured, a PreToolUse hook still fires under bypassPermissions. The claim gate
+        // IS a PreToolUse hook, so a ticket lane is still bounded to its claim, and the
+        // merge-time diff backstop still refuses anything that slips. The safety model
+        // never rested on Claude's permission prompt — it rests on the gate and the fence.
+        if (acceptEdits) { args.Add("--permission-mode"); args.Add(_config.PermissionMode); }
         if (acceptEdits && _config.Allowed.Length > 0)
         {
             // Work lanes get the project's allowlist; the router never does — it has no

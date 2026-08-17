@@ -97,13 +97,37 @@ repo. Deployed gate files live in `.git/info/exclude` for the same reason.
 
 ## 6. Where things are written down
 
-- `DEBUGGING.md` — the schema, every event kind, the pipes, and how to read a store with
-  nothing running. Start here when something looks wrong.
+- `docs/ORCHESTRATOR-DESIGN.md` — **the authority.** Every `§n` in this codebase (§8
+  attention, §11 lifecycle, §17 testing) points here.
+- `docs/ORCHESTRATOR-REVIEW.md` — the milestone plan, the measurements, what is carried.
 - `docs/LANE-LIFECYCLE.md` — decisions already taken and **ideas already rejected** about
   closing lanes and the attention model. Read before proposing either.
-- `..\MassWorks\ORCHESTRATOR-DESIGN.md` — the authority. Section numbers (§8, §11, §17)
-  throughout this codebase point at it.
-- `..\MassWorks\ORCHESTRATOR-REVIEW.md` — the milestone plan and what is carried.
+- `DEBUGGING.md` — the schema, every event kind, the pipes, and how to read a store with
+  nothing running. Start here when something looks wrong.
+
+The design docs are copies; the masters live in `..\MassWorks\`. They were copied in
+because a lane works from `<root>\.dodona\wt\t<N>`, where the old `..\MassWorks\` path
+resolves to nothing — see `docs/README.md`.
+
+## 7. Permissions: a lane cannot ask
+
+The operator's own session has a permission-prompt tool wired to a dialog, so an
+unapproved command becomes a question. **A lane has no such channel** — headless `-p`
+denies outright, and the agent strands mid-task: it edits fine, then cannot build what it
+edited. So lanes default to `bypassPermissions`, matching what the operator's IDE grants
+in auto mode.
+
+**That does not loosen Dodona's guarantees**, and it is measured, not assumed: a PreToolUse
+hook still fires under `bypassPermissions`. The claim gate *is* a PreToolUse hook, so a
+ticket lane is still bounded to its claim, and the merge-time diff backstop still refuses
+anything that slips. The safety model never rested on Claude's permission prompt — it
+rests on the gate (§6 layer 1) and the fence (§6 layer 2).
+
+A project that wants a leash sets `"permissionMode": "acceptEdits"` in `dodona.json` plus
+an `allowedTools` list. Be aware that list is leakier than it looks: `PowerShell(dotnet
+build:*)` still loses to `dotnet build ... | Select-Object`, because a pipeline counts as
+multiple operations. If a command is denied, that is the environment, not you being
+wrong — report it as the headline (rule 1) and name the exact command.
 
 Comments in this codebase explain *why*, and often name the incident that caused the
 line. Keep that habit: the next person to read it is debugging at speed.

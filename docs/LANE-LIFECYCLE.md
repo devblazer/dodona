@@ -5,8 +5,8 @@ is allowed to ask for your attention. Written down at the point the decisions we
 so that whoever picks this up — including a future session of me — does not re-propose
 the ideas that were already looked at and thrown out.
 
-Companion to the design doc (`..\MassWorks\ORCHESTRATOR-DESIGN.md`, §8 attention, §11
-lifecycle) and the milestone plan (`ORCHESTRATOR-REVIEW.md`).
+Companion to the design doc (`ORCHESTRATOR-DESIGN.md`, §8 attention, §11 lifecycle) and
+the milestone plan (`ORCHESTRATOR-REVIEW.md`), both alongside this file.
 
 ---
 

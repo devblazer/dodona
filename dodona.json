@@ -3,10 +3,14 @@
   "verify": ["dotnet build Dodona.sln -c Release -warnaserror"],
   "model": "opus",
   "effort": "high",
-  "allowedTools": [
-    "Bash(dotnet build:*)", "Bash(dotnet test:*)", "Bash(dotnet run:*)", "Bash(dotnet publish:*)",
-    "PowerShell(dotnet build:*)", "PowerShell(dotnet test:*)", "PowerShell(dotnet run:*)", "PowerShell(dotnet publish:*)",
-    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
-    "PowerShell(git status:*)", "PowerShell(git diff:*)", "PowerShell(git log:*)"
+
+  "//permissions": [
+    "Lanes run bypassPermissions by default — the same permissiveness the operator's IDE",
+    "grants in auto mode. A lane cannot ask: headless -p has no prompt channel, so",
+    "anything not pre-approved is denied outright and the agent strands mid-task (it",
+    "edits fine, then cannot build what it edited). Measured: PreToolUse hooks STILL fire",
+    "under bypassPermissions, so the claim gate keeps bounding ticket lanes and the",
+    "merge-time backstop still refuses out-of-claim diffs. Set permissionMode to",
+    "'acceptEdits' plus an allowedTools list for a repo you would rather keep on a leash."
   ]
 }

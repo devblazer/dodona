@@ -46,8 +46,13 @@ store with nothing running.
 The design doc deliberately lives **outside** this repo (it governs a system that
 rewrites itself — no branch, merge or reset may touch it):
 
-- `..\MassWorks\ORCHESTRATOR-DESIGN.md` — the design decisions (the authority)
-- `..\MassWorks\ORCHESTRATOR-REVIEW.md` — the review: rationale, evidence, measurements
+- [docs/ORCHESTRATOR-DESIGN.md](docs/ORCHESTRATOR-DESIGN.md) — the design decisions (the authority)
+- [docs/ORCHESTRATOR-REVIEW.md](docs/ORCHESTRATOR-REVIEW.md) — the review: rationale, evidence, measurements
+- [docs/LANE-LIFECYCLE.md](docs/LANE-LIFECYCLE.md) — lane closing and attention: decided, rejected, still open
+
+These are copies kept in-repo so agents can actually read them — a lane works from
+`.dodona\wt\t<N>`, where the old `..\MassWorks\` path resolves to nothing. The masters
+still live outside the repo; see [docs/README.md](docs/README.md).
 
 ## Status
 
