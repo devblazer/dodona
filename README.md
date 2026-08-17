@@ -24,5 +24,21 @@ architecture is poured around it:
 | 3 — `spikes/spike3/spike3.ps1` | mid-turn `additionalContext` injection behavior | **PASS** with trust framing (~335ms pickup); undeclared channel is refused — `spikes/SPIKE-3-injection.md` |
 | 4 | six concurrent sessions: quota burn + warm-turn latency | pending |
 
-Then M0: shim, minimal daemon, one lane, console client, fake agent, `DEBUGGING.md`.
-Acceptance test: *kill the daemon mid-agent-turn; the session must not notice.*
+## M0 — walking skeleton: **DONE, acceptance green**
+
+`src/Dodona` (daemon + console client, one binary, two roles), `src/DodonaShim`,
+`src/DodonaFakeAgent`, store schema v1 (see [DEBUGGING.md](DEBUGGING.md)).
+
+Acceptance test — *kill the daemon mid-agent-turn; the session must not notice* —
+passes: [tests/m0-acceptance.ps1](tests/m0-acceptance.ps1). Daemon killed ~1s into a 6s
+turn; the result landed exactly once after restart (seq dedupe); the same agent answered
+daemon #2. Zero model calls (fake agent, design §17).
+
+Two bugs the test caught, both now load-bearing knowledge: pipe teardown must be
+guarded (the closing side flushes into a dead pipe → WerFault park), and a duplex pipe
+handle read and written concurrently needs `PipeOptions.Asynchronous` or the pending
+read blocks the write forever.
+
+Next: **M1** — claims + hook gate + fenced merge token + `dodona.json` verify config;
+two real lanes on MassWorks, `merge: on-approval` only. Spike 4 (quota calibration)
+still parked, by choice.

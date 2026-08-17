@@ -1,0 +1,53 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{2EADF13F-456D-452E-A9D3-40755F2882EB}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DodonaShim", "src\DodonaShim\DodonaShim.csproj", "{FCC6A237-25E7-40C6-AFEC-62D402022D43}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DodonaFakeAgent", "src\DodonaFakeAgent\DodonaFakeAgent.csproj", "{EFE03CEE-0691-4A87-83DE-317C71C97167}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "spikes", "spikes", "{AF0986AF-C6DC-46E2-9DDB-84D96DC4E084}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "spike2", "spike2", "{13559F02-A2E7-475B-BEF8-B08496421E09}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spike2Client", "spikes\spike2\Spike2Client\Spike2Client.csproj", "{2C4836FD-4EDC-4955-98D7-D75EC6E72B17}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Dodona", "src\Dodona\Dodona.csproj", "{D9618EBF-FB21-47BF-9460-8823F173AF4B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{FCC6A237-25E7-40C6-AFEC-62D402022D43}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FCC6A237-25E7-40C6-AFEC-62D402022D43}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FCC6A237-25E7-40C6-AFEC-62D402022D43}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FCC6A237-25E7-40C6-AFEC-62D402022D43}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EFE03CEE-0691-4A87-83DE-317C71C97167}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EFE03CEE-0691-4A87-83DE-317C71C97167}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EFE03CEE-0691-4A87-83DE-317C71C97167}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EFE03CEE-0691-4A87-83DE-317C71C97167}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2C4836FD-4EDC-4955-98D7-D75EC6E72B17}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2C4836FD-4EDC-4955-98D7-D75EC6E72B17}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2C4836FD-4EDC-4955-98D7-D75EC6E72B17}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2C4836FD-4EDC-4955-98D7-D75EC6E72B17}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D9618EBF-FB21-47BF-9460-8823F173AF4B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D9618EBF-FB21-47BF-9460-8823F173AF4B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D9618EBF-FB21-47BF-9460-8823F173AF4B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D9618EBF-FB21-47BF-9460-8823F173AF4B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{FCC6A237-25E7-40C6-AFEC-62D402022D43} = {2EADF13F-456D-452E-A9D3-40755F2882EB}
+		{EFE03CEE-0691-4A87-83DE-317C71C97167} = {2EADF13F-456D-452E-A9D3-40755F2882EB}
+		{13559F02-A2E7-475B-BEF8-B08496421E09} = {AF0986AF-C6DC-46E2-9DDB-84D96DC4E084}
+		{2C4836FD-4EDC-4955-98D7-D75EC6E72B17} = {13559F02-A2E7-475B-BEF8-B08496421E09}
+		{D9618EBF-FB21-47BF-9460-8823F173AF4B} = {2EADF13F-456D-452E-A9D3-40755F2882EB}
+	EndGlobalSection
+EndGlobal
