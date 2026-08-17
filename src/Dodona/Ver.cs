@@ -17,7 +17,7 @@ namespace Dodona;
 /// </summary>
 static class Ver
 {
-    public const int Schema = 5;
+    public const int Schema = 6;
     public const int ShimProtocol = 1;
 
     public static string Build { get; } = Compute();

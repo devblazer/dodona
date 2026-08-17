@@ -21,7 +21,8 @@ return cmd switch
     "say" => Client(new { cmd = "say", lane = long.Parse(pos[0]), text = pos[1] }),
     "tail" => Client(new { cmd = "tail", lane = long.Parse(pos[0]), n = pos.Count > 1 ? int.Parse(pos[1]) : 20 }),
     "status" => Client(new { cmd = "status" }),
-    "ticket-create" => Client(new { cmd = "ticket-create", title = One("title") ?? "TICKET", mode = One("mode") ?? "on-approval", claims = Many("claim") }),
+    "ticket-create" => Client(new { cmd = "ticket-create", title = One("title") ?? "TICKET", mode = One("mode") ?? "on-approval", repo = One("repo"), claims = Many("claim") }),
+    "repos" => Client(new { cmd = "repos" }),
     "claim-check" => Client(new { cmd = "claim-check", ticket = long.Parse(pos[0]), path = pos[1] }),
     "claim-extend" => Client(new { cmd = "claim-extend", ticket = long.Parse(pos[0]), claims = Many("claim") }),
     "approve" => Client(new { cmd = "approve", ticket = long.Parse(pos[0]) }),
@@ -252,8 +253,10 @@ static void Help() => Console.WriteLine("""
     project setup:
       dodona repo-status                    (is this folder a repo? what is inside it?)
       dodona repo-init [--adopt]            (--adopt commits the files already there)
+      dodona repos                          (the workspace's repositories, and their tokens)
     tickets & claims (§6/§11):
-      dodona ticket-create --title <T> --claim <spec>... [--mode on-approval|auto]
+      dodona ticket-create --title <T> --claim <spec>... [--mode on-approval|auto] [--repo <name>]
+              a ticket belongs to ONE repository, usually inferred from its claim paths
               spec: path:<file> | new:<file> | subtree:<dir> | symbol:<name>
       dodona claim-check <ticket> <file>   (exit 0 covered / 1 denied)
       dodona claim-extend <ticket> --claim <spec>...

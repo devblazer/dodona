@@ -7,6 +7,12 @@ namespace Dodona;
 /// <summary>Per-project config, dodona.json at the project root (design §10).</summary>
 sealed record Config(string Main, string[] Verify)
 {
+    /// <summary>A repository's config, falling back to the workspace's. Verify steps and
+    /// even the name of `main` belong to the repository, not to the workspace holding
+    /// it — one repo may be on `main` and another still on `master`.</summary>
+    public static Config For(string workspaceRoot, string repoPath) =>
+        File.Exists(Path.Combine(repoPath, "dodona.json")) ? Load(repoPath) : Load(workspaceRoot);
+
     public static Config Load(string root)
     {
         var path = Path.Combine(root, "dodona.json");
@@ -26,6 +32,19 @@ sealed class Daemon
     readonly Dictionary<long, LaneRuntime> _lanes = new();
     readonly SemaphoreSlim _routerLock = new(1, 1);   // one classification at a time on the warm session
     Config _config;
+
+    /// <summary>The workspace's repositories, rediscovered on demand — git is the truth,
+    /// the registry is a cache of it (§12). A repo added to the workspace while the
+    /// daemon runs must be usable without a restart.</summary>
+    List<RepoRef> Repositories() => Repos.Discover(_root);
+
+    /// <summary>Where a ticket's git work happens. Falls back to the workspace root, so a
+    /// ticket written before its repo disappeared still reports honestly rather than
+    /// throwing.</summary>
+    string RepoPath(string repoName) =>
+        Repos.ByName(Repositories(), repoName)?.Path ?? _root;
+
+    Config ConfigFor(string repoName) => Config.For(_root, RepoPath(repoName));
 
     Daemon(string root, string instanceId, string ctlPipe, Store store)
     {
@@ -262,29 +281,46 @@ sealed class Daemon
                 // Git is needed HERE — at the first branch and worktree — not at the door.
                 // A project can be opened, and lanes can run in it, long before it has a
                 // repo; refusing to open would be refusing too early (and for too long).
-                if (!Git.IsRepo(_root))
+                var repos = Repositories();
+                RepoRef? repo;
+                if (e.TryGetProperty("repo", out var rp) && rp.ValueKind == JsonValueKind.String && rp.GetString() is string rname && rname.Length > 0)
                 {
-                    var nested = Git.FindRepos(_root);
-                    w.WriteLine($"error: {_root} is not a git repository, and a ticket is a branch + worktree");
-                    if (nested.Count > 0)
+                    repo = Repos.ByName(repos, rname);
+                    if (repo is null)
                     {
-                        w.WriteLine($"       it does contain {nested.Count} repositor{(nested.Count == 1 ? "y" : "ies")}:");
-                        foreach (var r in nested) w.WriteLine($"         {Path.GetRelativePath(_root, r)}");
-                        w.WriteLine("       open one of those as the project, or see `dodona repo-init` to make this folder itself a repo");
+                        w.WriteLine($"error: no repository '{rname}' in this workspace" +
+                                    (repos.Count > 0 ? $" (have: {string.Join(", ", repos.Select(r => r.Name))})" : ""));
+                        w.WriteLine("##exit 1");
+                        break;
                     }
-                    else w.WriteLine("       run `dodona repo-init` to create one here (lanes work meanwhile; only tickets need git)");
-                    w.WriteLine("##exit 1");
-                    break;
                 }
-                if (!Git.HasCommit(_root))
+                else
                 {
-                    w.WriteLine($"error: {_root} is a git repository with no commits, so there is no '{_config.Main}' to branch from");
+                    // Claims are workspace-relative paths, so they already say which
+                    // repository this ticket is for — no extra syntax needed.
+                    var (inferred, err) = Repos.ForClaims(repos, claims);
+                    if (inferred is null)
+                    {
+                        _store.Event("ticket_repo_unresolved", null, $"'{title}': {err}");
+                        w.WriteLine($"error: {err}");
+                        if (repos.Count == 0 && !Git.IsRepo(_root))
+                            w.WriteLine("       (lanes work without git; only tickets need a repository)");
+                        w.WriteLine("##exit 1");
+                        break;
+                    }
+                    repo = inferred;
+                }
+
+                var repoCfg = Config.For(_root, repo.Path);
+                if (!Git.HasCommit(repo.Path))
+                {
+                    w.WriteLine($"error: {repo.Name} is a git repository with no commits, so there is no '{repoCfg.Main}' to branch from");
                     w.WriteLine("       run `dodona repo-init` to make the first commit");
                     w.WriteLine("##exit 1");
                     break;
                 }
 
-                var (id, conflicts) = _store.TicketCreate(null, title, mode, claims);
+                var (id, conflicts) = _store.TicketCreate(null, title, mode, repo.Name, claims);
                 if (id < 0)
                 {
                     _store.Event("claim_conflict", null, $"'{title}': {string.Join(" | ", conflicts)}");
@@ -293,20 +329,24 @@ sealed class Daemon
                     break;
                 }
 
+                // Branch names are workspace-unique because ticket ids are; the worktree
+                // lives under the workspace even when its repository does not.
                 var branch = $"ticket/{id}";
                 var wt = Path.Combine(_root, ".dodona", "wt", $"t{id}");
-                var (code, output) = Git.Run(_root, "worktree", "add", "-b", branch, wt, _config.Main);
+                var (code, output) = Git.Run(repo.Path, "worktree", "add", "-b", branch, wt, repoCfg.Main);
                 if (code != 0)
                 {
                     _store.TicketState(id, "abandoned");
-                    _store.Event("ticket_git_failed", null, $"ticket {id}: {output}");
-                    w.WriteLine($"error: worktree add failed: {output}");
+                    _store.Event("ticket_git_failed", null, $"ticket {id} repo {repo.Name}: {output}");
+                    w.WriteLine($"error: worktree add failed in {repo.Name}: {output}");
                     break;
                 }
                 _store.TicketSetGit(id, branch, wt);
-                DeployGate(wt, id);
-                _store.Event("ticket_created", null, $"ticket {id} '{title}' branch {branch} claims [{string.Join(", ", specs)}]");
-                w.WriteLine($"ticket {id} branch {branch} worktree {wt}");
+                DeployGate(wt, id, repo);
+                _store.Event("ticket_created", null, $"ticket {id} '{title}' repo {repo.Name} branch {branch} claims [{string.Join(", ", specs)}]");
+                // A single-repo project never sees the word "repo": there is only one, and
+                // naming it would be noise in the ordinary case.
+                w.WriteLine($"ticket {id}{RepoTag(repo.Name)} branch {branch} worktree {wt}");
                 break;
             }
             case "claim-check":
@@ -316,12 +356,22 @@ sealed class Daemon
                 var t = _store.Ticket(tid);
                 if (t is null || t.State != "open") { w.WriteLine($"error: ticket {tid} not open"); break; }
 
+                // Claims are workspace-relative, but the agent writes inside a worktree of
+                // one repository — so a path resolved against the worktree must be put
+                // back into workspace terms before it can be matched. For a single-repo
+                // project the prefix is empty and this is exactly the old behaviour.
+                var ticketRepo = Repos.ByName(Repositories(), t.Repo);
+                var prefix = ticketRepo?.ClaimPrefix ?? "";
                 var full = Path.GetFullPath(path, t.Worktree).Replace('\\', '/');
                 string? rel = null;
-                foreach (var baseDir in new[] { t.Worktree, _root })
+                foreach (var (baseDir, addPrefix) in new[] { (t.Worktree, true), (_root, false) })
                 {
                     var b = Path.GetFullPath(baseDir).Replace('\\', '/').TrimEnd('/') + "/";
-                    if (full.StartsWith(b, StringComparison.OrdinalIgnoreCase)) { rel = full[b.Length..]; break; }
+                    if (full.StartsWith(b, StringComparison.OrdinalIgnoreCase))
+                    {
+                        rel = (addPrefix ? prefix : "") + full[b.Length..];
+                        break;
+                    }
                 }
                 if (rel is null)
                 {
@@ -397,9 +447,30 @@ sealed class Daemon
                 break;
             }
             case "tickets":
+            {
+                var multi = _store.Tickets().Any(t => t.Repo != ".");
                 foreach (var t in _store.Tickets())
-                    w.WriteLine($"ticket {t.Id}  {t.Title,-12}  state={t.State}  mode={t.MergeMode}  approved={t.Approved}  branch={t.Branch}");
+                    w.WriteLine($"ticket {t.Id}  {t.Title,-12}  {(multi ? $"repo={t.Repo,-10}  " : "")}state={t.State}  mode={t.MergeMode}  approved={t.Approved}  branch={t.Branch}");
                 break;
+            }
+            case "repos":
+            {
+                var found = Repositories();
+                if (found.Count == 0)
+                {
+                    w.WriteLine($"no git repository in {_root}");
+                    w.WriteLine("run `dodona repo-init` to make this folder one (lanes work meanwhile; only tickets need git)");
+                    break;
+                }
+                foreach (var r in found)
+                {
+                    var cfg = Config.For(_root, r.Path);
+                    var tok = _store.TokenRead(r.Name);
+                    var open = _store.Tickets().Count(t => t.Repo == r.Name && t.State == "open");
+                    w.WriteLine($"{r.Name,-14} main={cfg.Main,-8} open-tickets={open}  token={(tok.Holder?.ToString() ?? "free"),-6} verify={cfg.Verify.Length} step(s)  {r.Path}");
+                }
+                break;
+            }
 
             // ---------------- merge token & land (M1, §7) ----------------
             case "token-request":
@@ -426,12 +497,16 @@ sealed class Daemon
                 // Merge-time backstop (§6 layer 2): diff the branch against its merge
                 // base; any touched path outside the claim refuses the token. This
                 // catches everything the fail-open hook gate cannot see.
-                var (dc, diff) = Git.Run(_root, "diff", "--name-only", $"{_config.Main}...{t.Branch}");
+                var reqRepo = Repos.ByName(Repositories(), t.Repo);
+                var reqPath = reqRepo?.Path ?? _root;
+                var reqPrefix = reqRepo?.ClaimPrefix ?? "";
+                var reqCfg = Config.For(_root, reqPath);
+                var (dc, diff) = Git.Run(reqPath, "diff", "--name-only", $"{reqCfg.Main}...{t.Branch}");
                 if (dc == 0 && diff.Length > 0)
                 {
                     var ticketClaims = _store.TicketClaims(tid);
                     var outside = diff.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => Claims.Normalize(f))
+                        .Select(f => Claims.Normalize(reqPrefix + f))   // git speaks repo-relative; claims are workspace-relative
                         .Where(f => !ticketClaims.Any(cl => Claims.Covers(cl.Kind, cl.Value, f)))
                         .ToList();
                     if (outside.Count > 0)
@@ -444,28 +519,40 @@ sealed class Daemon
                     }
                 }
 
-                var (status, gen, pos) = _store.TokenRequest(tid, lease, () => Git.Sha(_root, _config.Main));
+                var (status, gen, pos) = _store.TokenRequest(tid, t.Repo, lease, () => Git.Sha(reqPath, reqCfg.Main));
                 w.WriteLine(status == "granted"
-                    ? $"granted ticket {tid} generation {gen}"
-                    : $"queued ticket {tid} position {pos}");
+                    ? $"granted ticket {tid} generation {gen}{RepoTag(t.Repo)}"
+                    : $"queued ticket {tid} position {pos}{RepoTag(t.Repo)}");
                 break;
             }
             case "token-renew":
             {
                 var tid = e.GetProperty("ticket").GetInt64();
                 var lease = e.TryGetProperty("lease", out var ls) ? ls.GetInt32() : 120;
-                if (_store.TokenRenew(tid, lease)) w.WriteLine($"renewed ticket {tid}");
+                var rt = _store.Ticket(tid);
+                if (rt is null) { w.WriteLine($"error: no ticket {tid}"); break; }
+                if (_store.TokenRenew(tid, rt.Repo, lease)) w.WriteLine($"renewed ticket {tid}");
                 else { w.WriteLine($"refused: ticket {tid} is not the live holder"); w.WriteLine("##exit 1"); }
                 break;
             }
             case "token-release":
-                _store.TokenRelease(e.GetProperty("ticket").GetInt64());
+            {
+                var tid = e.GetProperty("ticket").GetInt64();
+                var rt = _store.Ticket(tid);
+                if (rt is null) { w.WriteLine($"error: no ticket {tid}"); break; }
+                _store.TokenRelease(tid, rt.Repo);
                 w.WriteLine("released");
                 break;
+            }
             case "token-status":
             {
-                var tok = _store.TokenRead();
-                w.WriteLine($"holder={(tok.Holder?.ToString() ?? "none")} generation={tok.Generation} expires={tok.ExpiresTs ?? "-"} main={tok.MainSha?[..8] ?? "-"}");
+                // One token per repository: they land in parallel, so they report in
+                // parallel too.
+                var tokens = _store.TokensAll();
+                if (tokens.Count == 0) tokens = new List<Store.TokenRow> { _store.TokenRead(".") };
+                var manyRepos = tokens.Any(x => x.Repo != ".");
+                foreach (var tok in tokens)
+                    w.WriteLine($"{(manyRepos ? $"repo={tok.Repo,-12} " : "")}holder={(tok.Holder?.ToString() ?? "none")} generation={tok.Generation} expires={tok.ExpiresTs ?? "-"} main={(tok.MainSha is { Length: >= 8 } s ? s[..8] : "-")}");
                 break;
             }
             case "land":
@@ -641,11 +728,14 @@ sealed class Daemon
         if (stranded.Count > 0)
             blockers.Add($"shim protocol v{stranded[0].ShimProtocol}→v{nb.ShimProtocol} with {stranded.Count} live shim(s)");
 
-        var tok = _store.TokenRead();
-        if (tok.Holder is long h && (tok.ExpiresTs is null || DateTime.Parse(tok.ExpiresTs).ToUniversalTime() > DateTime.UtcNow))
+        // Any repository mid-merge blocks the swap — the tokens are independent, but the
+        // daemon that would vanish underneath them is not.
+        foreach (var tok in _store.TokensAll())
         {
+            if (tok.Holder is not long h) continue;
+            if (tok.ExpiresTs is not null && DateTime.Parse(tok.ExpiresTs).ToUniversalTime() <= DateTime.UtcNow) continue;
             var t = _store.Ticket(h);
-            blockers.Add($"{t?.Title ?? $"ticket {h}"} is mid-merge");
+            blockers.Add($"{t?.Title ?? $"ticket {h}"} is mid-merge{(tok.Repo == "." ? "" : $" in {tok.Repo}")}");
         }
         return blockers;
     }
@@ -818,6 +908,10 @@ sealed class Daemon
 
     static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
 
+    /// <summary>" repo engine", or nothing at all when the workspace root IS the
+    /// repository — the single-repo project should never have to read about repos.</summary>
+    static string RepoTag(string repo) => repo == "." ? "" : $" repo {repo}";
+
     /// <summary>Spawn a lane: shim → child, detached, pumped, recorded. Shared by
     /// lane-start (fake/test agents), router-start (warm utility session), and
     /// ticket-agent (real claude in a gated worktree).</summary>
@@ -928,22 +1022,27 @@ sealed class Daemon
         var t = _store.Ticket(tid);
         if (t is null || t.State != "open") return $"refused: ticket {tid} not open";
 
-        var tok = _store.TokenRead();
-        if (tok.Holder != tid) { _store.Event("land_refused", null, $"ticket {tid}: not holder (holder={tok.Holder?.ToString() ?? "none"})"); return $"refused: ticket {tid} does not hold the merge token"; }
+        var repo = Repos.ByName(Repositories(), t.Repo);
+        var repoPath = repo?.Path ?? _root;
+        var cfg = Config.For(_root, repoPath);
+        var where = t.Repo == "." ? "project root" : $"repository {t.Repo}";
+
+        var tok = _store.TokenRead(t.Repo);
+        if (tok.Holder != tid) { _store.Event("land_refused", null, $"ticket {tid}: not holder of {t.Repo} (holder={tok.Holder?.ToString() ?? "none"})"); return $"refused: ticket {tid} does not hold {t.Repo}'s merge token"; }
         if (tok.ExpiresTs is not null && DateTime.Parse(tok.ExpiresTs).ToUniversalTime() < DateTime.UtcNow)
         { _store.Event("land_refused", null, $"ticket {tid}: lease expired"); return "refused: merge-token lease expired; re-request"; }
 
-        var (hc, head) = Git.Run(_root, "rev-parse", "--abbrev-ref", "HEAD");
-        if (hc != 0 || head != _config.Main) return $"refused: project root has '{head}' checked out, not '{_config.Main}'";
+        var (hc, head) = Git.Run(repoPath, "rev-parse", "--abbrev-ref", "HEAD");
+        if (hc != 0 || head != cfg.Main) return $"refused: {where} has '{head}' checked out, not '{cfg.Main}'";
 
-        var (mc, mergeOut) = Git.Run(_root, "merge", "--ff-only", t.Branch);
+        var (mc, mergeOut) = Git.Run(repoPath, "merge", "--ff-only", t.Branch);
         if (mc != 0)
         {
             _store.Event("land_refused", null, $"ticket {tid}: ff-only failed — rebase needed. {mergeOut}");
-            return $"refused: not fast-forward — rebase {t.Branch} onto {_config.Main} and re-verify first. {mergeOut}";
+            return $"refused: not fast-forward — rebase {t.Branch} onto {cfg.Main} and re-verify first. {mergeOut}";
         }
 
-        if (!_store.LandCommit(tid, out var reason))
+        if (!_store.LandCommit(tid, t.Repo, out var reason))
         {
             // Merge advanced main but the fence refused in the same instant (lease raced
             // out). Reconcile-from-git heals: branch is an ancestor of main.
@@ -951,11 +1050,12 @@ sealed class Daemon
             return $"landed on main but store fence refused ({reason}) — run reconcile";
         }
 
-        // Post-land verify (§10): the daemon — code, not a model — runs the configured steps.
+        // Post-land verify (§10): the daemon — code, not a model — runs the configured
+        // steps, in the repository that just changed.
         var verifyMsg = "no verify steps configured";
-        foreach (var step in _config.Verify)
+        foreach (var step in cfg.Verify)
         {
-            var psi = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = _root };
+            var psi = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = repoPath };
             psi.ArgumentList.Add("/c");
             psi.ArgumentList.Add(step);
             using var p = Process.Start(psi)!;
@@ -969,30 +1069,31 @@ sealed class Daemon
                 goto verified;
             }
         }
-        if (_config.Verify.Length > 0) { _store.Event("verify_green", null, $"ticket {tid}"); verifyMsg = "verify green"; }
+        if (cfg.Verify.Length > 0) { _store.Event("verify_green", null, $"ticket {tid}"); verifyMsg = "verify green"; }
         verified:
 
         // Worktree prune — retryable, never silent (§15).
-        var (wc, wOut) = Git.Run(_root, "worktree", "remove", "--force", t.Worktree);
-        if (wc == 0) { Git.Run(_root, "branch", "-D", t.Branch); _store.Event("worktree_pruned", null, $"ticket {tid}"); }
+        var (wc, wOut) = Git.Run(repoPath, "worktree", "remove", "--force", t.Worktree);
+        if (wc == 0) { Git.Run(repoPath, "branch", "-D", t.Branch); _store.Event("worktree_pruned", null, $"ticket {tid}"); }
         else _store.Event("worktree_prune_failed", null, $"ticket {tid}: {wOut}");
 
         ok = true;
-        return $"landed ticket {tid} on {_config.Main}; {verifyMsg}";
+        return $"landed ticket {tid} on {(t.Repo == "." ? "" : t.Repo + "/")}{cfg.Main}; {verifyMsg}";
     }
 
     /// <summary>Deploy the claim gate (§6 enforcement layer 1) into a ticket's worktree:
     /// a PreToolUse hook that asks the daemon whether the write is covered. Fails OPEN
     /// (logged) — the merge-time backstop catches what slips; a broken gate must not
     /// brick the lane.</summary>
-    void DeployGate(string worktree, long ticketId)
+    void DeployGate(string worktree, long ticketId, RepoRef repo)
     {
         // The gate files are deployment, not repo content: register them in the repo's
         // shared info/exclude (applies to every worktree) so `git add -A` by an agent
         // can never commit them — a ticket-1 gate landing on main conflicts with every
         // other ticket's gate on rebase. (Found by the M1 acceptance test.)
         // M2 note: repos with their OWN tracked .claude/ need merge, not exclusion.
-        var exclude = Path.Combine(_root, ".git", "info", "exclude");
+        // The exclude file belongs to the TICKET'S repository, not the workspace.
+        var exclude = Path.Combine(repo.Path, ".git", "info", "exclude");
         Directory.CreateDirectory(Path.GetDirectoryName(exclude)!);
         var marker = "# dodona-gate deployment files";
         if (!File.Exists(exclude) || !File.ReadAllText(exclude).Contains(marker))

@@ -1,0 +1,22 @@
+﻿{
+    "discovers_repos":  "PASS",
+    "infers_repo_from_claims":  "PASS",
+    "second_repo_ticket":  "PASS",
+    "worktree_belongs_to_its_repo":  "PASS",
+    "second_worktree_is_other_repo":  "PASS",
+    "cross_repo_ticket_refused":  "PASS",
+    "claim_outside_any_repo_refused":  "PASS",
+    "gate_allows_claimed_path":  "PASS",
+    "gate_denies_other_repo":  "PASS",
+    "both_repos_hold_tokens_at_once":  "PASS",
+    "token_status_is_per_repo":  "PASS",
+    "same_repo_still_serializes":  "PASS",
+    "lands_in_its_own_repo":  "PASS",
+    "engine_main_advanced":  "PASS",
+    "tools_main_untouched":  "PASS",
+    "second_repo_lands_too":  "PASS",
+    "queue_advances_within_repo":  "PASS",
+    "backstop_uses_workspace_paths":  "PASS",
+    "lanes_are_workspace_wide":  "PASS",
+    "one_causal_chain_names_repos":  "PASS"
+}

@@ -20,7 +20,33 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
 | Published builds | `%LOCALAPPDATA%\Dodona\bin\<stamp>` (or `$env:DODONA_BIN_ROOT`) |
 | Agent session files (Claude Code's own) | `$env:CLAUDE_CONFIG_DIR\projects\<cwd-slug>\<session-id>.jsonl` |
 
-## The schema (v5 — `PRAGMA user_version`)
+## Workspaces and repositories
+
+A project root is a **workspace**: it anchors identity (one store, one daemon, one grid,
+one dispatcher) and holds either itself as a repository or several underneath it.
+`dodona repos` lists them. A repository is named by its workspace-relative path, or `.`
+when the workspace root is itself the repository — the ordinary single-repo project,
+where nothing ever mentions repos at all.
+
+- **A ticket belongs to exactly one repository.** Landing fast-forwards one branch onto
+  one main, and two fast-forwards cannot be made atomic, so a change spanning
+  repositories is two tickets. `ticket-create` refuses a cross-repo claim set and says so.
+- **The repository is inferred from the claims**, which are workspace-relative paths and
+  therefore already say (`subtree:engine/src` → `engine`). `--repo <name>` overrides;
+  symbol-only claims in a multi-repo workspace must.
+- **The merge token is per repository**, so `engine` and `tools` land in parallel while
+  two tickets in `engine` still serialize exactly as before.
+- **Claims stay workspace-relative everywhere.** The gate resolves an agent's write
+  inside its worktree and prefixes the repo name back on before matching; the merge-time
+  backstop does the same to git's repo-relative diff output. For `.` the prefix is empty,
+  which is why single-repo behaviour is bit-for-bit unchanged.
+- **`dodona.json` is per repository**, falling back to the workspace's — so one repo can
+  be on `main` with one set of verify steps while another is on `master` with different
+  ones.
+- **Lanes are workspace-wide** and need no repository at all: an agent can work in a
+  folder that has never seen git. Only tickets need one.
+
+## The schema (v6 — `PRAGMA user_version`)
 
 - **`lanes`** — `id, title, state (alive|unreachable|dead), pipe_name, session_id,
   created_ts`. The session_id is the resume handle; the pipe is the reattach handle.
@@ -32,15 +58,18 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
   applies to announcements only (the decision feed persists until acked — acked rows
   grey out, never disappear).
 - **`tickets`** — `id, lane_id, title, branch (ticket/<id>), worktree, state
-  (open|landed|abandoned), merge_mode (on-approval|auto), approved, created_ts,
-  landed_ts`. A branch is a thing that lands; that is what a ticket is.
+  (open|landed|abandoned), merge_mode (on-approval|auto), approved, repo, created_ts,
+  landed_ts`. A branch is a thing that lands; that is what a ticket is. `repo` is the
+  workspace-relative repository name, `.` for the workspace root itself.
 - **`claims`** — `ticket_id, kind (path|newfile|subtree|symbol), value`. Deleted in the
   same transaction that marks the ticket landed — a lingering claim row for a landed
   ticket is a bug. Values are normalized: forward slashes, lowercase, no leading slash.
-- **`merge_token`** — one row, id 1: `holder_ticket, generation, granted_ts, expires_ts,
-  main_sha`. Expired holders are reclaimed at the next request; `generation` increments
-  per grant. `main_sha` is what main was when the grant happened.
-- **`token_queue`** — FIFO of tickets waiting for the token.
+- **`merge_token`** — one row **per repository**, keyed by `repo`: `holder_ticket,
+  generation, granted_ts, expires_ts, main_sha`. Rows appear on first use. Expired
+  holders are reclaimed at the next request; `generation` increments per grant.
+  `main_sha` is what that repository's main was when the grant happened.
+- **`token_queue`** — FIFO of tickets waiting, `repo`-scoped: the head of `engine`'s
+  queue is independent of `tools`'.
 - **`routing_decisions`** — every routed input (§4): `ts, input, tier
   (prefix|focus|classifier), target_lane, delivered_lane, confidence, retargeted,
   undone`. `undone` is reserved for the UI's undo keystroke — free labeled data for

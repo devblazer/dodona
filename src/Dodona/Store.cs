@@ -147,6 +147,31 @@ sealed class Store : IDisposable
                 PRAGMA user_version = 5;
                 """);
         }
+        if (v < 6)
+        {
+            // A workspace holds several repositories. The merge token becomes per
+            // repository: a ticket landing in `engine` must not queue behind one landing
+            // in `tools` — different mains, no possible conflict, no reason to serialize.
+            // Existing single-repo stores migrate to the repo named ".", the workspace
+            // root itself, so nothing about them changes.
+            Exec("""
+                ALTER TABLE tickets ADD COLUMN repo TEXT NOT NULL DEFAULT '.';
+                ALTER TABLE token_queue ADD COLUMN repo TEXT NOT NULL DEFAULT '.';
+                CREATE TABLE merge_token_v6(
+                    repo TEXT PRIMARY KEY,
+                    holder_ticket INTEGER,
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    granted_ts TEXT,
+                    expires_ts TEXT,
+                    main_sha TEXT
+                );
+                INSERT INTO merge_token_v6(repo, holder_ticket, generation, granted_ts, expires_ts, main_sha)
+                    SELECT '.', holder_ticket, generation, granted_ts, expires_ts, main_sha FROM merge_token WHERE id = 1;
+                DROP TABLE merge_token;
+                ALTER TABLE merge_token_v6 RENAME TO merge_token;
+                PRAGMA user_version = 6;
+                """);
+        }
     }
 
     static string Now() => DateTime.UtcNow.ToString("o");
@@ -341,12 +366,12 @@ sealed class Store : IDisposable
     // ------------------------------------------------------------- tickets & claims
 
     public record TicketRow(long Id, long? LaneId, string Title, string Branch, string Worktree,
-                            string State, string MergeMode, bool Approved);
+                            string State, string MergeMode, bool Approved, string Repo);
 
     /// <summary>Check-and-insert in ONE transaction (§6, §12): claims are intersected
     /// against every open ticket's claims; no overlap → ticket + claims inserted;
     /// overlap → nothing inserted, conflicts returned.</summary>
-    public (long Id, List<string> Conflicts) TicketCreate(long? laneId, string title, string mode,
+    public (long Id, List<string> Conflicts) TicketCreate(long? laneId, string title, string mode, string repo,
                                                           List<(string Kind, string Value)> claims)
     {
         lock (_lock)
@@ -357,10 +382,11 @@ sealed class Store : IDisposable
 
             using var c = _db.CreateCommand();
             c.Transaction = tx;
-            c.CommandText = "INSERT INTO tickets(lane_id, title, merge_mode, created_ts) VALUES ($l, $t, $m, $ts); SELECT last_insert_rowid();";
+            c.CommandText = "INSERT INTO tickets(lane_id, title, merge_mode, repo, created_ts) VALUES ($l, $t, $m, $r, $ts); SELECT last_insert_rowid();";
             c.Parameters.AddWithValue("$l", (object?)laneId ?? DBNull.Value);
             c.Parameters.AddWithValue("$t", title);
             c.Parameters.AddWithValue("$m", mode);
+            c.Parameters.AddWithValue("$r", repo);
             c.Parameters.AddWithValue("$ts", Now());
             var id = (long)c.ExecuteScalar()!;
             InsertClaims(tx, id, claims);
@@ -447,17 +473,21 @@ sealed class Store : IDisposable
     public void TicketState(long id, string state) => Set("UPDATE tickets SET state = $v WHERE id = $id;", id, state);
     public void TicketApprove(long id) => Set("UPDATE tickets SET approved = 1 WHERE id = $id AND $v = $v;", id, "1");
 
+    const string TicketCols = "id, lane_id, title, branch, worktree, state, merge_mode, approved, repo";
+
+    static TicketRow ReadTicket(SqliteDataReader r) =>
+        new(r.GetInt64(0), r.IsDBNull(1) ? null : r.GetInt64(1), r.GetString(2), r.GetString(3),
+            r.GetString(4), r.GetString(5), r.GetString(6), r.GetInt64(7) == 1, r.GetString(8));
+
     public TicketRow? Ticket(long id)
     {
         lock (_lock)
         {
             using var c = _db.CreateCommand();
-            c.CommandText = "SELECT id, lane_id, title, branch, worktree, state, merge_mode, approved FROM tickets WHERE id = $id;";
+            c.CommandText = $"SELECT {TicketCols} FROM tickets WHERE id = $id;";
             c.Parameters.AddWithValue("$id", id);
             using var r = c.ExecuteReader();
-            if (!r.Read()) return null;
-            return new TicketRow(r.GetInt64(0), r.IsDBNull(1) ? null : r.GetInt64(1), r.GetString(2),
-                                 r.GetString(3), r.GetString(4), r.GetString(5), r.GetString(6), r.GetInt64(7) == 1);
+            return r.Read() ? ReadTicket(r) : null;
         }
     }
 
@@ -467,11 +497,9 @@ sealed class Store : IDisposable
         {
             var list = new List<TicketRow>();
             using var c = _db.CreateCommand();
-            c.CommandText = "SELECT id, lane_id, title, branch, worktree, state, merge_mode, approved FROM tickets ORDER BY id;";
+            c.CommandText = $"SELECT {TicketCols} FROM tickets ORDER BY id;";
             using var r = c.ExecuteReader();
-            while (r.Read())
-                list.Add(new TicketRow(r.GetInt64(0), r.IsDBNull(1) ? null : r.GetInt64(1), r.GetString(2),
-                                       r.GetString(3), r.GetString(4), r.GetString(5), r.GetString(6), r.GetInt64(7) == 1));
+            while (r.Read()) list.Add(ReadTicket(r));
             return list;
         }
     }
@@ -492,39 +520,65 @@ sealed class Store : IDisposable
 
     // ------------------------------------------------------------- merge token (§7)
 
-    public record TokenRow(long? Holder, long Generation, string? ExpiresTs, string? MainSha);
+    public record TokenRow(string Repo, long? Holder, long Generation, string? ExpiresTs, string? MainSha);
 
-    public TokenRow TokenRead()
+    public TokenRow TokenRead(string repo)
     {
-        lock (_lock) { return ReadToken(null); }
+        lock (_lock) { return ReadToken(null, repo); }
     }
 
-    TokenRow ReadToken(SqliteTransaction? tx)
+    /// <summary>Every repository's token — what `token-status` shows in a workspace.</summary>
+    public List<TokenRow> TokensAll()
     {
+        lock (_lock)
+        {
+            var list = new List<TokenRow>();
+            using var c = _db.CreateCommand();
+            c.CommandText = "SELECT repo, holder_ticket, generation, expires_ts, main_sha FROM merge_token ORDER BY repo;";
+            using var r = c.ExecuteReader();
+            while (r.Read())
+                list.Add(new TokenRow(r.GetString(0), r.IsDBNull(1) ? null : r.GetInt64(1), r.GetInt64(2),
+                                      r.IsDBNull(3) ? null : r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4)));
+            return list;
+        }
+    }
+
+    TokenRow ReadToken(SqliteTransaction? tx, string repo)
+    {
+        // Rows appear on first use: a repository that has never been landed in has no
+        // token row, which is indistinguishable from a free one.
+        using (var ins = _db.CreateCommand())
+        {
+            if (tx is not null) ins.Transaction = tx;
+            ins.CommandText = "INSERT OR IGNORE INTO merge_token(repo, generation) VALUES ($r, 0);";
+            ins.Parameters.AddWithValue("$r", repo);
+            ins.ExecuteNonQuery();
+        }
         using var c = _db.CreateCommand();
         if (tx is not null) c.Transaction = tx;
-        c.CommandText = "SELECT holder_ticket, generation, expires_ts, main_sha FROM merge_token WHERE id = 1;";
-        using var r = c.ExecuteReader();
-        r.Read();
-        return new TokenRow(r.IsDBNull(0) ? null : r.GetInt64(0), r.GetInt64(1),
-                            r.IsDBNull(2) ? null : r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3));
+        c.CommandText = "SELECT holder_ticket, generation, expires_ts, main_sha FROM merge_token WHERE repo = $r;";
+        c.Parameters.AddWithValue("$r", repo);
+        using var r2 = c.ExecuteReader();
+        r2.Read();
+        return new TokenRow(repo, r2.IsDBNull(0) ? null : r2.GetInt64(0), r2.GetInt64(1),
+                            r2.IsDBNull(2) ? null : r2.GetString(2), r2.IsDBNull(3) ? null : r2.GetString(3));
     }
 
     static bool Expired(TokenRow t) => t.ExpiresTs is not null && DateTime.Parse(t.ExpiresTs).ToUniversalTime() < DateTime.UtcNow;
 
     /// <summary>Request the merge token. Lease + FIFO in one transaction. An expired
     /// holder is reclaimed here — a crashed holder cannot wedge the queue (§7, §12).</summary>
-    public (string Status, long Generation, int Position) TokenRequest(long ticketId, int leaseSec, Func<string> mainSha)
+    public (string Status, long Generation, int Position) TokenRequest(long ticketId, string repo, int leaseSec, Func<string> mainSha)
     {
         lock (_lock)
         {
             using var tx = _db.BeginTransaction();
-            var t = ReadToken(tx);
+            var t = ReadToken(tx, repo);
 
             if (t.Holder is not null && Expired(t))
             {
-                TxExec(tx, "UPDATE merge_token SET holder_ticket = NULL WHERE id = 1;");
-                TxEvent(tx, "token_expired_reclaimed", $"was ticket {t.Holder}");
+                TxSet(tx, "UPDATE merge_token SET holder_ticket = NULL WHERE repo = $r;", repo);
+                TxEvent(tx, "token_expired_reclaimed", $"{repo}: was ticket {t.Holder}");
                 t = t with { Holder = null };
             }
 
@@ -534,12 +588,13 @@ sealed class Store : IDisposable
                 return ("granted", t.Generation, 0);
             }
 
-            // ensure enqueued
+            // ensure enqueued — the queue is per repository, like the token
             using (var c = _db.CreateCommand())
             {
                 c.Transaction = tx;
-                c.CommandText = "INSERT OR IGNORE INTO token_queue(ticket_id, enqueued_ts) VALUES ($t, $ts);";
+                c.CommandText = "INSERT OR IGNORE INTO token_queue(ticket_id, repo, enqueued_ts) VALUES ($t, $r, $ts);";
                 c.Parameters.AddWithValue("$t", ticketId);
+                c.Parameters.AddWithValue("$r", repo);
                 c.Parameters.AddWithValue("$ts", Now());
                 c.ExecuteNonQuery();
             }
@@ -548,7 +603,8 @@ sealed class Store : IDisposable
             using (var c = _db.CreateCommand())
             {
                 c.Transaction = tx;
-                c.CommandText = "SELECT ticket_id FROM token_queue ORDER BY id LIMIT 1;";
+                c.CommandText = "SELECT ticket_id FROM token_queue WHERE repo = $r ORDER BY id LIMIT 1;";
+                c.Parameters.AddWithValue("$r", repo);
                 head = (long)c.ExecuteScalar()!;
             }
 
@@ -560,15 +616,16 @@ sealed class Store : IDisposable
                 c.CommandText = """
                     DELETE FROM token_queue WHERE ticket_id = $t;
                     UPDATE merge_token SET holder_ticket = $t, generation = generation + 1,
-                        granted_ts = $ts, expires_ts = $exp, main_sha = $sha WHERE id = 1;
+                        granted_ts = $ts, expires_ts = $exp, main_sha = $sha WHERE repo = $r;
                     """;
                 c.Parameters.AddWithValue("$t", ticketId);
+                c.Parameters.AddWithValue("$r", repo);
                 c.Parameters.AddWithValue("$ts", Now());
                 c.Parameters.AddWithValue("$exp", DateTime.UtcNow.AddSeconds(leaseSec).ToString("o"));
                 c.Parameters.AddWithValue("$sha", sha);
                 c.ExecuteNonQuery();
-                var gen = ReadToken(tx).Generation;
-                TxEvent(tx, "token_granted", $"ticket {ticketId} gen {gen} main {sha[..8]} lease {leaseSec}s");
+                var gen = ReadToken(tx, repo).Generation;
+                TxEvent(tx, "token_granted", $"ticket {ticketId} repo {repo} gen {gen} main {sha[..8]} lease {leaseSec}s");
                 tx.Commit();
                 return ("granted", gen, 0);
             }
@@ -577,43 +634,48 @@ sealed class Store : IDisposable
             using (var c = _db.CreateCommand())
             {
                 c.Transaction = tx;
-                c.CommandText = "SELECT COUNT(*) FROM token_queue WHERE id <= (SELECT id FROM token_queue WHERE ticket_id = $t);";
+                c.CommandText = """
+                    SELECT COUNT(*) FROM token_queue
+                    WHERE repo = $r AND id <= (SELECT id FROM token_queue WHERE ticket_id = $t);
+                    """;
                 c.Parameters.AddWithValue("$t", ticketId);
+                c.Parameters.AddWithValue("$r", repo);
                 pos = Convert.ToInt32(c.ExecuteScalar());
             }
-            TxEvent(tx, "token_queued", $"ticket {ticketId} position {pos}");
+            TxEvent(tx, "token_queued", $"ticket {ticketId} repo {repo} position {pos}");
             tx.Commit();
             return ("queued", t.Generation, pos);
         }
     }
 
-    public bool TokenRenew(long ticketId, int leaseSec)
+    public bool TokenRenew(long ticketId, string repo, int leaseSec)
     {
         lock (_lock)
         {
             using var tx = _db.BeginTransaction();
-            var t = ReadToken(tx);
+            var t = ReadToken(tx, repo);
             if (t.Holder != ticketId || Expired(t)) { tx.Rollback(); return false; }
             using var c = _db.CreateCommand();
             c.Transaction = tx;
-            c.CommandText = "UPDATE merge_token SET expires_ts = $exp WHERE id = 1;";
+            c.CommandText = "UPDATE merge_token SET expires_ts = $exp WHERE repo = $r;";
             c.Parameters.AddWithValue("$exp", DateTime.UtcNow.AddSeconds(leaseSec).ToString("o"));
+            c.Parameters.AddWithValue("$r", repo);
             c.ExecuteNonQuery();
             tx.Commit();
             return true;
         }
     }
 
-    public void TokenRelease(long ticketId)
+    public void TokenRelease(long ticketId, string repo)
     {
         lock (_lock)
         {
             using var tx = _db.BeginTransaction();
-            var t = ReadToken(tx);
+            var t = ReadToken(tx, repo);
             if (t.Holder == ticketId)
             {
-                TxExec(tx, "UPDATE merge_token SET holder_ticket = NULL WHERE id = 1;");
-                TxEvent(tx, "token_released", $"ticket {ticketId}");
+                TxSet(tx, "UPDATE merge_token SET holder_ticket = NULL WHERE repo = $r;", repo);
+                TxEvent(tx, "token_released", $"ticket {ticketId} repo {repo}");
             }
             tx.Commit();
         }
@@ -622,13 +684,13 @@ sealed class Store : IDisposable
     /// <summary>The land fence + commit, one transaction (§7): holder identity and lease
     /// re-checked HERE, in the same transaction that records the land and frees the
     /// claims. Returns false if the fence refuses.</summary>
-    public bool LandCommit(long ticketId, out string reason)
+    public bool LandCommit(long ticketId, string repo, out string reason)
     {
         lock (_lock)
         {
             using var tx = _db.BeginTransaction();
-            var t = ReadToken(tx);
-            if (t.Holder != ticketId) { reason = $"token holder is {(t.Holder?.ToString() ?? "nobody")}, not ticket {ticketId}"; tx.Rollback(); return false; }
+            var t = ReadToken(tx, repo);
+            if (t.Holder != ticketId) { reason = $"token holder for {repo} is {(t.Holder?.ToString() ?? "nobody")}, not ticket {ticketId}"; tx.Rollback(); return false; }
             if (Expired(t)) { reason = "lease expired"; tx.Rollback(); return false; }
 
             using (var c = _db.CreateCommand())
@@ -638,13 +700,14 @@ sealed class Store : IDisposable
                     UPDATE tickets SET state = 'landed', landed_ts = $ts WHERE id = $t;
                     DELETE FROM claims WHERE ticket_id = $t;
                     DELETE FROM token_queue WHERE ticket_id = $t;
-                    UPDATE merge_token SET holder_ticket = NULL WHERE id = 1;
+                    UPDATE merge_token SET holder_ticket = NULL WHERE repo = $r;
                     """;
                 c.Parameters.AddWithValue("$t", ticketId);
+                c.Parameters.AddWithValue("$r", repo);
                 c.Parameters.AddWithValue("$ts", Now());
                 c.ExecuteNonQuery();
             }
-            TxEvent(tx, "landed", $"ticket {ticketId} gen {t.Generation}; claims released");
+            TxEvent(tx, "landed", $"ticket {ticketId} repo {repo} gen {t.Generation}; claims released");
             tx.Commit();
             reason = "";
             return true;
@@ -733,6 +796,15 @@ sealed class Store : IDisposable
         using var c = _db.CreateCommand();
         c.Transaction = tx;
         c.CommandText = sql;
+        c.ExecuteNonQuery();
+    }
+
+    void TxSet(SqliteTransaction tx, string sql, string repo)
+    {
+        using var c = _db.CreateCommand();
+        c.Transaction = tx;
+        c.CommandText = sql;
+        c.Parameters.AddWithValue("$r", repo);
         c.ExecuteNonQuery();
     }
 
