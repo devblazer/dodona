@@ -1,0 +1,12 @@
+﻿{
+    "backstop_refuses_outside_claim":  "PASS",
+    "backstop_passes_after_extend":  "PASS",
+    "presence_shows_tool":  "PASS",
+    "presence_idle_after_result":  "PASS",
+    "tier0_prefix_routes":  "PASS",
+    "tier0_message_delivered":  "PASS",
+    "focus_routes_optimistically":  "PASS",
+    "focus_message_delivered":  "PASS",
+    "unroutable_is_honest_error":  "PASS",
+    "routing_rows_recorded":  "PASS"
+}

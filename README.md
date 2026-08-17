@@ -52,6 +52,21 @@ Bug the test caught: gate files deployed into worktrees were committable by `git
 and landed on main, colliding with every other ticket's gate on rebase — deployment
 files now live in `.git/info/exclude`, invisible to git by construction.
 
-Next: **M2** — dispatcher session, tier-0 prefix routing, optimistic delivery + warm
-tier-1 classifier, code-derived presence, selective compression; first real claude lanes.
-Spike 4 (quota calibration) still parked, by choice.
+## M2 — routing, backstop, real lanes: **core DONE (10/10 + 11/11 live)**
+
+Schema v3. Delivered: merge-time claim backstop (a branch touching outside its claim is
+refused the token, `claim-extend` clears it); code-derived presence from tool_use wire
+events; tier-0 prefix routing; optimistic focus delivery with the warm haiku classifier
+as an async second opinion — visible retarget receipt, `routing_decisions` rows; and the
+**first real claude lanes**: `dodona ticket-agent` spawns claude in a gated ticket
+worktree with the `[DISPATCHER]`-channel system prompt (spike 3) and acceptEdits.
+
+Live smoke ([tests/m2-live.ps1](tests/m2-live.ps1), ~4 haiku turns): a real agent edited
+its claimed file (10.6s turn incl. cold start), was **denied by the gate** on an
+out-of-claim write and stopped and said so; the router retargeted a misrouted input with
+a receipt in the wrong pane (first classify 5.4s — cold session; steady-state is spike-4
+data).
+
+Deliberately carried to M3 (with the UI they serve): dispatcher session, selective
+compression pool, retraction-on-consumed-retarget, settings-merge for repos with their
+own tracked `.claude/`. Spike 4 (quota calibration) still parked, by choice.

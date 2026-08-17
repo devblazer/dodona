@@ -34,6 +34,20 @@ while ((line = Console.ReadLine()) is not null)
         message = new { role = "assistant", content = new object[] { new { type = "text", text = $"working on: {text}" } } },
     });
 
+    // tool:Name:arg — emit a claude-shaped tool_use event (drives presence derivation)
+    var tool = Regex.Match(text, @"tool:(\w+):(\S+)");
+    if (tool.Success)
+        Emit(new
+        {
+            type = "assistant",
+            session_id = sessionId,
+            message = new
+            {
+                role = "assistant",
+                content = new object[] { new { type = "tool_use", id = "fake-tool-1", name = tool.Groups[1].Value, input = new { file_path = tool.Groups[2].Value } } },
+            },
+        });
+
     var sleep = Regex.Match(text, @"sleep:(\d+)");
     if (sleep.Success) Thread.Sleep(int.Parse(sleep.Groups[1].Value) * 1000);
 

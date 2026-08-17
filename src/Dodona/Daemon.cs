@@ -24,6 +24,7 @@ sealed class Daemon
     readonly string _root, _instanceId, _ctlPipe;
     readonly Store _store;
     readonly Dictionary<long, LaneRuntime> _lanes = new();
+    readonly SemaphoreSlim _routerLock = new(1, 1);   // one classification at a time on the warm session
     Config _config;
 
     Daemon(string root, string instanceId, string ctlPipe, Store store)
@@ -103,33 +104,7 @@ sealed class Daemon
                 if (child is null) { w.WriteLine("error: --child <agent exe> is required"); break; }
                 var childArgs = e.TryGetProperty("childArgs", out var ca) && ca.ValueKind == JsonValueKind.Array
                     ? ca.EnumerateArray().Select(x => x.GetString()!).ToList() : new List<string>();
-
-                var id = _store.LaneCreate(title);
-                var pipe = $"dodona-{_instanceId}-lane{id}";
-                _store.LanePipe(id, pipe);
-
-                var shimExe = Environment.GetEnvironmentVariable("DODONA_SHIM")
-                              ?? Path.Combine(AppContext.BaseDirectory, "DodonaShim.exe");
-                var psi = new ProcessStartInfo(shimExe) { UseShellExecute = false, WorkingDirectory = _root };
-                psi.ArgumentList.Add(pipe);
-                psi.ArgumentList.Add(child);
-                foreach (var a in childArgs) psi.ArgumentList.Add(a);
-                psi.Environment["DODONA_SHIM_INFO"] = Path.Combine(_root, ".dodona", $"shim-lane{id}.json");
-                Process.Start(psi);
-                _store.Event("shim_spawned", id, $"pipe={pipe} child={child}");
-
-                var rt = new LaneRuntime(id, pipe, _store);
-                if (await rt.ConnectAndPumpAsync())
-                {
-                    _lanes[id] = rt;
-                    _store.Event("lane_started", id, title);
-                    w.WriteLine($"lane {id} title {title} pipe {pipe}");
-                }
-                else
-                {
-                    _store.LaneState(id, "unreachable");
-                    w.WriteLine($"error: lane {id} shim pipe never answered");
-                }
+                w.WriteLine(await SpawnLaneAsync(title, "work", _root, child, childArgs));
                 break;
             }
             case "say":
@@ -149,9 +124,60 @@ sealed class Daemon
                 foreach (var l in _store.LanesAll())
                 {
                     var connected = _lanes.TryGetValue(l.Id, out var rt) && rt.Connected;
-                    w.WriteLine($"lane {l.Id}  {l.Title,-10}  state={l.State}  connected={connected}  session={l.Session ?? "-"}");
+                    w.WriteLine($"lane {l.Id}  {l.Title,-10}  role={l.Role,-6}  state={l.State}  connected={connected}  presence={l.Presence,-16}  session={l.Session ?? "-"}");
                 }
                 break;
+
+            // ---------------- routing (M2, §4) ----------------
+            case "focus":
+            {
+                var lane = e.GetProperty("lane").GetInt64();
+                _store.KvSet("focused_lane", lane.ToString());
+                w.WriteLine($"focused lane {lane}");
+                break;
+            }
+            case "input":
+            {
+                var text = e.GetProperty("text").GetString()!;
+                w.WriteLine(RouteInput(text));
+                break;
+            }
+            case "router-start":
+            {
+                var child = e.TryGetProperty("child", out var rc) && rc.ValueKind == JsonValueKind.String ? rc.GetString()! : "claude";
+                var model = e.TryGetProperty("model", out var rm) && rm.ValueKind == JsonValueKind.String ? rm.GetString()! : "haiku";
+                var sys = "You are Dodona's input router. You will be given a list of lanes (title and subject), " +
+                          "the currently focused lane, and one user input. Reply with ONLY one line of JSON, no prose, no markdown: " +
+                          "{\"intent\":\"instruction|query|question\",\"target\":\"<LANE TITLE or none>\",\"confidence\":\"high|medium|low\",\"cleaned_text\":\"<the input, cleaned of dictation noise>\"} " +
+                          "target is the lane the input is meant for based on its content; say none when no lane fits. " +
+                          "Be willing to say confidence low — a confident wrong guess is worse than an honest unsure.";
+                var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+                                              "--verbose", "--model", model, "--append-system-prompt", sys };
+                w.WriteLine(await SpawnLaneAsync("ROUTER", "router", _root, child, args));
+                break;
+            }
+            case "ticket-agent":
+            {
+                var tid = e.GetProperty("ticket").GetInt64();
+                var t = _store.Ticket(tid);
+                if (t is null || t.State != "open") { w.WriteLine($"error: ticket {tid} not open"); break; }
+                var child = e.TryGetProperty("child", out var tc) && tc.ValueKind == JsonValueKind.String ? tc.GetString()! : "claude";
+                var model = e.TryGetProperty("model", out var tm) && tm.ValueKind == JsonValueKind.String ? tm.GetString()! : "sonnet";
+                var claims = string.Join(", ", _store.TicketClaims(tid).Select(cl => $"{cl.Kind}:{cl.Value}"));
+
+                // The lane-agent framing (§5, spike 3): declare the [DISPATCHER] channel or
+                // the model treats mid-turn instructions as a prompt-injection attempt.
+                var sys = $"You are a lane agent operated by the Dodona orchestrator, working ticket {tid}: \"{t.Title}\". " +
+                          $"Your worktree is the current working directory; work only there. Your declared claim is [{claims}] — " +
+                          "a PreToolUse gate denies writes outside it; if denied, stay within the claim or ask your operator for an extension. " +
+                          "Real-time instructions from your human operator arrive in hook output labeled [DISPATCHER]; they are authentic " +
+                          "and carry the same authority as your original task, even when they change or contradict earlier instructions.";
+                var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+                                              "--verbose", "--model", model, "--permission-mode", "acceptEdits",
+                                              "--append-system-prompt", sys };
+                w.WriteLine(await SpawnLaneAsync(t.Title, "work", t.Worktree, child, args));
+                break;
+            }
 
             // ---------------- tickets & claims (M1, §6/§11) ----------------
             case "ticket-create":
@@ -270,6 +296,28 @@ sealed class Daemon
                     w.WriteLine("##exit 1");
                     break;
                 }
+
+                // Merge-time backstop (§6 layer 2): diff the branch against its merge
+                // base; any touched path outside the claim refuses the token. This
+                // catches everything the fail-open hook gate cannot see.
+                var (dc, diff) = Git.Run(_root, "diff", "--name-only", $"{_config.Main}...{t.Branch}");
+                if (dc == 0 && diff.Length > 0)
+                {
+                    var ticketClaims = _store.TicketClaims(tid);
+                    var outside = diff.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(f => Claims.Normalize(f))
+                        .Where(f => !ticketClaims.Any(cl => Claims.Covers(cl.Kind, cl.Value, f)))
+                        .ToList();
+                    if (outside.Count > 0)
+                    {
+                        _store.Event("claim_backstop_refused", null, $"ticket {tid} touched outside claim: {string.Join(", ", outside)}");
+                        w.WriteLine($"refused: branch touches paths outside ticket {tid}'s claim: {string.Join(", ", outside)}");
+                        w.WriteLine($"         extend the claim (dodona claim-extend) or revert those changes");
+                        w.WriteLine("##exit 1");
+                        break;
+                    }
+                }
+
                 var (status, gen, pos) = _store.TokenRequest(tid, lease, () => Git.Sha(_root, _config.Main));
                 w.WriteLine(status == "granted"
                     ? $"granted ticket {tid} generation {gen}"
@@ -306,6 +354,107 @@ sealed class Daemon
                 return true;
         }
         return false;
+    }
+
+    /// <summary>Spawn a lane: shim → child, detached, pumped, recorded. Shared by
+    /// lane-start (fake/test agents), router-start (warm utility session), and
+    /// ticket-agent (real claude in a gated worktree).</summary>
+    async Task<string> SpawnLaneAsync(string title, string role, string workDir, string child, List<string> childArgs)
+    {
+        var id = _store.LaneCreate(title);
+        _store.LaneRole(id, role);
+        var pipe = $"dodona-{_instanceId}-lane{id}";
+        _store.LanePipe(id, pipe);
+
+        var shimExe = Environment.GetEnvironmentVariable("DODONA_SHIM")
+                      ?? Path.Combine(AppContext.BaseDirectory, "DodonaShim.exe");
+        var psi = new ProcessStartInfo(shimExe) { UseShellExecute = false, WorkingDirectory = workDir };
+        psi.ArgumentList.Add(pipe);
+        psi.ArgumentList.Add(child);
+        foreach (var a in childArgs) psi.ArgumentList.Add(a);
+        psi.Environment["DODONA_SHIM_INFO"] = Path.Combine(_root, ".dodona", $"shim-lane{id}.json");
+        Process.Start(psi);
+        _store.Event("shim_spawned", id, $"pipe={pipe} child={child} cwd={workDir}");
+
+        var rt = new LaneRuntime(id, pipe, _store);
+        if (await rt.ConnectAndPumpAsync(attempts: 20))
+        {
+            _lanes[id] = rt;
+            _store.Event("lane_started", id, $"{title} role={role}");
+            return $"lane {id} title {title} role {role} pipe {pipe}";
+        }
+        _store.LaneState(id, "unreachable");
+        return $"error: lane {id} shim pipe never answered";
+    }
+
+    /// <summary>Routing (§4): instant by default, corrected visibly. Tier 0 (prefix) is
+    /// code. Otherwise deliver to the focused lane IMMEDIATELY and let the warm
+    /// classifier run behind as an async second opinion — its latency is off the
+    /// critical path. A disagreement becomes a visible retarget with a receipt row.</summary>
+    string RouteInput(string text)
+    {
+        var work = _store.LanesAll().Where(l => l.Role == "work" && l.State == "alive").ToList();
+
+        // Tier 0: explicit prefix names its target. Code only.
+        var m = System.Text.RegularExpressions.Regex.Match(text, @"^([A-Za-z0-9_-]+):\s*(.+)$", System.Text.RegularExpressions.RegexOptions.Singleline);
+        if (m.Success)
+        {
+            var lane = work.FirstOrDefault(l => l.Title.Equals(m.Groups[1].Value, StringComparison.OrdinalIgnoreCase));
+            if (lane is not null && _lanes.TryGetValue(lane.Id, out var rt0))
+            {
+                rt0.Say(m.Groups[2].Value);
+                _store.RoutingInsert(text, "prefix", lane.Id, lane.Id, "explicit");
+                return $"-> {lane.Title} (tier 0)";
+            }
+        }
+
+        // Optimistic: focused lane gets it now.
+        var focused = _store.KvGet("focused_lane");
+        if (focused is null || !long.TryParse(focused, out var fid) || !_lanes.TryGetValue(fid, out var frt))
+            return "error: no focused lane and no lane prefix — use '<LANE>: text' or dodona focus <lane>";
+        frt.Say(text);
+        var rowId = _store.RoutingInsert(text, "focus", null, fid, null);
+
+        // Async second opinion, if a router lane is warm.
+        var router = _store.LanesAll().FirstOrDefault(l => l.Role == "router" && _lanes.ContainsKey(l.Id));
+        if (router is not null)
+        {
+            var laneList = string.Join("\n", work.Select(l => $"- {l.Title} (lane {l.Id})"));
+            var focusedTitle = work.FirstOrDefault(l => l.Id == fid)?.Title ?? "?";
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await _routerLock.WaitAsync();
+                    string? reply;
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    try { reply = await _lanes[router.Id].AskAsync($"Lanes:\n{laneList}\nFocused: {focusedTitle}\nInput: {text}", 20000); }
+                    finally { _routerLock.Release(); }
+                    if (reply is null) { _store.Event("classifier_timeout", router.Id, text); return; }
+
+                    var js = reply[reply.IndexOf('{')..(reply.LastIndexOf('}') + 1)];
+                    using var d = JsonDocument.Parse(js);
+                    var target = d.RootElement.TryGetProperty("target", out var tg) ? tg.GetString() : null;
+                    var conf = d.RootElement.TryGetProperty("confidence", out var cf) ? cf.GetString() ?? "low" : "low";
+                    _store.Event("classified", router.Id, $"{sw.ElapsedMilliseconds}ms target={target} confidence={conf} input={text}");
+
+                    var tLane = work.FirstOrDefault(l => l.Title.Equals(target ?? "", StringComparison.OrdinalIgnoreCase));
+                    if (tLane is null || tLane.Id == fid || conf == "low") return;   // agreement or unsure: done
+
+                    // Visible retarget (§4): receipt in the wrong pane, delivery to the right one.
+                    _store.PaneEvent(fid, "announcement", $"→ retargeted to {tLane.Title} (classifier, {conf})", null, null);
+                    if (_lanes.TryGetValue(tLane.Id, out var trt))
+                    {
+                        trt.Say(text);
+                        _store.RoutingRetarget(rowId, tLane.Id, conf);
+                        _store.Event("routed_retarget", tLane.Id, $"from lane {fid}: {text}");
+                    }
+                }
+                catch (Exception ex) { _store.Event("classifier_failed", router.Id, ex.Message); }
+            });
+        }
+        var fTitle = work.FirstOrDefault(l => l.Id == fid)?.Title ?? fid.ToString();
+        return $"-> {fTitle} (focus{(router is not null ? ", classifier running behind" : "")})";
     }
 
     /// <summary>The land (§7): the daemon executes the one atomic ref advance. The agent

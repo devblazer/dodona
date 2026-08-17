@@ -97,6 +97,26 @@ sealed class Store : IDisposable
                 PRAGMA user_version = 2;
                 """);
         }
+        if (v < 3)
+        {
+            Exec("""
+                ALTER TABLE lanes ADD COLUMN presence TEXT NOT NULL DEFAULT '';
+                ALTER TABLE lanes ADD COLUMN role TEXT NOT NULL DEFAULT 'work';   -- work | router | dispatcher
+                CREATE TABLE routing_decisions(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    input TEXT NOT NULL,
+                    tier TEXT NOT NULL,                 -- prefix | focus | classifier
+                    target_lane INTEGER,                -- the classifier's opinion
+                    delivered_lane INTEGER,             -- where it actually went (final)
+                    confidence TEXT,
+                    retargeted INTEGER NOT NULL DEFAULT 0,
+                    undone INTEGER NOT NULL DEFAULT 0   -- the undo keystroke is labeled data (§4)
+                );
+                CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                PRAGMA user_version = 3;
+                """);
+        }
     }
 
     static string Now() => DateTime.UtcNow.ToString("o");
@@ -137,6 +157,63 @@ sealed class Store : IDisposable
     public void LanePipe(long id, string pipe) => Set("UPDATE lanes SET pipe_name = $v WHERE id = $id;", id, pipe);
     public void LaneState(long id, string state) => Set("UPDATE lanes SET state = $v WHERE id = $id;", id, state);
     public void LaneSession(long id, string session) => Set("UPDATE lanes SET session_id = $v WHERE id = $id;", id, session);
+    public void LanePresence(long id, string presence) => Set("UPDATE lanes SET presence = $v WHERE id = $id;", id, presence);
+    public void LaneRole(long id, string role) => Set("UPDATE lanes SET role = $v WHERE id = $id;", id, role);
+
+    public void KvSet(string key, string value)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "INSERT INTO kv(key, value) VALUES ($k, $v) ON CONFLICT(key) DO UPDATE SET value = $v;";
+            c.Parameters.AddWithValue("$k", key);
+            c.Parameters.AddWithValue("$v", value);
+            c.ExecuteNonQuery();
+        }
+    }
+
+    public string? KvGet(string key)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "SELECT value FROM kv WHERE key = $k;";
+            c.Parameters.AddWithValue("$k", key);
+            return c.ExecuteScalar() as string;
+        }
+    }
+
+    public long RoutingInsert(string input, string tier, long? target, long? delivered, string? confidence)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = """
+                INSERT INTO routing_decisions(ts, input, tier, target_lane, delivered_lane, confidence)
+                VALUES ($ts, $i, $t, $tl, $dl, $c); SELECT last_insert_rowid();
+                """;
+            c.Parameters.AddWithValue("$ts", Now());
+            c.Parameters.AddWithValue("$i", input);
+            c.Parameters.AddWithValue("$t", tier);
+            c.Parameters.AddWithValue("$tl", (object?)target ?? DBNull.Value);
+            c.Parameters.AddWithValue("$dl", (object?)delivered ?? DBNull.Value);
+            c.Parameters.AddWithValue("$c", (object?)confidence ?? DBNull.Value);
+            return (long)c.ExecuteScalar()!;
+        }
+    }
+
+    public void RoutingRetarget(long id, long targetLane, string confidence)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "UPDATE routing_decisions SET tier = 'classifier', target_lane = $t, delivered_lane = $t, confidence = $c, retargeted = 1 WHERE id = $id;";
+            c.Parameters.AddWithValue("$t", targetLane);
+            c.Parameters.AddWithValue("$c", confidence);
+            c.Parameters.AddWithValue("$id", id);
+            c.ExecuteNonQuery();
+        }
+    }
 
     void Set(string sql, long id, string value)
     {
@@ -150,16 +227,19 @@ sealed class Store : IDisposable
         }
     }
 
-    public List<(long Id, string Title, string State, string Pipe, string? Session)> LanesAll()
+    public record LaneRow(long Id, string Title, string State, string Pipe, string? Session, string Presence, string Role);
+
+    public List<LaneRow> LanesAll()
     {
         lock (_lock)
         {
-            var list = new List<(long, string, string, string, string?)>();
+            var list = new List<LaneRow>();
             using var c = _db.CreateCommand();
-            c.CommandText = "SELECT id, title, state, pipe_name, session_id FROM lanes ORDER BY id;";
+            c.CommandText = "SELECT id, title, state, pipe_name, session_id, presence, role FROM lanes ORDER BY id;";
             using var r = c.ExecuteReader();
             while (r.Read())
-                list.Add((r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4)));
+                list.Add(new LaneRow(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3),
+                                     r.IsDBNull(4) ? null : r.GetString(4), r.GetString(5), r.GetString(6)));
             return list;
         }
     }

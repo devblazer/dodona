@@ -36,15 +36,23 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
   main_sha`. Expired holders are reclaimed at the next request; `generation` increments
   per grant. `main_sha` is what main was when the grant happened.
 - **`token_queue`** — FIFO of tickets waiting for the token.
+- **`routing_decisions`** — every routed input (§4): `ts, input, tier
+  (prefix|focus|classifier), target_lane, delivered_lane, confidence, retargeted,
+  undone`. `undone` is reserved for the UI's undo keystroke — free labeled data for
+  tuning the confidence threshold.
+- **`kv`** — small state: `focused_lane`.
+- **`lanes`** additionally carries `presence` (derived by code from tool_use wire
+  events — never a model) and `role ∈ work | router | dispatcher`.
 - **`events`** — the causal chain: `ts, kind, lane_id, detail`. Every daemon action
   writes here. Lane kinds: `daemon_start`, `reconcile_done`, `shim_spawned`,
   `lane_connected`, `lane_unreachable`, `lane_pipe_lost`, `say`, `daemon_stop`.
   Ticket/merge kinds: `ticket_created`, `claim_conflict`, `claim_extended`,
   `ticket_approved`, `token_granted`, `token_queued`, `token_refused_unapproved`,
-  `token_released`, `token_expired_reclaimed`, `landed`, `land_refused`,
-  `land_inconsistent`, `verify_green`, `verify_red`, `worktree_pruned`,
-  `worktree_prune_failed`, `ticket_git_failed`. **If a state change happened with no
-  event row naming why, that is a bug — report it as one.**
+  `token_released`, `token_expired_reclaimed`, `claim_backstop_refused`, `landed`,
+  `land_refused`, `land_inconsistent`, `verify_green`, `verify_red`, `worktree_pruned`,
+  `worktree_prune_failed`, `ticket_git_failed`. Routing kinds: `classified` (with
+  latency), `routed_retarget`, `classifier_timeout`, `classifier_failed`. **If a state
+  change happened with no event row naming why, that is a bug — report it as one.**
 
 ## The claim gate
 

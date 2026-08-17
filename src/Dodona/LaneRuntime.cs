@@ -20,6 +20,7 @@ sealed class LaneRuntime
     readonly Store _store;
     StreamWriter? _writer;
     public volatile bool Connected;
+    TaskCompletionSource<string>? _resultTcs;
 
     public LaneRuntime(long id, string pipeName, Store store)
     {
@@ -87,13 +88,30 @@ sealed class LaneRuntime
                     kind = "agent_line";
                     var sb = new StringBuilder();
                     foreach (var c in d.RootElement.GetProperty("message").GetProperty("content").EnumerateArray())
-                        if (c.TryGetProperty("type", out var ct) && ct.GetString() == "text")
-                            sb.Append(c.GetProperty("text").GetString());
+                    {
+                        var ct = c.TryGetProperty("type", out var ctp) ? ctp.GetString() : null;
+                        if (ct == "text") sb.Append(c.GetProperty("text").GetString());
+                        else if (ct == "tool_use")
+                        {
+                            // Presence is derived from tool events by CODE — no model (§5).
+                            var tool = c.TryGetProperty("name", out var tn) ? tn.GetString() ?? "?" : "?";
+                            var detail = "";
+                            if (c.TryGetProperty("input", out var inp))
+                            {
+                                if (inp.TryGetProperty("file_path", out var fp)) detail = Path.GetFileName(fp.GetString() ?? "");
+                                else if (inp.TryGetProperty("command", out var cm)) detail = Truncate(cm.GetString() ?? "", 40);
+                            }
+                            _store.LanePresence(Id, $"{tool.ToLowerInvariant()}: {detail}".TrimEnd(':', ' '));
+                        }
+                    }
                     body = sb.ToString();
+                    if (body.Length == 0) return;            // tool-only assistant event: presence updated, no pane line
                     break;
                 case "result":
                     kind = "result";
                     body = d.RootElement.TryGetProperty("result", out var res) ? res.GetString() ?? "" : "";
+                    _store.LanePresence(Id, "idle");
+                    _resultTcs?.TrySetResult(body);
                     break;
             }
         }
@@ -107,6 +125,7 @@ sealed class LaneRuntime
         if (_writer is null || !Connected) throw new InvalidOperationException($"lane {Id} not connected");
         _store.PaneEvent(Id, "user_input", text, null, null);
         _store.Event("say", Id, text);
+        _store.LanePresence(Id, "working…");
         var msg = JsonSerializer.Serialize(new
         {
             type = "user",
@@ -114,4 +133,18 @@ sealed class LaneRuntime
         });
         _writer.WriteLine(msg);
     }
+
+    /// <summary>One request/response turn: send, await this lane's next result event.
+    /// Used for utility lanes (the router). Returns null on timeout.</summary>
+    public async Task<string?> AskAsync(string text, int timeoutMs)
+    {
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _resultTcs = tcs;
+        Say(text);
+        var done = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+        _resultTcs = null;
+        return done == tcs.Task ? tcs.Task.Result : null;
+    }
+
+    static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
 }
