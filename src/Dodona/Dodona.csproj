@@ -11,6 +11,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationIcon>..\..\assets\dodona.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

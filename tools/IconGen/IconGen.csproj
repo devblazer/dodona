@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Generates assets/dodona.ico. Not part of the solution build; run it when the
+       icon changes: `dotnet run` with project tools/IconGen. The icon is vector-drawn in
+       code and rendered per size, so it is regenerable and reviewable (§17: the capture
+       loop applies to the icon too: render, look, adjust). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>
