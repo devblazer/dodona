@@ -117,6 +117,15 @@ sealed class Store : IDisposable
                 PRAGMA user_version = 3;
                 """);
         }
+        if (v < 4)
+        {
+            // M3: the decision feed persists until acked (§8) — acked is state, not
+            // deletion; the pane replay must still show the row.
+            Exec("""
+                ALTER TABLE pane_events ADD COLUMN acked INTEGER NOT NULL DEFAULT 0;
+                PRAGMA user_version = 4;
+                """);
+        }
     }
 
     static string Now() => DateTime.UtcNow.ToString("o");
@@ -260,6 +269,35 @@ sealed class Store : IDisposable
         }
     }
 
+    public bool PaneAck(long paneEventId)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "UPDATE pane_events SET acked = 1 WHERE id = $id AND kind = 'announcement' AND acked = 0;";
+            c.Parameters.AddWithValue("$id", paneEventId);
+            return c.ExecuteNonQuery() > 0;
+        }
+    }
+
+    /// <summary>Mark a routing decision undone (§4: the undo keystroke is labeled data)
+    /// and return where it was delivered so the daemon can send a retraction.</summary>
+    public (long? DeliveredLane, string Input)? RoutingUndo(long id)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = """
+                UPDATE routing_decisions SET undone = 1 WHERE id = $id AND undone = 0
+                RETURNING delivered_lane, input;
+                """;
+            c.Parameters.AddWithValue("$id", id);
+            using var r = c.ExecuteReader();
+            if (!r.Read()) return null;
+            return (r.IsDBNull(0) ? null : r.GetInt64(0), r.GetString(1));
+        }
+    }
+
     public List<string> Tail(long laneId, int n)
     {
         lock (_lock)
@@ -356,6 +394,18 @@ sealed class Store : IDisposable
             c.Parameters.AddWithValue("$k", k);
             c.Parameters.AddWithValue("$v", v);
             c.Parameters.AddWithValue("$ts", Now());
+            c.ExecuteNonQuery();
+        }
+    }
+
+    public void TicketSetLane(long id, long laneId)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "UPDATE tickets SET lane_id = $l WHERE id = $id;";
+            c.Parameters.AddWithValue("$l", laneId);
+            c.Parameters.AddWithValue("$id", id);
             c.ExecuteNonQuery();
         }
     }

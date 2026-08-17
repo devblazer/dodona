@@ -17,6 +17,7 @@ string instanceId;
     instanceId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))[..8].ToLowerInvariant();
 }
 string ctlPipe = $"dodona-{instanceId}-ctl";
+string uiPipe = $"dodona-{instanceId}-ui";
 
 return cmd switch
 {
@@ -39,17 +40,37 @@ return cmd switch
     "token-release" => Client(new { cmd = "token-release", ticket = long.Parse(pos[0]) }),
     "token-status" => Client(new { cmd = "token-status" }),
     "land" => Client(new { cmd = "land", ticket = long.Parse(pos[0]) }),
+    "ack" => Client(new { cmd = "ack", id = long.Parse(pos[0]) }),
+    "undo-route" => Client(new { cmd = "undo-route", id = long.Parse(pos[0]) }),
+    "ui" => Ui(),
     "stop-daemon" => Client(new { cmd = "stop-daemon" }),
     _ => Fail($"unknown command: {cmd}"),
 };
 
+// The ui verbs (§17) talk to the UI process, not the daemon — the UI testifies about
+// what it is actually showing. Same line protocol, different pipe.
+int Ui()
+{
+    if (pos.Count == 0) return Fail("ui verb required: dump | screenshot | pose <name> | overlay <PANE|off> | close");
+    return pos[0] switch
+    {
+        "dump" => Client(new { verb = "dump" }, uiPipe),
+        "screenshot" => Client(new { verb = "screenshot", @out = Path.GetFullPath(One("out") ?? "dodona-ui.png"), pane = One("pane") }, uiPipe),
+        "pose" => pos.Count > 1 ? Client(new { verb = "pose", name = pos[1] }, uiPipe) : Fail("ui pose <name|live>"),
+        "overlay" => pos.Count > 1 ? Client(new { verb = "overlay", pane = pos[1] }, uiPipe) : Fail("ui overlay <PANE|off>"),
+        "close" => Client(new { verb = "close" }, uiPipe),
+        _ => Fail($"unknown ui verb: {pos[0]}"),
+    };
+}
+
 // ---------------------------------------------------------------- client role
 
-int Client(object request)
+int Client(object request, string? pipeName = null)
 {
-    var pipe = new NamedPipeClientStream(".", ctlPipe, PipeDirection.InOut);
+    pipeName ??= ctlPipe;
+    var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
     try { pipe.Connect(3000); }
-    catch { return Fail($"daemon not running for this root (ctl pipe {ctlPipe})"); }
+    catch { return Fail(pipeName == ctlPipe ? $"daemon not running for this root (ctl pipe {pipeName})" : $"UI not running for this root (pipe {pipeName})"); }
     var w = new StreamWriter(pipe) { AutoFlush = true };
     var r = new StreamReader(pipe);
     bool err = false;
@@ -114,6 +135,10 @@ static void Help() => Console.WriteLine("""
     merge (§7):
       dodona token-request <ticket> [--lease sec] | token-renew | token-release | token-status
       dodona land <ticket>
+    ui (§8/§17 — talks to the DodonaUi process, not the daemon):
+      dodona ui dump | ui screenshot [--pane <PANE>] --out <png> | ui pose <name|live>
+      dodona ui overlay <PANE|off> | ui close
+      dodona ack <pane_event_id> | undo-route <routing_decision_id>
       dodona stop-daemon
     All commands accept --root <path> (default: cwd).
     """);

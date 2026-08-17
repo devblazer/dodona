@@ -104,7 +104,7 @@ sealed class Daemon
                 if (child is null) { w.WriteLine("error: --child <agent exe> is required"); break; }
                 var childArgs = e.TryGetProperty("childArgs", out var ca) && ca.ValueKind == JsonValueKind.Array
                     ? ca.EnumerateArray().Select(x => x.GetString()!).ToList() : new List<string>();
-                w.WriteLine(await SpawnLaneAsync(title, "work", _root, child, childArgs));
+                w.WriteLine((await SpawnLaneAsync(title, "work", _root, child, childArgs)).Msg);
                 break;
             }
             case "say":
@@ -153,7 +153,7 @@ sealed class Daemon
                           "Be willing to say confidence low — a confident wrong guess is worse than an honest unsure.";
                 var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                                               "--verbose", "--model", model, "--append-system-prompt", sys };
-                w.WriteLine(await SpawnLaneAsync("ROUTER", "router", _root, child, args));
+                w.WriteLine((await SpawnLaneAsync("ROUTER", "router", _root, child, args)).Msg);
                 break;
             }
             case "ticket-agent":
@@ -175,7 +175,10 @@ sealed class Daemon
                 var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                                               "--verbose", "--model", model, "--permission-mode", "acceptEdits",
                                               "--append-system-prompt", sys };
-                w.WriteLine(await SpawnLaneAsync(t.Title, "work", t.Worktree, child, args));
+                var (laneId, msg) = await SpawnLaneAsync(t.Title, "work", t.Worktree, child, args);
+                // Link ticket ↔ lane: "waiting on you: merge" (§8) needs a pane to land in.
+                if (laneId > 0) _store.TicketSetLane(tid, laneId);
+                w.WriteLine(msg);
                 break;
             }
 
@@ -274,7 +277,36 @@ sealed class Daemon
                 var tid = e.GetProperty("ticket").GetInt64();
                 _store.TicketApprove(tid);
                 _store.Event("ticket_approved", null, $"ticket {tid}");
+                // Unblock the lane: presence back to idle, receipt in the pane.
+                if (_store.Ticket(tid)?.LaneId is long alid)
+                {
+                    _store.LanePresence(alid, "idle");
+                    _store.PaneEvent(alid, "announcement", $"ticket {tid} approved — merge unblocked", null, null);
+                }
                 w.WriteLine($"approved ticket {tid}");
+                break;
+            }
+            case "ack":
+            {
+                var id = e.GetProperty("id").GetInt64();
+                w.WriteLine(_store.PaneAck(id) ? $"acked {id}" : $"error: {id} is not an unacked announcement");
+                break;
+            }
+            case "undo-route":
+            {
+                var id = e.GetProperty("id").GetInt64();
+                var undone = _store.RoutingUndo(id);
+                if (undone is null) { w.WriteLine($"error: routing decision {id} not found or already undone"); break; }
+                var (dl, input) = undone.Value;
+                // Retraction to the lane that consumed the misroute — [DISPATCHER] framing
+                // so the agent treats it as operator-authentic (spike 3).
+                if (dl is long dlid && _lanes.TryGetValue(dlid, out var drt) && drt.Connected)
+                {
+                    drt.Say($"[DISPATCHER] Disregard this earlier message, it was routed to you by mistake: \"{input}\". Do not act on it; if you already started, stop and undo.");
+                    _store.PaneEvent(dlid, "announcement", $"↩ undone: \"{Truncate(input, 60)}\" retracted", null, null);
+                }
+                _store.Event("route_undone", dl, $"decision {id}: {input}");
+                w.WriteLine($"undone routing decision {id}");
                 break;
             }
             case "tickets":
@@ -292,6 +324,13 @@ sealed class Daemon
                 if (t.MergeMode == "on-approval" && !t.Approved)
                 {
                     _store.Event("token_refused_unapproved", null, $"ticket {tid}");
+                    // Blocked-on-you is categorically distinct (§8): presence flips to
+                    // "waiting on you" and the announcement lands in the pane AND the feed.
+                    if (t.LaneId is long blid)
+                    {
+                        _store.LanePresence(blid, "waiting on you: merge");
+                        _store.PaneEvent(blid, "announcement", $"waiting on you: merge ticket {tid} '{t.Title}' — dodona approve {tid}", null, null);
+                    }
                     w.WriteLine($"refused: ticket {tid} is merge:on-approval and not approved");
                     w.WriteLine("##exit 1");
                     break;
@@ -356,10 +395,12 @@ sealed class Daemon
         return false;
     }
 
+    static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
+
     /// <summary>Spawn a lane: shim → child, detached, pumped, recorded. Shared by
     /// lane-start (fake/test agents), router-start (warm utility session), and
     /// ticket-agent (real claude in a gated worktree).</summary>
-    async Task<string> SpawnLaneAsync(string title, string role, string workDir, string child, List<string> childArgs)
+    async Task<(long Id, string Msg)> SpawnLaneAsync(string title, string role, string workDir, string child, List<string> childArgs)
     {
         var id = _store.LaneCreate(title);
         _store.LaneRole(id, role);
@@ -381,10 +422,10 @@ sealed class Daemon
         {
             _lanes[id] = rt;
             _store.Event("lane_started", id, $"{title} role={role}");
-            return $"lane {id} title {title} role {role} pipe {pipe}";
+            return (id, $"lane {id} title {title} role {role} pipe {pipe}");
         }
         _store.LaneState(id, "unreachable");
-        return $"error: lane {id} shim pipe never answered";
+        return (-1, $"error: lane {id} shim pipe never answered");
     }
 
     /// <summary>Routing (§4): instant by default, corrected visibly. Tier 0 (prefix) is

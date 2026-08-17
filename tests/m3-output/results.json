@@ -1,0 +1,21 @@
+﻿{
+    "panes_replay_store_rows":  "PASS",
+    "fixed_slots_and_colors":  "PASS",
+    "presence_idle_after_result":  "PASS",
+    "routed_input_reaches_pane":  "PASS",
+    "focus_marked_in_ui":  "PASS",
+    "blocked_state_in_pane":  "PASS",
+    "blocked_lands_in_feed":  "PASS",
+    "ack_clears_badge_keeps_row":  "PASS",
+    "approve_unblocks_lane":  "PASS",
+    "undo_route_retracts":  "PASS",
+    "overlay_opens":  "PASS",
+    "overlay_closes":  "PASS",
+    "screenshot_fixed_size":  "PASS",
+    "pane_screenshot_writes":  "PASS",
+    "poses_render_distinct":  "PASS",
+    "pose_blocked_testifies":  "PASS",
+    "pose_screenshot_deterministic":  "PASS",
+    "pose_live_resumes_store":  "PASS",
+    "ui_close_exits_process":  "PASS"
+}

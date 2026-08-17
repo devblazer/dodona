@@ -1,0 +1,178 @@
+# M3 acceptance: the UI is a dumb view over the store (§8, §17). Fake agents, zero model
+# calls. Assertions are `dodona ui dump` JSON (the UI testifies about what it shows),
+# store rows, and screenshot pixel dimensions — no human eye required.
+
+$ErrorActionPreference = 'Stop'
+$repo = Split-Path -Parent $PSScriptRoot
+$dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
+$ui = "$repo\src\DodonaUi\bin\Release\net8.0-windows\DodonaUi.exe"
+$fake = "$repo\src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.exe"
+$env:DODONA_SHIM = "$repo\src\DodonaShim\bin\Release\net8.0\DodonaShim.exe"
+$out = Join-Path $PSScriptRoot 'm3-output'
+New-Item -ItemType Directory -Force $out | Out-Null
+Remove-Item "$out\*" -Force -Recurse -ErrorAction SilentlyContinue
+
+$root = Join-Path $env:TEMP ("dodona-m3-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force "$root\src\water", "$root\src\sky" | Out-Null
+Set-Content "$root\src\water\sim.cs" "// water"
+Set-Content "$root\src\sky\box.cs" "// sky"
+Set-Content "$root\.gitignore" ".dodona/"
+git -C $root init -b main -q
+git -C $root add -A
+git -C $root -c user.email=t@t -c user.name=t commit -q -m init
+
+$results = [ordered]@{}
+function Dodona([string[]]$a) { $global:DODONA_EXIT = 0; $o = (& $dodona ($a + @('--root', $root))) | Out-String; $global:DODONA_EXIT = $LASTEXITCODE; $o.Trim() }
+function Dump() { Dodona @('ui', 'dump') | ConvertFrom-Json }
+function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$name] = if ($cond) { 'PASS' } else { "FAIL $detail".Trim() } }
+function PngDims([string]$path) {
+    # [int] casts matter: -shl on a [byte] stays a byte and overflows to zero.
+    $b = [IO.File]::ReadAllBytes($path)
+    $w = ([int]$b[16] -shl 24) + ([int]$b[17] -shl 16) + ([int]$b[18] -shl 8) + [int]$b[19]
+    $h = ([int]$b[20] -shl 24) + ([int]$b[21] -shl 16) + ([int]$b[22] -shl 8) + [int]$b[23]
+    "$($w)x$($h)"
+}
+
+$daemon = $null
+$uiProc = $null
+try {
+    $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
+    Start-Sleep -Milliseconds 800
+
+    # Lanes: a ticket-agent lane (WATER, linked to ticket 1 — the fake agent ignores the
+    # claude argv, which is exactly the §17 test seam) and a plain lane (SKY).
+    Dodona @("ticket-create", "--title", "WATER", "--claim", "subtree:src/water") | Out-Null
+    $ta = Dodona @("ticket-agent", "1", "--child", $fake)
+    if ($ta -notmatch 'lane (\d+)') { throw "ticket-agent failed: $ta" }
+    $waterLane = $Matches[1]
+    $ls = Dodona @("lane-start", "--title", "SKY", "--child", $fake)
+    if ($ls -notmatch 'lane (\d+)') { throw "lane-start failed: $ls" }
+    $skyLane = $Matches[1]
+    Dodona @("say", "$waterLane", "say water ready") | Out-Null
+    Dodona @("say", "$skyLane", "say sky ready") | Out-Null
+
+    # ---- the UI is a replay of rows: launch AFTER the messages exist ----
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root -PassThru
+    Start-Sleep -Milliseconds 1800
+
+    $d = Dump
+    $water = $d.slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }
+    $sky = $d.slots | Where-Object { -not $_.empty -and $_.title -eq 'SKY' }
+    Check 'panes_replay_store_rows' ($null -ne $water -and $null -ne $sky -and
+        ($water.lines -join '|') -match 'water ready' -and ($sky.lines -join '|') -match 'sky ready') ($d.slots | ConvertTo-Json -Compress)
+    Check 'fixed_slots_and_colors' ($water.slot -eq 0 -and $sky.slot -eq 1 -and $water.color -ne $sky.color) "water=$($water.slot) sky=$($sky.slot)"
+    Check 'presence_idle_after_result' ($water.presence -eq 'idle') $water.presence
+
+    # ---- a click and a pipe message are the same thing: route via daemon, see it in the UI ----
+    Dodona @("focus", "$skyLane") | Out-Null
+    Dodona @("input", "say focus works") | Out-Null
+    Start-Sleep -Milliseconds 900
+    $d = Dump
+    $sky = $d.slots | Where-Object { $_.title -eq 'SKY' }
+    Check 'routed_input_reaches_pane' (($sky.lines -join '|') -match 'you> say focus works') ($sky.lines -join '|')
+    Check 'focus_marked_in_ui' ($sky.focused -eq $true -and ($d.slots | Where-Object { $_.title -eq 'WATER' }).focused -ne $true) ''
+
+    # ---- blocked-on-you (§8): refused merge -> border+glyph+badge+presence+feed row ----
+    Dodona @("token-request", "1") | Out-Null      # on-approval, unapproved -> refused
+    Start-Sleep -Milliseconds 900
+    $d = Dump
+    $water = $d.slots | Where-Object { $_.title -eq 'WATER' }
+    Check 'blocked_state_in_pane' ($water.blocked -eq $true -and $water.presence -eq 'waiting on you: merge' -and $water.badge -eq 1) ($water | ConvertTo-Json -Compress)
+    $feedRow = $d.feed | Where-Object { $_.body -match 'waiting on you: merge ticket 1' } | Select-Object -First 1
+    Check 'blocked_lands_in_feed' ($null -ne $feedRow -and $feedRow.acked -eq $false) ($d.feed | ConvertTo-Json -Compress)
+
+    # ---- ack clears the badge but the row stays (greyed), never deleted ----
+    Dodona @("ack", "$($feedRow.id)") | Out-Null
+    Start-Sleep -Milliseconds 900
+    $d = Dump
+    $water = $d.slots | Where-Object { $_.title -eq 'WATER' }
+    $acked = $d.feed | Where-Object { $_.id -eq $feedRow.id }
+    Check 'ack_clears_badge_keeps_row' ($water.badge -eq 0 -and $acked.acked -eq $true) ($d.feed | ConvertTo-Json -Compress)
+
+    # ---- approve unblocks: presence back to idle, receipt announced ----
+    Dodona @("approve", "1") | Out-Null
+    Start-Sleep -Milliseconds 900
+    $d = Dump
+    $water = $d.slots | Where-Object { $_.title -eq 'WATER' }
+    Check 'approve_unblocks_lane' ($water.blocked -eq $false -and $water.presence -eq 'idle' -and
+        (@($d.feed | Where-Object { $_.body -match 'approved' }).Count -ge 1)) ($water | ConvertTo-Json -Compress)
+
+    # ---- undo-route (§4): undo is labeled data + a retraction the agent can act on ----
+    Dodona @("input", "say oops wrong lane") | Out-Null
+    Start-Sleep -Milliseconds 400
+    $route = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$root\.dodona\store.db')
+print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fetchone()[0])
+") | Out-String
+    Dodona @("undo-route", $route.Trim()) | Out-Null
+    Start-Sleep -Milliseconds 400
+    $tail = Dodona @("tail", "$skyLane", "10")
+    $undone = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$root\.dodona\store.db')
+print(db.execute('SELECT undone FROM routing_decisions ORDER BY id DESC LIMIT 1').fetchone()[0])
+") | Out-String
+    Check 'undo_route_retracts' ($tail -match 'Disregard' -and $undone.Trim() -eq '1') "undone=$($undone.Trim()) tail=$tail"
+
+    # ---- overlay maximize: verb-driven, grid never reflows underneath ----
+    Dodona @("ui", "overlay", "WATER") | Out-Null
+    Start-Sleep -Milliseconds 700
+    $d = Dump
+    Check 'overlay_opens' ($d.overlay -eq 'WATER') $d.overlay
+    Dodona @("ui", "overlay", "off") | Out-Null
+    $d = Dump
+    Check 'overlay_closes' ($null -eq $d.overlay) "$($d.overlay)"
+
+    # ---- screenshots are deterministic pixels (§17): fixed 1600x900, pane-scoped works ----
+    Dodona @("ui", "screenshot", "--out", "$out\live.png") | Out-Null
+    Check 'screenshot_fixed_size' ((PngDims "$out\live.png") -eq '1600x900') (PngDims "$out\live.png")
+    Dodona @("ui", "screenshot", "--pane", "WATER", "--out", "$out\live-water.png") | Out-Null
+    Check 'pane_screenshot_writes' ((Test-Path "$out\live-water.png") -and (Get-Item "$out\live-water.png").Length -gt 1000) ''
+
+    # ---- poses (§17): each visual state on demand, deterministic, distinct ----
+    $poseHashes = @{}
+    foreach ($pose in 'full', 'badges', 'blocked', 'empty-slot', 'tray', 'overlay') {
+        Dodona @("ui", "pose", $pose) | Out-Null
+        Dodona @("ui", "screenshot", "--out", "$out\pose-$pose.png") | Out-Null
+        $poseHashes[$pose] = (Get-FileHash "$out\pose-$pose.png").Hash
+    }
+    Check 'poses_render_distinct' (($poseHashes.Values | Select-Object -Unique).Count -eq 6) (($poseHashes.Values | Select-Object -Unique).Count)
+
+    Dodona @("ui", "pose", "blocked") | Out-Null
+    $d = Dump
+    $posedBlocked = $d.slots | Where-Object { -not $_.empty -and $_.blocked }
+    Check 'pose_blocked_testifies' ($d.pose -eq 'blocked' -and $posedBlocked.title -eq 'SKYBOX' -and $d.toasts.Count -eq 1) ($d.toasts | ConvertTo-Json -Compress)
+
+    # pose determinism: same pose, same pixels
+    Dodona @("ui", "pose", "full") | Out-Null
+    Dodona @("ui", "screenshot", "--out", "$out\pose-full-2.png") | Out-Null
+    Check 'pose_screenshot_deterministic' ((Get-FileHash "$out\pose-full-2.png").Hash -eq $poseHashes['full']) ''
+
+    # ---- pose live returns to the store's truth ----
+    Dodona @("ui", "pose", "live") | Out-Null
+    Start-Sleep -Milliseconds 900
+    $d = Dump
+    Check 'pose_live_resumes_store' ($null -eq $d.pose -and (($d.slots | Where-Object { -not $_.empty }).title -contains 'WATER')) ($d.pose)
+
+    # ---- clean close, exit-code honest ----
+    Dodona @("ui", "close") | Out-Null
+    Start-Sleep -Milliseconds 1200
+    Check 'ui_close_exits_process' ($uiProc.HasExited) ''
+
+    Dodona @("stop-daemon") | Out-Null
+}
+finally {
+    if ($uiProc -and -not $uiProc.HasExited) { try { Stop-Process -Id $uiProc.Id -Force } catch { } }
+    if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
+    foreach ($n in 'DodonaShim', 'DodonaFakeAgent', 'DodonaUi') { try { Get-Process $n -ErrorAction Stop | Stop-Process -Force } catch { } }
+    Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
+}
+
+$results | ConvertTo-Json | Set-Content "$out\results.json" -Encoding utf8
+Write-Output "---- M3 ACCEPTANCE (model-free) ----"
+$results.GetEnumerator() | ForEach-Object { Write-Output ("{0}: {1}" -f $_.Key, $_.Value) }
+$failed = @($results.GetEnumerator() | Where-Object { "$($_.Value)" -like 'FAIL*' })
+Write-Output ("{0} checks, {1} failed" -f $results.Count, $failed.Count)
+if ($failed.Count) { exit 1 } else { exit 0 }

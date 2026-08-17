@@ -17,15 +17,17 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
 | Lane pipes (shim alive) | `dodona-<instance>-lane<N>` |
 | Agent session files (Claude Code's own) | `$env:CLAUDE_CONFIG_DIR\projects\<cwd-slug>\<session-id>.jsonl` |
 
-## The schema (v2 — `PRAGMA user_version`)
+## The schema (v4 — `PRAGMA user_version`)
 
 - **`lanes`** — `id, title, state (alive|unreachable|dead), pipe_name, session_id,
   created_ts`. The session_id is the resume handle; the pipe is the reattach handle.
 - **`pane_events`** — everything a pane would show, in order: `lane_id, ts, kind, body,
-  seq, raw`. `kind ∈ user_input | agent_line | result | system | wire`. `seq` is the
-  shim's delivery sequence (NULL for locally-generated rows); `UNIQUE(lane_id, seq)` is
-  what makes shim redelivery exactly-once. `raw` is the untouched wire line — the raw
-  truth when `body`'s extraction looks wrong.
+  seq, raw, acked`. `kind ∈ user_input | agent_line | result | system | wire |
+  announcement`. `seq` is the shim's delivery sequence (NULL for locally-generated
+  rows); `UNIQUE(lane_id, seq)` is what makes shim redelivery exactly-once. `raw` is the
+  untouched wire line — the raw truth when `body`'s extraction looks wrong. `acked`
+  applies to announcements only (the decision feed persists until acked — acked rows
+  grey out, never disappear).
 - **`tickets`** — `id, lane_id, title, branch (ticket/<id>), worktree, state
   (open|landed|abandoned), merge_mode (on-approval|auto), approved, created_ts,
   landed_ts`. A branch is a thing that lands; that is what a ticket is.
@@ -51,8 +53,9 @@ Everything is scoped to a **project root** (the `--root` the daemon was started 
   `token_released`, `token_expired_reclaimed`, `claim_backstop_refused`, `landed`,
   `land_refused`, `land_inconsistent`, `verify_green`, `verify_red`, `worktree_pruned`,
   `worktree_prune_failed`, `ticket_git_failed`. Routing kinds: `classified` (with
-  latency), `routed_retarget`, `classifier_timeout`, `classifier_failed`. **If a state
-  change happened with no event row naming why, that is a bug — report it as one.**
+  latency), `routed_retarget`, `classifier_timeout`, `classifier_failed`,
+  `route_undone`. **If a state change happened with no event row naming why, that is a
+  bug — report it as one.**
 
 ## The claim gate
 
@@ -97,3 +100,24 @@ If the CLI reports the daemon isn't running, read the store directly — that is
 point of the design. A lane whose shim still runs (check the pids in
 `shim-lane<N>.json`) is buffering; whatever it holds arrives when the next daemon
 connects, deduped by seq.
+
+## The UI can testify (§17)
+
+`DodonaUi.exe --root <root> [--pose <name>]` is a dumb view over the store: read-only
+WAL reads, all writes via the daemon's control pipe. It answers on its own pipe
+(`dodona-<instance>-ui`) — the daemon does not need to be running:
+
+```
+dodona ui dump --root <root>                     # panes/badges/presence/feed/toasts as JSON
+dodona ui screenshot [--pane WATER] --out <png>  # self-rendered, always 1600x900 full-window
+dodona ui pose <full|badges|blocked|feed|empty-slot|tray|overlay>   # deterministic fixtures
+dodona ui pose live                              # resume store polling
+dodona ui overlay <PANE|off> | dodona ui close
+```
+
+Most "does the UI show X" questions are text questions — ask `ui dump` and read JSON.
+Screenshots are for layout and visual judgment only. A dump reflects the live view
+model, so after mutating the store give the 250ms poller a beat (~500ms) before asking.
+`dodona ack <pane_event_id>` clears a feed row's badge; `dodona undo-route <decision_id>`
+marks the routing row undone and sends a `[DISPATCHER]` retraction to the lane that
+consumed the misroute.
