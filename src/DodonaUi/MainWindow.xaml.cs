@@ -113,6 +113,13 @@ public partial class MainWindow : Window
             feed = _vm.Feed.Select(f => new { id = f.Id, lane = f.LaneTitle, body = f.Body, acked = f.Acked }).ToList(),
             toasts = _vm.Toasts.Select(t => new { ts = t.Ts, lane = t.Lane, reason = t.Reason }).ToList(),
             status = _vm.Status,
+            // The box is UI state too: a test can assert Shift+Enter kept the line, and that
+            // the grip actually moved the floor, without driving the mouse.
+            input = new
+            {
+                text = InputBox.Text, multiline = InputBox.AcceptsReturn,
+                floor = (int)InputBox.MinHeight, height = (int)InputBox.ActualHeight,
+            },
         };
         return JsonSerializer.Serialize(dump);
     }
@@ -208,7 +215,15 @@ public partial class MainWindow : Window
     void Input_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Enter) return;
+        // Shift+Enter is a line break, not a send: a prompt worth several lines should not
+        // have to be typed as several sends. Plain Enter still sends, so nothing a person
+        // already knows about the box changes.
+        if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) return;
+
         var text = InputBox.Text.Trim();
+        // Handled either way — the box accepts returns now, so an unhandled Enter would
+        // leave a stray newline behind after the send (or in an empty box).
+        e.Handled = true;
         if (text.Length == 0) return;
 
         // Always sends. If there is nowhere to route, the daemon starts a lane and says
@@ -216,6 +231,39 @@ public partial class MainWindow : Window
         // work goes is the system's job, not a form for the operator to fill in.
         InputBox.Clear();
         Send(new { cmd = "input", text });
+    }
+
+    // ---- the input grip: the box's floor is the operator's to set -------------------
+    // MinHeight is what the grip moves, not Height, so dragging sets a floor and the box
+    // still grows on its own from there — one control, no manual/auto modes to fight.
+    const double InputFloorMin = 30, InputFloorMax = 400, InputFloorDefault = 76, InputHeadroom = 120;
+
+    double _gripFloor;      // the floor when this drag began
+    double _gripAnchorY;    // and where the mouse was, in window coordinates
+
+    void Grip_Down(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2) { SetInputFloor(InputFloorDefault); e.Handled = true; return; }
+        _gripFloor = InputBox.MinHeight;
+        _gripAnchorY = e.GetPosition(this).Y;
+        ((UIElement)sender).CaptureMouse();
+        e.Handled = true;              // this is a resize, not a drag of the whole window
+    }
+
+    void Grip_Move(object sender, MouseEventArgs e)
+    {
+        if (!((UIElement)sender).IsMouseCaptured) return;
+        // Up the screen is a smaller Y, and up the screen means taller.
+        SetInputFloor(_gripFloor + (_gripAnchorY - e.GetPosition(this).Y));
+    }
+
+    void Grip_Up(object sender, MouseButtonEventArgs e) => ((UIElement)sender).ReleaseMouseCapture();
+
+    void SetInputFloor(double floor)
+    {
+        floor = Math.Clamp(floor, InputFloorMin, InputFloorMax);
+        InputBox.MinHeight = floor;
+        InputBox.MaxHeight = Math.Min(InputFloorMax + InputHeadroom, floor + InputHeadroom);
     }
 
     void StartLane(string? suggestedName = null, string? firstMessage = null)
