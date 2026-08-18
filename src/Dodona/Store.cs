@@ -8,7 +8,7 @@ namespace Dodona;
 /// claim-insert atomically (§6), token grant and land atomically (§7). pane_events
 /// dedupes shim redelivery via UNIQUE(lane_id, seq).
 /// </summary>
-sealed class Store : IDisposable
+sealed class Store : IDisposable, ILaneSink
 {
     readonly SqliteConnection _db;
     readonly object _lock = new();

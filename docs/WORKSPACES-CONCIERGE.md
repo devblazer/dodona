@@ -176,6 +176,79 @@ holds no lanes, no claims, no merge tokens, and no workspace daemon ever reads i
 The moment the concierge coordinates work rather than routing sentences, it is the
 persistent-coordinator serialization point §12 designed out.
 
+## 2.1 Decided while building milestone 3 — questions §2 and §4 left open
+
+- **§2.2's tiers and §4's rungs are ONE ladder, implemented once.** §2.2 describes it as
+  cheap classifier → expensive fallback → ask; §4 describes it as exact/alias → fuzzy →
+  bounded discovery → ask-and-teach. Both answer the same narrow question — *which
+  workspace, and how confident* — and both escalate in the same order, so they are one
+  implementation. Two would eventually disagree, and a router that disagrees with itself is
+  worse than either half. The rungs as built:
+
+  | rung | what | cost |
+  |---|---|---|
+  | 0 | an explicit path in the prompt | code — and it never searches (§4 is emphatic) |
+  | 1 | exact name or alias | code |
+  | 1b | only one workspace exists | code — there is no group question to answer |
+  | 2 | fuzzy | cheap tier |
+  | 3 | bounded discovery inside the fence | expensive tier, one capability |
+  | 4 | ask the operator, and teach an alias | a row, a feed line, no model |
+
+  **Rung 1b is not in the doc and matters most in practice**: until the operator makes a
+  second workspace there is nothing to disambiguate, so a single-workspace machine never
+  reaches a model in the concierge at all. That is quota discipline (CLAUDE.md §0.1) rather
+  than an optimisation — the common case must be free.
+
+- **The concierge owns the registry as the thing that RESOLVES and LEARNS from it; it is not
+  the only process allowed to write the file.** §2.1 says it owns the registry, and it does
+  own every judgement about it — aliases, creation-on-resolve, which workspace a sentence
+  means. But `workspace-attach` and friends still write directly, with the partial unique
+  index as the arbiter. Putting those writes behind the concierge's pipe would mean a
+  registry you cannot edit because a daemon will not start, and it would buy nothing: the
+  exclusivity invariant is enforced by the index regardless of who holds the pen. Registry
+  *reads* stay direct everywhere for the same reason a UI reads stores directly — a dead
+  manager must never blind you.
+
+- **The concierge does not hot-swap. It is stopped and re-summoned.** The M4 handoff exists
+  to protect an agent mid-turn; the concierge holds no work agents, no lanes, no claims and
+  no merge tokens. Everything of its that must survive is rows, and rows survive anything. So
+  a publish stops it and the next command revives it (start-on-demand), losing at most one
+  in-flight classification — which every rung already treats as "this rung had no opinion".
+  Building it a handoff protocol would be ceremony protecting nothing.
+
+- **It reuses the shim wire, not the workspace store.** `LaneRuntime` — stream-json parsing,
+  presence derivation, exactly-once seq dedup, turn-final detection — now takes an
+  `ILaneSink` interface, which the concierge's own store implements. The alternative was
+  giving the concierge a full workspace store and letting it keep rows in tables it would
+  never use, which would also have meant bumping `Ver.Schema` for every workspace — and a
+  schema bump is the one thing that makes an ordinary swap non-seamless (§14). Six method
+  signatures were cheaper. **Sharing machinery is not sharing authority**: the concierge
+  suite asserts its store holds no `lanes`, `tickets`, `claims`, `merge_token` or
+  `token_queue` table, so the §2 cap is enforced by a test rather than by good intentions.
+
+- **Its two model sessions are called TIERS, not lanes**, with fixed ids 1 and 2 so their
+  pipe names are stable across restarts, and it reconciles them exactly as the daemon
+  reconciles lanes (the rows are the claim, the pipe is the proof).
+
+- **The review-behind never retracts, and says so.** §5's error asymmetry applies at group
+  scope too: you cannot unsay a sentence to an agent. So a confidently-disagreeing review
+  reports where the sentence went, where it thinks it belonged, and the command to resend —
+  and explicitly says it was *already delivered*, rather than implying a fix. Silent on
+  agreement, and silent on low confidence (operator's rule #3).
+
+- **`cxpick:N` exists in the fake agent for a reason worth keeping.** The obvious directive,
+  `cxws:<NAME>`, spells a workspace *name* into the operator's sentence — and rung 1 matches
+  names in the sentence in code, so a rung-2 test written that way passes at rung 1 having
+  never reached the tier. It proved the opposite of what it claimed until the check failed
+  with `rung=registry`. `cxpick:N` picks the Nth workspace out of the list the concierge
+  handed the tier, which keeps every name out of the text and is closer to what a real model
+  does anyway.
+
+- **The fence excludes drive roots.** `Fence.Roots` takes the *parent* of every member, and
+  a member sitting directly on `C:\` would otherwise contribute `C:\` — turning the fence
+  into the filesystem. One carelessly-placed member must not be able to widen it silently,
+  which is the §8 rejection enforced in code rather than trusted to a prompt.
+
 ## 3. Invariants that move, and one that must be rebuilt
 
 Path-derived identity was not aesthetic: two spellings of one repo hash to one id, one

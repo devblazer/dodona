@@ -21,9 +21,28 @@ var asCompressor = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "co
 //   brainname:X   — disagree, better_name X      brainticket:T — suggest ticket T
 //   brainlow      — answer with confidence low (forces the escalation path)
 var asBrain = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE")?.StartsWith("brain") == true;
+var brainIsHi = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "brain-hi";
 // router: routekind:generic|specific|unclear, routetarget:X, routeconf:low — so the full
 // escalation chain (classifier → brain-hi → operator clarification) runs model-free.
 var asRouter = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "router";
+// concierge-lo / concierge-hi: the GROUP-scope ladder (WORKSPACES-CONCIERGE.md §2/§4).
+// Directives, embedded in whatever text reaches the tier (the operator's sentence is quoted
+// inside the concierge's question), make every rung deterministic:
+//   cxpick:N      — the cheap tier picks the Nth workspace from the list it was HANDED
+//                   (1-based). Prefer this for rung-2 tests: cxws:NAME spells a workspace
+//                   name into the sentence, and rung 1 matches names in code, so the test
+//                   would pass at rung 1 and never reach the tier.
+//   cxws:NAME     — the cheap tier is confident it is workspace NAME       (rung 2 hit)
+//   cxguess:NAME  — the cheap tier offers candidate_name NAME, unconfident (rung 2 miss)
+//   cxlow         — answer confidence low, whatever else was asked         (forces escalation)
+//   cxfolder:NAME — the EXPENSIVE tier picks fence candidate NAME          (rung 3 hit)
+//   cxdisagree:NAME — the review-behind says the workspace was wrong       (§2.3)
+// With no directive at all both tiers answer "none"/low, which walks the ladder to rung 4 —
+// asking the operator. That is the honest default: a fake agent that guessed would hide the
+// one path most worth testing.
+var conciergeRole = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") ?? "";
+var asConcierge = conciergeRole.StartsWith("concierge");
+var conciergeHi = conciergeRole == "concierge-hi";
 var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
 void Emit(object o) => stdout.WriteLine(JsonSerializer.Serialize(o));
 
@@ -60,9 +79,89 @@ while ((line = Console.ReadLine()) is not null)
         continue;
     }
 
+    if (asConcierge)
+    {
+        var low = text.Contains("cxlow");
+        var disagree = Regex.Match(text, @"cxdisagree:([\w.-]+)");
+        // The review-behind (§2.3) asks a different question of the same cheap tier, and it
+        // is recognisable by its schema: it wants agree/workspace, not workspace/candidate.
+        var isReview = text.Contains("Was that the right WORKSPACE?");
+        if (isReview)
+        {
+            Emit(new
+            {
+                type = "result",
+                subtype = "success",
+                session_id = sessionId,
+                result = JsonSerializer.Serialize(new
+                {
+                    agree = !disagree.Success,
+                    workspace = disagree.Success ? disagree.Groups[1].Value : null,
+                    confidence = low ? "low" : "high",
+                    reason = "fake concierge",
+                }),
+            });
+            continue;
+        }
+        if (conciergeHi)
+        {
+            var folder = Regex.Match(text, @"cxfolder:([\w.~-]+)");
+            Emit(new
+            {
+                type = "result",
+                subtype = "success",
+                session_id = sessionId,
+                result = JsonSerializer.Serialize(new
+                {
+                    folder = folder.Success ? folder.Groups[1].Value : "none",
+                    confidence = folder.Success && !low ? "high" : "low",
+                    reason = "fake concierge hi",
+                }),
+            });
+            continue;
+        }
+        var ws = Regex.Match(text, @"cxws:([\w.~/-]+)");
+        var guess = Regex.Match(text, @"cxguess:([\w.~-]+)");
+
+        // cxpick:N picks the Nth workspace (1-based) out of the list the concierge put in
+        // the question, instead of naming it. That is not a convenience: `cxws:lighthouse`
+        // spells a workspace NAME into the operator's sentence, and rung 1 matches names in
+        // the sentence in code — so a fuzzy-rung test written with cxws: silently passes at
+        // rung 1 and never exercises the tier at all. Picking by index keeps every workspace
+        // name out of the text, which is also closer to what a real model does: read the
+        // list it was handed and choose from it.
+        var pick = Regex.Match(text, @"cxpick:(\d+)");
+        string? picked = null;
+        if (pick.Success)
+        {
+            var listed = Regex.Match(text, @"Workspaces: \[(.*?)\]");
+            if (listed.Success)
+            {
+                var options = Regex.Matches(listed.Groups[1].Value, "\"([^\"]+)\"").Select(m => m.Groups[1].Value).ToList();
+                var i = int.Parse(pick.Groups[1].Value) - 1;
+                if (i >= 0 && i < options.Count) picked = options[i];
+            }
+        }
+
+        var answer = picked ?? (ws.Success ? ws.Groups[1].Value : null);
+        Emit(new
+        {
+            type = "result",
+            subtype = "success",
+            session_id = sessionId,
+            result = JsonSerializer.Serialize(new
+            {
+                workspace = answer ?? "none",
+                confidence = answer is not null && !low ? "high" : "low",
+                candidate_name = guess.Success ? guess.Groups[1].Value : null,
+            }),
+        });
+        continue;
+    }
+
     if (asBrain)
     {
-        var isHi = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "brain-hi";
+        var isHi = brainIsHi;
         var name = Regex.Match(text, @"brainname:(\w+)");
         var tick = Regex.Match(text, @"brainticket:(\w+)");
         var low = text.Contains("brainlow") && !isHi;      // the hi tier is always sure

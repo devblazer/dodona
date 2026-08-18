@@ -120,6 +120,68 @@ was attached to two workspaces. Look for `attach_refused` in the registry's even
 - **Lanes are workspace-wide** and need no repository at all: an agent can work in a
   folder that has never seen git. Only tickets need one.
 
+## The concierge (WORKSPACES-CONCIERGE.md §2)
+
+One per machine, and it answers exactly one question: **which workspace**. It holds no
+lanes, no claims and no merge tokens, and **no workspace daemon ever reads its store** —
+that cap is what keeps it from becoming the serialization point §12 designed out.
+
+| Thing | Location |
+|---|---|
+| Its store | `%LOCALAPPDATA%\Dodona\concierge\store.db` |
+| Its config (models, effort, `searchRoots`) | `%LOCALAPPDATA%\Dodona\concierge\concierge.json` |
+| Its ctl pipe | `dodona-concierge-ctl` |
+| Its two model tiers | `dodona-concierge-tier1` (cheap), `dodona-concierge-tier2` (expensive) |
+| Tier shim pids | `%LOCALAPPDATA%\Dodona\concierge\shim-tier<N>.json` |
+
+```
+dodona concierge                      # run it (start-on-demand does this for you)
+dodona concierge-status               # tiers, the fence, every workspace, open questions
+dodona concierge-resolve <text>       # walk the ladder and print the verdict as JSON
+dodona concierge-feed                 # the merged-feed spine: the system's voice at group scope
+dodona concierge-questions            # rung-4 questions still waiting
+dodona concierge-answer <id> <name|new:NAME>    # answer one, and TEACH an alias
+dodona concierge-review <text> --workspace-id <id>   # the review-behind net, by hand
+dodona concierge-stop
+```
+
+**The ladder, cheapest first.** Rungs 0, 1 and 1b are code and cost nothing; the steady
+state never leaves them:
+
+| rung | what | reached when |
+|---|---|---|
+| `path` | an explicit path in the prompt | the operator said where — never searches |
+| `registry` | exact workspace name or alias | the ordinary case |
+| `only` | one workspace exists | nothing to disambiguate |
+| `fuzzy` | cheap tier matched confidently | a mangled or loose name |
+| `discovery` | expensive tier found a folder in the fence | an unknown name with signal |
+| `ask` | nobody was sure | a question row + a feed line; the answer becomes an alias |
+
+**The fence** is the parent directory of every registered member, plus configured
+`searchRoots`, minus drive roots. It is the single narrow exception to "management brains
+never run tools" — one capability, enumerating candidates inside it. **It never widens
+itself**: a rung-3 miss falls to rung 4 rather than looking further.
+
+Reading it with nothing running:
+
+```sql
+SELECT ts, rung, confidence, workspace_id, created, latency_ms, input FROM resolutions ORDER BY id;
+SELECT id, state, input, candidates, answer FROM questions ORDER BY id;   -- rung 4
+SELECT id, ts, acked, body FROM feed ORDER BY id;                          -- the merged spine
+SELECT ts, kind, detail FROM events ORDER BY id;
+```
+
+Event kinds worth knowing: `resolved` (every verdict, with its rung), `group_clarification`
+(rung 4 asked), `question_answered` (with the alias it taught), `discovery_miss` (the fence
+had candidates and none matched), `review_behind` / `group_misroute` (§2.3 caught a
+wrong-workspace delivery), `tier_timeout` / `tier_unparseable` (a rung had no opinion, and
+the ladder moved on rather than stalling).
+
+**A group-misroute is never retracted.** You cannot unsay a sentence to an agent, so the
+review-behind reports where it went, where it belonged, and the command to resend — and says
+plainly that it was already delivered. If you see one of these in the feed, the work is in
+the wrong workspace and only you can move it.
+
 ## Selective compression (§5)
 
 A pane shows the **short readable** form of what happened; the store keeps everything.

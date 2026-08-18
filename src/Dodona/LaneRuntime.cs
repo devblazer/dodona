@@ -17,7 +17,11 @@ sealed class LaneRuntime
 {
     public long Id { get; }
     public string PipeName { get; }
-    readonly Store _store;
+    // ILaneSink, not Store: the concierge runs the same wire over its own tables (§2 -
+    // it holds no lanes, no tickets and no merge token, so it must not be handed a store
+    // shaped to hold them). See LaneSink.cs for why an interface was cheaper than either
+    // a second parser or a schema bump.
+    readonly ILaneSink _store;
     StreamWriter? _writer;
     public volatile bool Connected;
     /// <summary>What this shim's wire says it speaks — read from the hello line, checked
@@ -31,7 +35,7 @@ sealed class LaneRuntime
     /// awaited from the pump — a compressor must not be able to stall the wire.</summary>
     public Action<long, long, string>? OnResult;      // (laneId, paneEventId, body)
 
-    public LaneRuntime(long id, string pipeName, Store store)
+    public LaneRuntime(long id, string pipeName, ILaneSink store)
     {
         Id = id;
         PipeName = pipeName;

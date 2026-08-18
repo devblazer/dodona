@@ -45,6 +45,11 @@ re-learns the expensive way.
 - **`-shl` on `[byte]` stays a byte** and overflows to 0 — cast `[int]` first.
 - **Commit messages** with quotes/dashes: `git commit -F <file>`, never inline `-m`.
 - **`.Count` on a one-element pipeline** is `$null` — wrap in `@(...)`.
+- **`ConvertFrom-Json` emits a JSON ARRAY as ONE pipeline item**, so `... | ConvertFrom-Json
+  | Where-Object {...}` filters the array object, not its elements — and `$_.name -eq 'x'`
+  on an array returns the matching *elements*, which is truthy, so **every row passes**.
+  Land it in a variable first (`$all = ... | ConvertFrom-Json`, then `@($all) | Where…`).
+  This turned three acceptance checks into silent no-ops before it was noticed.
 - **A `.ps1` that fails to PARSE never reaches `finally`** — everything it started leaks.
 - **WPF**: implicit usings omit `System.IO`; with `AcceptsReturn` the TextBox class
   handler eats Enter before instance `KeyDown` (use `PreviewKeyDown`);
@@ -115,7 +120,7 @@ Two things publish cannot do, so say them plainly when they apply:
 
 ## 3. Verify with the suites, not by looking
 
-Nine model-free suites, all fake agents, all free. Run the ones your change touches; run
+Ten model-free suites, all fake agents, all free. Run the ones your change touches; run
 all of them before publishing something structural:
 
 ```powershell
@@ -128,6 +133,7 @@ powershell ... tests\workspace-acceptance.ps1 # workspaces: identity, repo-exclu
 powershell ... tests\ui-use-acceptance.ps1    # the UI driven like a person
 powershell ... tests\compression-acceptance.ps1  # selective compression (§5)
 powershell ... testsrain-acceptance.ps1     # the dispatcher brain and its routing ladder
+powershell ... tests\concierge-acceptance.ps1 # the group-scope ladder, the fence, the review-behind
 ```
 
 `ui-use` is the one that matters most for UI work: dumps and screenshots prove the UI

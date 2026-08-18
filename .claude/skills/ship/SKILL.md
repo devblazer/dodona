@@ -28,7 +28,7 @@ Get-CimInstance Win32_Process -Filter "Name='dodona.exe'" | Select ProcessId, Co
 
 ## 2. Run the acceptance suites
 
-All model-free (fake agents). Run the ones your change touches; run all nine before
+All model-free (fake agents). Run the ones your change touches; run all ten before
 shipping anything structural:
 
 ```powershell
@@ -41,6 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\workspace-acceptance.p
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\ui-use-acceptance.ps1      # UI driven like a person
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\compression-acceptance.ps1 # selective compression
 powershell -NoProfile -ExecutionPolicy Bypass -File testsrain-acceptance.ps1       # the dispatcher brain + routing ladder
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\concierge-acceptance.ps1   # group-scope ladder, fence, review-behind
 ```
 
 Exit code 0 each, or fix before proceeding. UI affordances need a check in `ui-use`

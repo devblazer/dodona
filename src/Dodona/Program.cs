@@ -20,8 +20,18 @@ if (cmd is null) { Help(); return 1; }
 //                                existing acceptance suite keep working untouched.
 // Registry-free commands (`version`, and the workspace verbs that manage the registry
 // themselves) are resolved lazily so a broken registry never stops you inspecting a binary.
+// Concierge commands address the machine-global concierge (§2), never a workspace, so they
+// skip workspace resolution entirely — asking "which workspace is this" of the component
+// that belongs to none is the category error §2's authority cap exists to prevent.
+var conciergeCmds = new HashSet<string>
+{
+    "concierge", "concierge-status", "concierge-resolve", "concierge-feed",
+    "concierge-ack", "concierge-questions", "concierge-answer", "concierge-review",
+    "concierge-stop",
+};
+
 string instanceId = "", wsName = "", primary = Path.GetFullPath(root);
-if (cmd is not ("version" or "workspaces" or "workspace-create"))
+if (cmd is not ("version" or "workspaces" or "workspace-create") && !conciergeCmds.Contains(cmd))
 {
     try
     {
@@ -76,10 +86,12 @@ async Task<int> Dispatch() => cmd switch
 {
     "version" => Version(),
     "daemon" => await Daemon.RunAsync(primary, instanceId, wsName, ctlPipe, opts.ContainsKey("successor")),
-    // ---- workspaces (WORKSPACES-CONCIERGE.md §1). Registry operations, answered in this
-    // process: there is no daemon to ask, and in M2 there is no concierge yet either. M3
-    // moves the WRITES behind the concierge's ctl pipe; reads stay direct, for the same
-    // reason the UI reads stores directly — a dead manager must never blind you.
+    // ---- workspaces (WORKSPACES-CONCIERGE.md §1). Answered in THIS process, deliberately,
+    // even now that a concierge exists: the concierge owns the registry as the thing that
+    // RESOLVES and LEARNS from it (§2.1), while the file itself stays safe for several
+    // writers — the partial unique index is the arbiter, not a process. A registry you
+    // cannot edit because a daemon will not start is worse than one two processes can edit
+    // safely, and it is the same reasoning that keeps registry READS direct everywhere.
     "workspaces" => WorkspaceList(),
     "workspace-create" => WorkspaceCreate(),
     "workspace-attach" => WorkspaceAttach(),
@@ -89,6 +101,17 @@ async Task<int> Dispatch() => cmd switch
     "workspace-alias" => WorkspaceEdit((r, id) => r.AddAlias(id, pos[0], out var e) ? null : e, "aliased"),
     "workspace-forget" => WorkspaceEdit((r, id) => r.Forget(id, out var e) ? null : e, "forgotten"),
     "where" => Where(),
+    // ---- the concierge (§2): one per machine, its own store, its own ctl pipe. It answers
+    // exactly one question — which workspace — and holds no lanes, no claims, no tokens.
+    "concierge" => await Concierge.RunAsync(),
+    "concierge-status" => Cx(new { cmd = "status" }),
+    "concierge-resolve" => Cx(new { cmd = "resolve", text = string.Join(" ", pos), from = One("from") }),
+    "concierge-feed" => Cx(new { cmd = "feed", n = int.TryParse(One("n"), out var fn) ? fn : 30 }),
+    "concierge-ack" => Cx(new { cmd = "ack", id = long.Parse(pos[0]) }),
+    "concierge-questions" => Cx(new { cmd = "questions" }),
+    "concierge-answer" => Cx(new { cmd = "answer", id = long.Parse(pos[0]), answer = string.Join(" ", pos.Skip(1)) }),
+    "concierge-review" => Cx(new { cmd = "review", text = string.Join(" ", pos), workspace = One("workspace-id") ?? One("from") }),
+    "concierge-stop" => Cx(new { cmd = "stop" }),
     "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), model = One("model"), effort = One("effort"), childArgs = Many("child-arg") }),
     "lane-stop" => Client(new { cmd = "lane-stop", lane = long.Parse(pos[0]) }),
     "lane-respawn" => Client(new { cmd = "lane-respawn", lane = long.Parse(pos[0]) }),
@@ -127,6 +150,50 @@ async Task<int> Dispatch() => cmd switch
     "stop-daemon" => Client(new { cmd = "stop-daemon" }),
     _ => Fail($"unknown command: {cmd}"),
 };
+
+// ---------------------------------------------------------------- the concierge (§2)
+
+/// <summary>
+/// A client on the concierge's control pipe, with start-on-demand — the same doctrine as the
+/// daemon (§13: the store is always there, the process is summoned). Deliberately NOT the
+/// generic <see cref="Client"/>: that one summons a *workspace* daemon and reports failures
+/// in workspace terms, and the concierge belongs to no workspace.
+///
+/// The concierge is also **not hot-swapped**, and that is a decision rather than an omission.
+/// The M4 handoff exists to protect an agent mid-turn from being interrupted; the concierge
+/// holds no work agents, no lanes, no claims and no merge tokens. Its only state that must
+/// survive is rows (pending questions, resolutions, feed), and rows survive anything. So a
+/// publish stops it and the next command revives it — losing at most one in-flight
+/// classification, which every rung of the ladder already treats as "no opinion".
+/// </summary>
+int Cx(object request)
+{
+    var pipe = Instance.CtlPipe(Concierge.Id);
+    if (cmd == "concierge-stop" || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
+        return Client(request, pipe);
+    if (!Instance.IsLive(Concierge.Id))
+    {
+        Console.Error.WriteLine("no concierge running — starting one");
+        try
+        {
+            var exe = Environment.ProcessPath ?? "dodona.exe";
+            var psi = new System.Diagnostics.ProcessStartInfo(exe)
+            {
+                UseShellExecute = true,                     // detach: it must outlive this CLI
+                WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
+                WorkingDirectory = Paths.NeutralCwd(),      // it has no project, and must load none
+            };
+            psi.ArgumentList.Add("concierge");
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch (Exception ex) { return Fail($"could not start the concierge: {ex.Message}"); }
+
+        var deadline = Environment.TickCount64 + 15000;
+        while (Environment.TickCount64 < deadline && !Instance.IsLive(Concierge.Id)) Thread.Sleep(200);
+        if (!Instance.IsLive(Concierge.Id)) return Fail("started a concierge but it never answered its control pipe");
+    }
+    return Client(request, pipe);
+}
 
 // ---------------------------------------------------------------- workspaces (§1)
 
@@ -412,7 +479,10 @@ int Client(object request, string? pipeName = null)
         // failed swap or a crash: the next command brings the daemon back, and the shims
         // have been buffering the whole time.
         if (pipeName != ctlPipe || cmd == "stop-daemon" || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
-            return Fail(pipeName == ctlPipe ? $"daemon not running for this root (ctl pipe {pipeName})" : $"UI not running for this root (pipe {pipeName})");
+            return Fail(
+                pipeName == ctlPipe ? $"daemon not running for this root (ctl pipe {pipeName})"
+                : pipeName == Instance.CtlPipe(Concierge.Id) ? $"concierge not running (ctl pipe {pipeName})"
+                : $"UI not running for this root (pipe {pipeName})");
 
         var reborn = Autostart(instanceId, primary);
         if (reborn is not null) return Fail($"could not start a daemon for workspace {wsName}: {reborn}");
@@ -511,6 +581,14 @@ static void Help() => Console.WriteLine("""
               a REPO belongs to at most one workspace; move is how you reassign it
       dodona workspace-rename <NAME> | workspace-alias <name> | workspace-forget
       dodona where [--json]                 (store, dir, pipes — state left the project folder)
+    the concierge (one per machine; answers only "which workspace"):
+      dodona concierge                      (run it; any concierge-* command starts one)
+      dodona concierge-status               (tiers, the search fence, open questions)
+      dodona concierge-resolve <text>       (walk the ladder, print the verdict as JSON)
+      dodona concierge-feed | concierge-ack <id>
+      dodona concierge-questions | concierge-answer <id> <name|new:NAME>
+              answering TEACHES an alias, so the next one resolves for free
+      dodona concierge-review <text> --workspace-id <id> | concierge-stop
     lanes:
       dodona lane-start --title <T> [--model sonnet] [--child <exe> [--child-arg <a>]...]
               no --child means a real claude lane in the project (no ticket, no claim gate)

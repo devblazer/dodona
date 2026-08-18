@@ -1,8 +1,8 @@
-daemon pid=54176 build=1.0.0+20260818111900 schema=7 exe=C:\Users\devbl\AppData\Local\Temp\dodona-bin-b6ffa7ac\20260818-113610\dodona.exe
-workspace dodona-m4-77bd130c (dodona-m4-77bd130c-12fe)  store=C:\Users\devbl\AppData\Local\Temp\dodona-home-m4-a81803d2\workspaces\dodona-m4-77bd130c-12fe\store.db
-members: C:\Users\devbl\AppData\Local\Temp\dodona-m4-77bd130c
+daemon pid=57452 build=1.0.0+20260818115255 schema=7 exe=C:\Users\devbl\AppData\Local\Temp\dodona-bin-2a0ac02b\20260818-115845\dodona.exe
+workspace dodona-m4-f5f931ce (dodona-m4-f5f931ce-fdec)  store=C:\Users\devbl\AppData\Local\Temp\dodona-home-m4-d13ad6d7\workspaces\dodona-m4-f5f931ce-fdec\store.db
+members: C:\Users\devbl\AppData\Local\Temp\dodona-m4-f5f931ce
 lanes: model=opus effort=high  router: model=haiku effort=low  agent=claude
 lane 1  BRAIN       role=brain   state=alive  connected=True  presence=                  session=-
-lane 2  SKY         role=work    state=alive  connected=True  presence=idle              session=fake-c61ec79396d540f0b713ea6bd3ba747a
+lane 2  SKY         role=work    state=alive  connected=True  presence=idle              session=fake-a68ef0824a104d6ab69e7dcd766b331e
 lane 3  DODONA      role=dispatcher  state=alive  connected=False  presence=system            session=-
 lane 4  BRAIN       role=brain   state=alive  connected=False  presence=                  session=-
