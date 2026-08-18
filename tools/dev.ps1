@@ -629,6 +629,49 @@ function Do-Gate {
         $bad++
     }
 
+    # I2: what the app reports it is running must be a COMMIT THIS REPO HAS. Before Phase 2b
+    # `status` printed a timestamp mapping to nothing, so "which code is live?" had no answer --
+    # you could not bisect it, diff it, or check it against git log.
+    #
+    # `git cat-file -t` is the load-bearing half: it demands the SHA RESOLVES to a commit here.
+    # Comparing the value to itself, or matching a hex pattern, would pass for any 40 characters.
+    #
+    # THIS ROW WAS SILENTLY DELETED ONCE, by an edit whose replacement range ran past it -- the
+    # exact "gate whose table drifts out of date" that RECOVERY-PHASES section 2 warns is the same
+    # lie the gate exists to prevent. It went unnoticed until a publish reported build=unknown and
+    # nothing failed. If you move these rows, count them afterwards.
+    $binRoot = Join-Path $env:LOCALAPPDATA 'Dodona\bin'
+    $installed = if (Test-Path $binRoot) { @(Get-ChildItem $binRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name) } else { @() }
+    if ($installed.Count -eq 0) {
+        Say "  n/a   I2  nothing is installed in $binRoot, so the live build's commit was NOT checked"
+        Say "            (run dev ship, then re-run gate to assert this row)"
+    }
+    else {
+        $exe = Join-Path $installed[-1].FullName 'dodona.exe'
+        $vjRaw = & $exe version --json 2>&1 | Out-String
+        # ConvertFrom-Json on a single OBJECT is one pipeline item, which is safe -- CLAUDE.md
+        # 0.2's trap is arrays, and this is not one.
+        $vj = $null
+        try { $vj = $vjRaw | ConvertFrom-Json } catch { }
+        $sha = if ($vj) { [string]$vj.commit } else { '' }
+        if (-not $sha) {
+            # A build with no provenance is a REAL state and this row cannot judge it: there is
+            # no reported SHA to check. It is called out rather than passed over, because
+            # "unknown" is also how a stamping change looks the first time it is published -- the
+            # publisher is the OLD binary and cannot stamp the new fields.
+            Say "  n/a   I2  the installed build reports no commit, so there is no SHA to check"
+            Say "            ($exe -- publish again WITH THAT binary to stamp it)"
+        }
+        elseif ((& git -C $repo cat-file -t $sha 2>$null) -eq 'commit') {
+            Say "  PASS  I2  the installed build's commit is one git log knows: $(& git -C $repo log -1 --format='%h %s' $sha 2>$null)"
+        }
+        else {
+            Say "  FAIL  I2  the installed build reports commit $sha, which this repo does not have"
+            Say "            ($exe)"
+            $bad++
+        }
+    }
+
     Say ""
     Say "-- not covered yet (RECOVERY-PHASES section 2), so this gate does NOT mean these hold --"
     Say "  not yet -- phase 3   live lane pipes == the lane count dodona ps reports           (I3)"
