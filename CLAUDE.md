@@ -35,6 +35,13 @@ re-learns the expensive way.
 - Feedback like "that's bullshit" about a proposal is a decision — record it (rejected
   ideas live in `docs/LANE-LIFECYCLE.md` §2 style: *with the reason*) so it is never
   re-proposed.
+- **Never hung, halted, stuck, or outdated** (standing directive, 2026-08-18). Anything
+  that parks behind a question, waits on a human who did not opt into waiting, or goes
+  quietly stale is a bug, not a safety feature. The pattern is always the same: make the
+  action reversible (back up, log, announce the undo), then act. Updates arm themselves;
+  migrations back up and proceed; deployed artifacts re-deploy on adoption; a process
+  that dies at startup leaves a line in `<DODONA_HOME>\logs\daemon-start.log`. When you
+  add a wait, name the thing that un-sticks it — a condition, never a person.
 
 ## 0.2 Windows & PS 5.1 traps (each cost a debugging round)
 
@@ -117,12 +124,27 @@ registered workspace is never a swap target, which is what finally made
 `tests/publish-acceptance.ps1` possible. Narrower: `--workspace <name>...` and `--concierge`;
 with neither, the workspace that owns `--project`.
 
-Two things publish cannot do, so say them plainly when they apply:
+One thing publish cannot do, so say it plainly when it applies:
 
-- **A running UI window does not hot-swap.** The daemon and lanes survive; the window is
-  the disposable half. Tell the operator to relaunch it from the desktop icon.
 - **Publishing does not commit.** Commit the work too, or it will be published and then
   lost on the next checkout.
+
+(A running UI window DOES hot-swap now — publish refreshes live windows through
+`ui update` after the daemons, and the window hands off to the new build or stays if the
+successor never answers. An older revision of this file claimed otherwise.)
+
+Publish also **verifies before it promotes**: the new binary must answer
+`version --json`, and the desktop shortcut is repointed only after a daemon accepted the
+build (or after the probe, when nothing was running). This exists because fourteen
+consecutive auto-publishes of a broken tree once each repointed the shortcut at a binary
+whose daemon died on startup — the front door itself rotted, and every project open froze
+against it (2026-08-18). The shortcut launches `DodonaUi.exe --shell` — the workspace
+shell, never the folder picker.
+
+Blocked swaps **arm themselves** instead of asking (`swap-answer now` forces, `hold`
+parks — holding is opt-in, waiting never is), and a schema-migrating swap **backs up the
+store and proceeds** (announced with the restore path; only downgrades refuse). §14 of
+the design doc records the revision.
 
 ## 3. Verify with the suites, not by looking
 

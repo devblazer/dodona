@@ -126,7 +126,7 @@ public partial class PickerWindow : Window
 
     /// <summary>Create the repository the selected folder is missing. The daemon does the
     /// git — git is the daemon's business (§12) — so this starts one first.</summary>
-    void Init_Click(object sender, RoutedEventArgs e)
+    async void Init_Click(object sender, RoutedEventArgs e)
     {
         if (Selected is not Row row || !row.Entry.Exists) return;
         var root = Instance.Canonical(row.Path);
@@ -148,8 +148,14 @@ public partial class PickerWindow : Window
         Warn("Creating the repository…");
         var ws = ResolveWorkspace(root);
         if (ws is null) { IsEnabled = true; return; }
-        var reason = DaemonClient.Ensure(ws.Primary ?? root, ws.Id);
-        var result = reason ?? DaemonClient.Send(ws.Id, new { cmd = "repo-init", adopt });
+        // Off the UI thread for the same reason as Open(): a daemon start must never
+        // freeze the window that asked for it.
+        var result = await Task.Run(() =>
+        {
+            var reason = DaemonClient.Ensure(ws.Primary ?? root, ws.Id);
+            return reason ?? DaemonClient.Send(ws.Id, new { cmd = "repo-init", adopt });
+        });
+        if (!IsLoaded) return;                      // closed while we waited
         IsEnabled = true;
         Warn(result);
         Refresh();
@@ -169,7 +175,7 @@ public partial class PickerWindow : Window
         catch (Exception ex) { Warn(ex.Message); return null; }
     }
 
-    void Open(string path)
+    async void Open(string path)
     {
         if (!Directory.Exists(path)) { Warn("That folder does not exist."); return; }
         var root = Instance.Canonical(path);
@@ -186,7 +192,12 @@ public partial class PickerWindow : Window
 
         IsEnabled = false;
         Warn($"Starting {ws.Name}…");
-        var reason = DaemonClient.Ensure(ws.Primary ?? root, ws.Id);
+        // Off the UI thread: Ensure legitimately takes seconds (daemon start + reconcile)
+        // and blocks its full 20s when the daemon is broken. Awaiting it inline froze
+        // this window solid — the operator's "opening a project froze" (2026-08-18).
+        // The window keeps painting and can be closed while the daemon comes up.
+        var reason = await Task.Run(() => DaemonClient.Ensure(ws.Primary ?? root, ws.Id));
+        if (!IsLoaded) return;                      // closed while we waited
         IsEnabled = true;
         if (reason is not null) { Warn(reason); return; }
 

@@ -24,6 +24,22 @@ sealed class Store : IDisposable, ILaneSink
         Migrate();
     }
 
+    /// <summary>Copy the live store to <paramref name="destPath"/> with SQLite's online
+    /// backup — consistent mid-write, WAL included, no file-copy races. Exists so a
+    /// schema-migrating swap can proceed instead of parking (§14 revised): the backup IS
+    /// the keystroke-undo a half-applied migration otherwise lacks. Overwrites any
+    /// previous backup at the same path — the latest pre-migration state is the one an
+    /// undo wants.</summary>
+    public void Backup(string destPath)
+    {
+        lock (_lock)
+        {
+            using var dest = new SqliteConnection($"Data Source={destPath}");
+            dest.Open();
+            _db.BackupDatabase(dest);
+        }
+    }
+
     void Migrate()
     {
         long v;

@@ -741,22 +741,31 @@ message, drop a lane or interrupt a turn, this rule is wrong** — the correctne
 "update everything, always" rests entirely on the queue being in the store and the agents
 being detached behind their shims.
 
-**When a swap cannot be seamless, ask.** Some updates are not hot-swappable — a store
-schema migration (detected by `user_version`), a change to the shim protocol, a lane
-mid-merge holding the token. The daemon detects the blockage *before* swapping and puts a
-one-liner in the dispatcher pane:
+**When a swap cannot be seamless, arm it.** *(Revised 2026-08-18 — never-stuck. The
+original design asked a three-way question here; the operator lost a morning to updates
+parked behind it, and directed that nothing hang, halt, stick, or go stale.)* A blocked
+swap now answers itself with the middle option: the daemon records the proposal as
+**armed** and swaps the instant the blocking condition clears — defer to a condition,
+not to a timer, with no input from anyone. The announcement carries the two overrides:
 
 ```
-[dodona] update ready — WATER is mid-merge. swap now / when it lands / hold
+[dodona] update <build> armed — lands the instant this clears: WATER is mid-merge
+        (dodona swap-answer now to force, hold to park)
 ```
 
-Three answers, and the middle one matters most: **defer to a condition, not to a
-timer.** "When it lands" means the daemon swaps itself the instant the blocking
-condition clears, with no further input from you. "Hold" parks it until you say so.
+What still blocks, and what stopped blocking:
 
-This is the one exception to *act, announce, allow undo* (§11), and it earns the
-exception by the same test that rule uses: a half-applied schema migration is not
-undoable with a keystroke.
+- **A lane mid-merge holding the token** — blocks, arms, lands when the merge does.
+- **A store schema migration** — no longer blocks at all. It used to be the exception to
+  *act, announce, allow undo* (§11) because a half-applied migration is not undoable with
+  a keystroke; the fix was to make it undoable rather than to keep asking. The daemon
+  backs up the store (SQLite online backup, announced with the restore path) before the
+  successor migrates it. Only a schema *downgrade* still refuses outright — a build that
+  cannot read the store may not open it.
+- **A shim protocol change** — blocks only when a live shim speaks a *newer* protocol
+  than the candidate build. Shims can never be swapped (they own their child's stdio), so
+  every daemon commits to speaking all protocols ≤ its own; old shims therefore never
+  hold an update hostage.
 
 ---
 

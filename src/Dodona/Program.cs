@@ -78,10 +78,40 @@ catch (WorkspaceUnavailable ex) { return Fail(ex.Message); }
 
 int Usage() => Fail($"{cmd}: missing an argument — see `dodona` with no arguments for usage");
 
+/// <summary>Run the daemon, and make sure a daemon that never came up leaves EVIDENCE.
+/// A daemon is spawned detached and hidden (by the UI, by Ensure, by a predecessor's
+/// handoff), so one that dies before answering its pipe used to vanish without a trace —
+/// fourteen broken auto-published builds did exactly that on 2026-08-18, and the only
+/// symptom was windows freezing against a pipe nobody was ever going to serve. Every
+/// startup failure now lands in one place a person (or an agent) can read after the fact.</summary>
+async Task<int> RunDaemonLogged()
+{
+    try
+    {
+        var code = await Daemon.RunAsync(WsPrimary(), WsId(), WsName(), CtlPipe(), opts.ContainsKey("successor"));
+        if (code != 0) StartupLog($"daemon exited {code}");
+        return code;
+    }
+    catch (WorkspaceUnavailable ex) { StartupLog($"daemon refused: {ex.Message}"); throw; }
+    catch (Exception ex) { StartupLog($"daemon crashed: {ex}"); throw; }
+}
+
+void StartupLog(string msg)
+{
+    try
+    {
+        var dir = Path.Combine(Paths.Home, "logs");
+        Directory.CreateDirectory(dir);
+        File.AppendAllText(Path.Combine(dir, "daemon-start.log"),
+            $"{DateTime.UtcNow:o} pid={Environment.ProcessId} build={Ver.Build} exe={Ver.ExePath} args=[{string.Join(" ", args)}] {msg}{Environment.NewLine}");
+    }
+    catch { /* the log must never be a second way to die */ }
+}
+
 async Task<int> Dispatch() => cmd switch
 {
     "version" => Version(),
-    "daemon" => await Daemon.RunAsync(WsPrimary(), WsId(), WsName(), CtlPipe(), opts.ContainsKey("successor")),
+    "daemon" => await RunDaemonLogged(),
     // ---- workspaces (WORKSPACES-CONCIERGE.md §1). Answered in THIS process, deliberately,
     // even now that a concierge exists: the concierge owns the registry as the thing that
     // RESOLVES and LEARNS from it (§2.1), while the file itself stays safe for several
@@ -559,7 +589,26 @@ int Publish()
 
     var newExe = Path.Combine(outDir, "dodona.exe");
     if (!File.Exists(newExe)) return Fail($"published, but {newExe} is missing");
-    Shortcut(outDir);
+
+    // Verify the build actually RUNS before anything is promoted to it. The shortcut
+    // used to be repointed right here, before any swap was attempted — so a build that
+    // compiled but could not start became the front door (found live 2026-08-18:
+    // fourteen consecutive broken auto-publishes each repointed the shortcut at a
+    // binary whose daemon died on startup; every project open froze against it for the
+    // rest of the morning). Now: probe first, and move the shortcut only at the end,
+    // once a daemon has accepted the build — or, with nothing running, on this probe.
+    try
+    {
+        var vpsi = new System.Diagnostics.ProcessStartInfo(newExe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+        vpsi.ArgumentList.Add("version");
+        vpsi.ArgumentList.Add("--json");
+        using var vp = System.Diagnostics.Process.Start(vpsi)!;
+        var vout = vp.StandardOutput.ReadToEnd();
+        vp.WaitForExit(10000);
+        if (vp.ExitCode != 0 || !vout.Contains("\"schema\""))
+            return Fail($"built, but {newExe} does not answer `version --json` — nothing promoted, nothing swapped");
+    }
+    catch (Exception ex) { return Fail($"built, but {newExe} would not start ({ex.Message}) — nothing promoted, nothing swapped"); }
 
     // ---- who gets the swap (WORKSPACES-CONCIERGE.md §7) --------------------------------
     // `--all` used to broadcast to every ctl pipe on the machine, which ORCHESTRATOR-REVIEW
@@ -606,6 +655,7 @@ int Publish()
         try { targets.Add(($"{WsName()} ({WsId()})", CtlPipe())); }
         catch (WorkspaceUnavailable ex)
         {
+            Shortcut(outDir);                           // probe-verified above; nothing running to object
             Console.WriteLine($"published {newExe}");
             Console.Error.WriteLine($"note: nothing was swapped — {ex.Message}");
             Console.Error.WriteLine("      name targets explicitly:  --workspace <name> ... [--concierge]   or  --all");
@@ -614,13 +664,21 @@ int Publish()
     }
 
     int worst = 0;
+    var accepted = targets.Count == 0;      // probe-verified, and nothing running to object
     if (targets.Count == 0) Console.WriteLine($"published {newExe}; no daemon running to swap");
     foreach (var (label, target) in targets)
     {
         Console.WriteLine($"— swapping {label} on {target}");
         var code = Client(new { cmd = "swap", exe = newExe, mode = One("mode") ?? "ask" }, target);
+        if (code == 0) accepted = true;     // handed off, or armed to land — a daemon vouched for it
         worst = Math.Max(worst, code);
     }
+
+    // The front door moves LAST: only onto a build a daemon accepted, or that the probe
+    // verified when nothing was running to ask. A publish where every swap failed leaves
+    // the shortcut on the last build that provably runs.
+    if (accepted) Shortcut(outDir);
+    else Console.Error.WriteLine("note: desktop shortcut NOT repointed — no daemon accepted this build; the door still opens the last good one");
 
     // The UI is its own process and its own build. Swapping only the daemon leaves the
     // operator looking at the old window — which is exactly what "nothing happened" looks
@@ -681,8 +739,14 @@ void Shortcut(string outDir)
     try
     {
         // A .lnk is a COM shell object; PowerShell is the shortest honest way to write one.
+        // --shell is the front door (WORKSPACES-CONCIERGE.md §4): one window over every
+        // awake workspace, boot-to-zero when nothing is. The shortcut used to launch the
+        // bare exe, whose no-argument path is the folder PICKER — the pre-workspace way
+        // in, folder-first in a workspace-first design. The operator noticed before we
+        // did (2026-08-18). Arguments are re-stamped on every publish, so an existing
+        // argument-less shortcut heals itself on the next publish.
         var ps = $"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}');" +
-                 $"$s.TargetPath='{target}';$s.WorkingDirectory='{outDir}';" +
+                 $"$s.TargetPath='{target}';$s.Arguments='--shell';$s.WorkingDirectory='{outDir}';" +
                  $"$s.Description='Dodona — multi-agent orchestrator';$s.Save()";
         var psi = new System.Diagnostics.ProcessStartInfo("powershell")
         { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };

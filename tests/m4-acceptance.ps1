@@ -144,7 +144,11 @@ try {
     $missing = Dodona @("swap", "$binRoot\nope\dodona.exe")
     Check 'missing_binary_refused' ($DODONA_EXIT -ne 0 -and $missing -match 'no such binary') $missing
 
-    # ================= blocked swap: three answers, and "when it lands" =================
+    # publish itself must refuse a binary that cannot start — and say nothing was promoted
+    $badPub = Dodona @("publish", "--exe", "$badDir\dodona.exe")
+    Check 'publish_refuses_unrunnable_binary' ($DODONA_EXIT -ne 0 -and $badPub -match 'nothing promoted') $badPub
+
+    # ============ blocked swap ARMS ITSELF: nothing waits on a person (never-stuck) ============
     Dodona @("ticket-create", "--title", "MERGE", "--claim", "path:src/a.cs") | Out-Null
     Dodona @("approve", "1") | Out-Null
     $grant = Dodona @("token-request", "1", "--lease", "300")
@@ -152,15 +156,17 @@ try {
 
     $publish2 = Dodona @("publish", "--project", $repo)
     Set-Content "$out\publish2.txt" $publish2
-    Check 'midmerge_blocks_swap' ($publish2 -match 'MERGE is mid-merge' -and $publish2 -match 'swap-answer now \| when-it-lands \| hold') $publish2
-    Check 'blocker_announced_with_three_answers' ((Sql "SELECT body FROM pane_events WHERE kind='announcement' ORDER BY id") -match 'update ready.*mid-merge.*swap now / when it lands / hold') ''
+    Check 'midmerge_arms_swap' ($publish2 -match 'MERGE is mid-merge' -and $publish2 -match 'armed' -and $publish2 -match 'swap-answer now \| hold') $publish2
+    Check 'blocked_swap_armed_in_store' ((Sql "SELECT state FROM swaps ORDER BY id DESC LIMIT 1") -match 'armed') ''
+    Check 'armed_announced_with_overrides' ((Sql "SELECT body FROM pane_events WHERE kind='announcement' ORDER BY id") -match 'armed.*lands the instant this clears.*mid-merge') ''
     Check 'daemon_did_not_swap_while_blocked' ((Dodona @("status")) -match "daemon pid=$newPid") ''
 
+    # holding is opt-in — the override must still park it
     $held = Dodona @("swap-answer", "hold")
     Check 'hold_parks_the_swap' ($held -match 'parked' -and (Sql "SELECT state FROM swaps ORDER BY id DESC LIMIT 1") -match 'held') $held
 
     $armed = Dodona @("swap-answer", "when-it-lands")
-    Check 'when_it_lands_arms' ($armed -match 'armed' -and (Sql "SELECT state FROM swaps ORDER BY id DESC LIMIT 1") -match 'armed') $armed
+    Check 'when_it_lands_rearms' ($armed -match 'armed' -and (Sql "SELECT state FROM swaps ORDER BY id DESC LIMIT 1") -match 'armed') $armed
     Check 'armed_but_not_yet_swapped' ((Dodona @("status")) -match "daemon pid=$newPid") ''
 
     # defer to a CONDITION, not a timer: release the token and it must swap itself
@@ -174,6 +180,19 @@ try {
     Check 'armed_swap_fires_when_blocker_clears' $swapped "still pid $newPid after 15s"
     Check 'armed_swap_recorded' ((Sql "SELECT state FROM swaps ORDER BY id DESC LIMIT 1") -match 'swapped') ''
     Check 'agent_survived_second_swap' ([bool](Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue)) ''
+
+    # ====== the gate in an adopted worktree points at the RUNNING build (never-stuck) ======
+    # Gate scripts hard-code the exe that wrote them and old build dirs are GC'd, so
+    # without re-deploy-on-adoption every swap left old worktrees' gates calling a binary
+    # scheduled for deletion — silently failing OPEN.
+    # trailing space matters: the query is inlined into a python '''…''' literal, and a
+    # query ENDING in a quote would make four quotes in a row (SyntaxError).
+    Check 'gate_redeployed_on_adoption' ([int](Sql "SELECT COUNT(*) FROM events WHERE kind='gate_redeployed' ").Trim() -ge 1) ''
+    $wt = (Sql "SELECT worktree FROM tickets WHERE id=1").Trim()
+    $runningExe = ''
+    if (((Dodona @("swaps")) -join ' ') -match 'exe (\S+)') { $runningExe = $Matches[1] }
+    $gateBody = if (Test-Path "$wt\dodona-gate.ps1") { Get-Content "$wt\dodona-gate.ps1" -Raw } else { '' }
+    Check 'gate_points_at_running_build' ($runningExe -ne '' -and $gateBody.Contains($runningExe)) "exe=$runningExe wt=$wt"
 
     # ================= old build directories are collected =================
     $dirs = @(Get-ChildItem -Directory $binRoot | Where-Object { $_.Name -ne 'bogus' })

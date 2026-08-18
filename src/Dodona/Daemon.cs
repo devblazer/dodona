@@ -315,6 +315,26 @@ sealed class Daemon
                 Announce($"[dodona] retired {surplus.Count} duplicate {role.ToUpperInvariant()} lane(s) left by a fixed leak — one per daemon start; kept lane {keep}");
         }
 
+        // Re-deploy the claim gate into every open ticket's worktree. Gate files are
+        // deployment, and deployment rots: each script hard-codes the exe that wrote it,
+        // and GcOldBuilds deletes old build directories — so an adopted worktree's gate
+        // ends up invoking a binary that no longer exists and silently fails OPEN (found
+        // live 2026-08-18: every lane older than the running build had lost enforcement
+        // layer 1, with nothing but a bypass log to show for it). Two file writes per
+        // ticket buys a gate that always points at the build actually running.
+        try
+        {
+            var repos = Repositories();
+            foreach (var t in _store.Tickets().Where(t => t.State == "open" && t.Worktree.Length > 0 && Directory.Exists(t.Worktree)))
+            {
+                var repo = Repos.ByName(repos, t.Repo);
+                if (repo is null) { _store.Event("gate_redeploy_failed", null, $"ticket {t.Id}: repo '{t.Repo}' not found"); continue; }
+                try { DeployGate(t.Worktree, t.Id, repo); _store.Event("gate_redeployed", null, $"ticket {t.Id}: {t.Worktree}"); }
+                catch (Exception ex) { _store.Event("gate_redeploy_failed", null, $"ticket {t.Id}: {ex.Message}"); }
+            }
+        }
+        catch (Exception ex) { _store.Event("gate_redeploy_failed", null, ex.Message); }
+
         // A leak this quiet needs to be visible in the chain, not just absent.
         _store.Event("reconcile_done", null,
             $"connected={_lanes.Count} brain={(_brainLo > 0 ? _brainLo.ToString() : "-")} " +
@@ -1122,17 +1142,25 @@ sealed class Daemon
         catch (Exception ex) { error = $"binary did not answer `version --json` ({ex.Message})"; return null; }
     }
 
-    /// <summary>What stands in the way of a seamless swap (§14). Empty means go.</summary>
+    /// <summary>What stands in the way of a seamless swap (§14). Empty means go.
+    ///
+    /// A schema MIGRATION is deliberately not here any more: it used to park every
+    /// migrating build behind a question, and the answer was always "yes, but keep an
+    /// undo" — so HandoffAsync now takes the backup itself and proceeds (never-stuck,
+    /// 2026-08-18). Only a DOWNGRADE still refuses, in ConsiderSwapAsync, because a
+    /// build that cannot read the store cannot be allowed to open it at all.</summary>
     List<string> Blockers(NewBuild nb)
     {
         var blockers = new List<string>();
 
-        if (nb.Schema > Ver.Schema)
-            blockers.Add($"store schema migration v{Ver.Schema}→v{nb.Schema}");
-
         // The live shims are the authority, not our own constant: they were spawned by
         // whichever binary was running then, and the successor has to talk to THEM.
-        var stranded = _lanes.Values.Where(l => l.Connected && l.ShimProtocol != nb.ShimProtocol).ToList();
+        // Only a shim NEWER than the candidate blocks: shims can never be swapped (they
+        // own their child's stdio), so every daemon commits to speaking all protocols
+        // ≤ its own — that commitment is what keeps protocol bumps from freezing
+        // updates for as long as one long-lived lane survives. Bump Ver.ShimProtocol
+        // WITHOUT keeping the old dialect readable and this line is what breaks.
+        var stranded = _lanes.Values.Where(l => l.Connected && l.ShimProtocol > nb.ShimProtocol).ToList();
         if (stranded.Count > 0)
             blockers.Add($"shim protocol v{stranded[0].ShimProtocol}→v{nb.ShimProtocol} with {stranded.Count} live shim(s)");
 
@@ -1148,10 +1176,11 @@ sealed class Daemon
         return blockers;
     }
 
-    /// <summary>The swap decision. Clear road → hand off. Something in the way → do not
-    /// act: record the proposal, announce it with its three answers, and wait. This is
-    /// the one exception to act-announce-undo (§11), and it earns it — a half-applied
-    /// migration is not undoable with a keystroke.</summary>
+    /// <summary>The swap decision. Clear road → hand off. Something in the way → arm:
+    /// record the proposal and fire it the instant the blocker clears, announcing both.
+    /// Nothing waits on a human (never-stuck, 2026-08-18) — the operator lost a morning
+    /// to updates parked behind questions. `swap-answer hold` parks one on purpose;
+    /// `swap-answer now` forces through a blocker. Only a schema DOWNGRADE refuses.</summary>
     async Task<(bool HandedOff, List<string> Lines)> ConsiderSwapAsync(string exe, string mode)
     {
         var lines = new List<string>();
@@ -1181,11 +1210,14 @@ sealed class Daemon
                 lines.Add($"still blocked: {blocker}");
                 return (false, lines);
             }
-            var id = _store.SwapCreate(nb.Exe, nb.Build, nb.Schema, nb.ShimProtocol, blocker, "ask", "pending");
-            _store.Event("swap_blocked", null, $"swap {id} build {nb.Build}: {blocker}");
-            Announce($"[dodona] update ready — {blocker}. swap now / when it lands / hold");
-            lines.Add($"update {nb.Build} ready — {blocker}");
-            lines.Add("answer: dodona swap-answer now | when-it-lands | hold");
+            // Blocked → armed, not asked. The ticker fires it the moment the blocker
+            // clears; the announcement carries the two overrides. "ask" survives only
+            // as the wire default's name — its behavior is now when-it-lands.
+            var id = _store.SwapCreate(nb.Exe, nb.Build, nb.Schema, nb.ShimProtocol, blocker, "when-it-lands", "armed");
+            _store.Event("swap_armed", null, $"swap {id} build {nb.Build}: {blocker}");
+            Announce($"[dodona] update {nb.Build} armed — lands the instant this clears: {blocker} (dodona swap-answer now to force, hold to park)");
+            lines.Add($"armed: update {nb.Build} fires when this clears — {blocker}");
+            lines.Add("override: dodona swap-answer now | hold");
             return (false, lines);
         }
 
@@ -1210,6 +1242,18 @@ sealed class Daemon
         Process? p = null;
         try
         {
+            // A migrating successor gets an undo BEFORE it exists (§14 revised): back up
+            // the store, then proceed. This is what turned "schema migration" from a
+            // parked question into an ordinary swap — act, announce, allow undo (§11).
+            // The backup is taken by the ONE writer while it is still the one writer.
+            if (nb.Schema > Ver.Schema)
+            {
+                var bak = Paths.Store(_instanceId) + $".pre-v{Ver.Schema}";
+                _store.Backup(bak);
+                _store.Event("store_backed_up", null, $"swap {swapId}: schema v{Ver.Schema}→v{nb.Schema}, backup {bak}");
+                Announce($"[dodona] store backed up before migration v{Ver.Schema}→v{nb.Schema} — undo: dodona stop-daemon, then restore {bak} over store.db");
+            }
+
             var psi = new ProcessStartInfo(nb.Exe) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = _primary };
             psi.ArgumentList.Add("daemon");
             psi.ArgumentList.Add("--workspace");
@@ -1275,7 +1319,10 @@ sealed class Daemon
                     while (await r.ReadLineAsync() is string l && l != "##end") { }
                 }
                 finally { try { pipe.Dispose(); } catch { } }
-                return;                    // fired: either we are exiting, or it failed and re-armed nothing
+                // Fired. On success this process is exiting anyway; on failure the swap
+                // row is 'failed' and SwapLive() goes quiet — but blocked swaps now arm
+                // THEMSELVES (auto-arm), so a later one needs this ticker still alive.
+                // A `return` here left the first failed fire as the last fire ever.
             }
             catch { /* next tick */ }
         }
