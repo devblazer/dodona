@@ -9,5 +9,11 @@
     "operator_rename_wins":  "PASS",
     "brain_runs_outside_the_project":  "PASS",
     "pulse_on_arrival":  "PASS",
-    "pulse_fades":  "PASS"
+    "pulse_fades":  "PASS",
+    "generic_never_retargets":  "PASS",
+    "specific_retargets_cheaply":  "PASS",
+    "unclear_escalates_to_expensive":  "PASS",
+    "double_uncertainty_asks_the_operator":  "PASS",
+    "clarification_in_causal_chain":  "PASS",
+    "message_still_delivered_to_focused":  "PASS"
 }

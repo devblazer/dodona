@@ -1,5 +1,5 @@
 ﻿{
-    "daemon1_killed_mid_turn":  "pid 53428, ~1s into a 6s turn",
+    "daemon1_killed_mid_turn":  "pid 16844, ~1s into a 6s turn",
     "shim_alive_no_daemon":  "PASS",
     "agent_alive_no_daemon":  "PASS",
     "orphaned_result_landed":  "PASS",

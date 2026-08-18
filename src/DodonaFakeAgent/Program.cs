@@ -21,6 +21,9 @@ var asCompressor = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "co
 //   brainname:X   — disagree, better_name X      brainticket:T — suggest ticket T
 //   brainlow      — answer with confidence low (forces the escalation path)
 var asBrain = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE")?.StartsWith("brain") == true;
+// router: routekind:generic|specific|unclear, routetarget:X, routeconf:low — so the full
+// escalation chain (classifier → brain-hi → operator clarification) runs model-free.
+var asRouter = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "router";
 var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
 void Emit(object o) => stdout.WriteLine(JsonSerializer.Serialize(o));
 
@@ -36,6 +39,26 @@ while ((line = Console.ReadLine()) is not null)
         text = d.RootElement.GetProperty("message").GetProperty("content")[0].GetProperty("text").GetString() ?? "";
     }
     catch { continue; }
+
+    if (asRouter)
+    {
+        var rk = Regex.Match(text, @"routekind:(\w+)");
+        var rt2 = Regex.Match(text, @"routetarget:(\w+)");
+        Emit(new
+        {
+            type = "result",
+            subtype = "success",
+            session_id = sessionId,
+            result = JsonSerializer.Serialize(new
+            {
+                kind = rk.Success ? rk.Groups[1].Value : "generic",
+                target = rt2.Success ? rt2.Groups[1].Value : "none",
+                confidence = text.Contains("routeconf:low") ? "low" : "high",
+                cleaned_text = text,
+            }),
+        });
+        continue;
+    }
 
     if (asBrain)
     {

@@ -94,6 +94,38 @@ try {
     $pane = (Dump).slots | Where-Object { -not $_.empty } | Where-Object { $_.lane -eq $laneId }
     Check 'pulse_fades' ($pane.pulsing -eq $false) ''
 
+    # ---- the escalation ladder end to end (operator's routing tiers + final rung) ----
+    Dodona @("router-start", "--child", $fake) | Out-Null
+    Dodona @("brain-start", "--hi") | Out-Null
+    Start-Sleep -Milliseconds 900
+    Dodona @("lane-start", "--title", "WATER", "--child", $fake) | Out-Null
+    Start-Sleep -Milliseconds 600
+    Dodona @("focus", "$laneId") | Out-Null
+
+    # generic → stays with the focused lane; the classifier must not second-guess it
+    Dodona @("input", "routekind:generic say dont do that") | Out-Null
+    Start-Sleep -Seconds 2
+    Check 'generic_never_retargets' ((Rows "SELECT COUNT(*) FROM routing_decisions WHERE retargeted=1").Trim() -eq '0') ''
+
+    # specific + confident → cheap retarget to the named lane
+    Dodona @("input", "routekind:specific routetarget:WATER say make the water red") | Out-Null
+    Start-Sleep -Seconds 2
+    Check 'specific_retargets_cheaply' ((Rows "SELECT COUNT(*) FROM routing_decisions WHERE retargeted=1 AND confidence!='escalated'").Trim() -eq '1') ''
+
+    # unclear + brain-hi sure → escalated retarget
+    Dodona @("input", "routekind:unclear braintarget:WATER say hmm that colour thing") | Out-Null
+    Start-Sleep -Seconds 3
+    Check 'unclear_escalates_to_expensive' ((Rows "SELECT COUNT(*) FROM routing_decisions WHERE confidence='escalated'").Trim() -eq '1') ''
+
+    # unclear + even brain-hi unsure → the OPERATOR is asked, in the dispatcher feed,
+    # while the message stays with the focused lane (ambiguity's default, never a block)
+    Dodona @("input", "routekind:unclear say something entirely cryptic") | Out-Null
+    Start-Sleep -Seconds 3
+    $ask = Rows "SELECT body, acked FROM pane_events WHERE body LIKE '%not sure where%' LIMIT 1"
+    Check 'double_uncertainty_asks_the_operator' (($ask -match 'stayed with') -and ($ask -match '\|0')) $ask
+    Check 'clarification_in_causal_chain' ((Rows "SELECT COUNT(*) FROM events WHERE kind='routing_clarification'").Trim() -eq '1') ''
+    Check 'message_still_delivered_to_focused' ((Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$laneId AND kind='user_input' AND body LIKE '%entirely cryptic%'").Trim() -eq '1') ''
+
     Dodona @("ui", "close") | Out-Null
     Dodona @("stop-daemon") | Out-Null
 }

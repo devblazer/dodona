@@ -1,6 +1,6 @@
-daemon pid=53512 build=1.0.0+20260818094230 schema=7 exe=C:\Users\devbl\AppData\Local\Temp\dodona-bin-74852300\20260818-094643\dodona.exe
+daemon pid=23536 build=1.0.0+20260818100547 schema=7 exe=C:\Users\devbl\AppData\Local\Temp\dodona-bin-72d5e771\20260818-100723\dodona.exe
 lanes: model=opus effort=high  router: model=haiku effort=low  agent=claude
 lane 1  BRAIN       role=brain   state=alive  connected=True  presence=                  session=-
-lane 2  SKY         role=work    state=alive  connected=True  presence=idle              session=fake-6104c18b49234a2fb87c3fcb95f68f19
+lane 2  SKY         role=work    state=alive  connected=True  presence=idle              session=fake-18db38c873e946e891f47d662bfe4b04
 lane 3  DODONA      role=dispatcher  state=alive  connected=False  presence=system            session=-
 lane 4  BRAIN       role=brain   state=alive  connected=True  presence=                  session=-

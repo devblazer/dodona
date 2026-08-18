@@ -1795,17 +1795,39 @@ sealed class Daemon
                         $"Route this operator input to the right lane, or say none to leave it with the focused lane.\n" +
                         $"Lanes:\n{laneList}\nFocused: {focusedTitle}\nInput: {text}\n" +
                         "Reply ONLY one line of JSON: {\"target\":\"<LANE TITLE or none>\",\"confidence\":\"high|medium|low\",\"reason\":\"<=60 chars\"}");
-                    if (verdict is null) return;                        // no brain, or it timed out: focused stands
-                    var vTarget = verdict.Value.TryGetProperty("target", out var vt) ? vt.GetString() : null;
-                    var vLane = work.FirstOrDefault(l => l.Title.Equals(vTarget ?? "", StringComparison.OrdinalIgnoreCase));
-                    if (vLane is null || vLane.Id == fid) return;
-                    _store.PaneEvent(fid, "announcement", $"→ retargeted to {vLane.Title} (escalated)", null, null);
-                    if (_lanes.TryGetValue(vLane.Id, out var vrt))
+                    string? vTarget = null;
+                    var vConf = "low";
+                    if (verdict is JsonElement ve)
                     {
-                        vrt.Say(text);
-                        _store.RoutingRetarget(rowId, vLane.Id, "escalated");
-                        _store.Event("routed_retarget", vLane.Id, $"escalated, from lane {fid}: {text}");
+                        if (ve.TryGetProperty("target", out var vt)) vTarget = vt.GetString();
+                        if (ve.TryGetProperty("confidence", out var vc)) vConf = vc.GetString() ?? "low";
                     }
+                    var vLane = work.FirstOrDefault(l => l.Title.Equals(vTarget ?? "", StringComparison.OrdinalIgnoreCase));
+
+                    // The expensive tier is sure → the usual visible, undoable retarget.
+                    if (vLane is not null && vLane.Id != fid && vConf != "low")
+                    {
+                        _store.PaneEvent(fid, "announcement", $"→ retargeted to {vLane.Title} (escalated)", null, null);
+                        if (_lanes.TryGetValue(vLane.Id, out var vrt))
+                        {
+                            vrt.Say(text);
+                            _store.RoutingRetarget(rowId, vLane.Id, "escalated");
+                            _store.Event("routed_retarget", vLane.Id, $"escalated, from lane {fid}: {text}");
+                        }
+                        return;
+                    }
+                    if (vLane is not null && vLane.Id == fid && vConf != "low") return;   // sure it belongs where it went
+
+                    // Even deep thought is unsure → the top of the ladder is the operator
+                    // (§3), asked in the dispatcher's own column — never a grid lane, and
+                    // never a block: the message already sits with the focused lane, which
+                    // is exactly where the operator's own policy sends ambiguity. The
+                    // question is a badged feed row; ack keeps it, a `LANE:` prefix moves
+                    // it, and either way work never waited on anyone.
+                    var candidates = string.Join(" / ", work.Where(l => l.Id != fid).Select(l => l.Title).Take(4));
+                    _store.Event("routing_clarification", fid, $"decision {rowId}: {text}");
+                    Announce($"[dodona] not sure where “{Truncate(text, 45)}” belongs — it stayed with {focusedTitle}. " +
+                             $"Ack to keep it there, or resend with a lane prefix ({candidates}) to move it.");
                 }
                 catch (Exception ex) { _store.Event("classifier_failed", router.Id, ex.Message); }
             });
