@@ -239,9 +239,12 @@ suite can finally exist because a test can name only its own fixtures.
   it fails). It fails fast into asking instead. A fence that grows itself is how a
   classifier with a flashlight becomes a crawler with opinions.
 
-## 9. Slicing
+## 9. Slicing — this is the high-priority list, all of it
 
-Each slice ships alone; current two-window behavior keeps working throughout.
+Operator, 2026-08-18: every item below is high priority. This list is the enumeration —
+nothing in this document is background material to the slices; each slice IS one of the
+things decided in the planning session. Each ships alone; current two-window behavior
+keeps working throughout.
 
 1. **Lane granularity (§5)** — severable, ships first, on today's system: the four-kind
    verdict, spawn-and-deliver for new-task, suite coverage in brain-acceptance.
