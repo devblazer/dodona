@@ -213,6 +213,16 @@ sealed class StoreReader : IDisposable
         return list;
     }
 
+    /// <summary>Which lanes the operator has collapsed. A row, not a UI field, so the choice
+    /// survives closing the window and is the same for every window over this workspace.</summary>
+    public HashSet<long> CollapsedLanes()
+    {
+        var set = new HashSet<long>();
+        foreach (var part in (Kv("collapsed_lanes") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
+            if (long.TryParse(part.Trim(), out var id)) set.Add(id);
+        return set;
+    }
+
     public string? Kv(string key)
     {
         if (!Open()) return null;

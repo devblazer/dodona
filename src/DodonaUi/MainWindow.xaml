@@ -81,13 +81,19 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
+            <!-- Columns bound, Rows left to UniformGrid: it divides the space itself as lanes
+                 arrive. No scrolling anywhere (operator, 2026-08-18: "i dont want scroll. if
+                 needed user will just collapse more") — panes shrink, and crowding is the cue
+                 to collapse, not a reason for the system to start hiding work. -->
             <ItemsControl x:Name="PaneGrid" Grid.Row="0" ItemsSource="{Binding Slots}"
                           Visibility="{Binding GridVisibility}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
-                        <UniformGrid Columns="3" Rows="2"/>
+                        <UniformGrid Columns="{Binding DataContext.GridColumns,
+                                     RelativeSource={RelativeSource AncestorType=Window}}"/>
                     </ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
@@ -127,6 +133,14 @@
                                     <Button DockPanel.Dock="Right" Content="✕" FontSize="11" Padding="5,0" Margin="6,0,0,0"
                                             AutomationProperties.Name="close-lane" ToolTip="Retire this lane's agent (wake resumes it)"
                                             Visibility="{Binding CloseVisibility}" Click="Pane_Close"
+                                            Background="Transparent" Foreground="#FF6B7079" BorderThickness="0" Cursor="Hand"/>
+                                    <!-- Collapse to a chip. Nothing stops, nothing is demoted;
+                                         it is how you make room without giving anything up. -->
+                                    <Button DockPanel.Dock="Right" Content="{Binding CollapseGlyph}" FontSize="11"
+                                            Padding="5,0" Margin="6,0,0,0"
+                                            AutomationProperties.Name="collapse-lane"
+                                            ToolTip="{Binding CollapseTip}"
+                                            Visibility="{Binding CloseVisibility}" Click="Pane_Collapse"
                                             Background="Transparent" Foreground="#FF6B7079" BorderThickness="0" Cursor="Hand"/>
                                     <Button DockPanel.Dock="Right" Content="wake" FontSize="10" Padding="6,1" Margin="6,0,0,0"
                                             AutomationProperties.Name="wake-lane" ToolTip="Respawn the agent, resuming its session"
@@ -170,11 +184,51 @@
                                HorizontalAlignment="Center"/>
                 </StackPanel>
 
+                <!-- ══ collapsed lanes: wrapped chips (§8 as revised) ══
+                     Set aside, not stopped. Each keeps its lane colour and its attention badge,
+                     so a collapsed lane can still say "you are needed here"; clicking expands
+                     it. Wrapped rather than one row each, so twenty collapsed lanes cost two
+                     lines instead of eating the grid they were collapsed to protect. -->
+                <ItemsControl x:Name="CollapsedStrip" Grid.Row="1" ItemsSource="{Binding CollapsedLanes}"
+                              Visibility="{Binding CollapsedVisibility}" Margin="5,4,5,0">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Margin="0,0,5,4" Padding="7,3" CornerRadius="4" Background="#FF1F2227"
+                                    BorderBrush="{Binding BorderBrushValue}" BorderThickness="{Binding BorderThicknessValue}"
+                                    Cursor="Hand" MouseLeftButtonDown="Collapsed_Click"
+                                    AutomationProperties.Name="collapsed-lane"
+                                    ToolTip="Click to expand this lane">
+                                <DockPanel>
+                                    <Rectangle DockPanel.Dock="Left" Width="9" Height="9" RadiusX="2" RadiusY="2"
+                                               Fill="{Binding LaneBrush}" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                    <TextBlock DockPanel.Dock="Left" FontWeight="Bold" FontSize="11"
+                                               Foreground="#FFC6CCD4" VerticalAlignment="Center">
+                                        <Run Text="{Binding FocusMark, Mode=OneWay}"/><Run Text="{Binding Title, Mode=OneWay}"/>
+                                    </TextBlock>
+                                    <TextBlock DockPanel.Dock="Left" Text=" ⚠" FontSize="11" Foreground="White"
+                                               Visibility="{Binding GlyphVisibility}" VerticalAlignment="Center"/>
+                                    <Border DockPanel.Dock="Left" Background="#FFCB4B4B" CornerRadius="7" Padding="5,0"
+                                            Margin="6,0,0,0" Visibility="{Binding BadgeVisibility}" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding BadgeText, Mode=OneWay}" FontSize="10"
+                                                   Foreground="White" FontWeight="Bold"/>
+                                    </Border>
+                                    <TextBlock DockPanel.Dock="Right" Text="{Binding Presence, Mode=OneWay}" FontSize="10"
+                                               Foreground="#FF6B7079" VerticalAlignment="Center" Margin="8,0,0,0"
+                                               TextTrimming="CharacterEllipsis" MaxWidth="120"/>
+                                </DockPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
                 <!-- ══ bands: one row per other awake workspace (§6) ══
                      The tray idiom at workspace scale. Clicking one swaps which workspace
                      holds the grid — a VIEW choice only: no lane is demoted, evicted or
                      trayed by being in a band (LANE-LIFECYCLE §2 stands). -->
-                <ScrollViewer Grid.Row="1" MaxHeight="132" VerticalScrollBarVisibility="Auto"
+                <ScrollViewer Grid.Row="2" MaxHeight="132" VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled" Margin="0,0,0,2"
                               Visibility="{Binding BandsVisibility}">
                 <ItemsControl x:Name="BandStrip" ItemsSource="{Binding Bands}" Margin="5,2,5,0">

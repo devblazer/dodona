@@ -19,6 +19,12 @@ public record PaneSnap(long LaneId, string Title, string State, string Presence,
 
     /// <summary>Highest user_input row id — moves when a routed message lands here.</summary>
     public long LastInputId { get; init; }
+
+    /// <summary>The operator has collapsed this tile to a one-line strip. A view choice they
+    /// made, never one the system made for them: nothing is stopped, demoted or hidden from the
+    /// feed, and one click brings it back (LANE-LIFECYCLE §2 — slot-pressure eviction stays
+    /// rejected; this is the operator's hand, not the system reclaiming space).</summary>
+    public bool Collapsed { get; init; }
 }
 public record FeedSnap(long Id, string LaneTitle, string Ts, string Body, bool Acked, bool IsSystem)
 {
@@ -186,7 +192,14 @@ public sealed class PaneView
     /// border always wins.</summary>
     public bool Pulsing { get; init; }
 
+    /// <summary>Collapsed to a chip by the operator. Nothing about the lane changed — it is
+    /// alive, it is still in the feed, and its badge still shows on the chip.</summary>
+    public bool Collapsed { get; init; }
+
     public string ColorHex => Palette[Slot % Palette.Length];
+    /// <summary>Collapse/expand glyph. Pointing down means "there is more here".</summary>
+    public string CollapseGlyph => Collapsed ? "▸" : "▾";
+    public string CollapseTip => Collapsed ? "Expand this lane" : "Collapse to a chip — nothing stops";
     public Brush LaneBrush => new SolidColorBrush((Color)ColorConverter.ConvertFromString(ColorHex));
     public string FocusMark => Focused ? "▶ " : "";
     public Visibility RepoVisibility => Repo.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -211,6 +224,7 @@ public sealed class PaneView
     {
         Slot = slot, LaneId = s.LaneId, Title = s.Title, State = s.State, Presence = s.Presence,
         Badge = s.Badge, Blocked = s.Blocked, Focused = s.Focused, Repo = s.Repo, Pulsing = pulsing,
+        Collapsed = s.Collapsed,
         Lines = s.Lines.Select(LineView.From).ToList(),
     };
 }
@@ -300,7 +314,42 @@ public sealed class ToastView
 
 public sealed class MainVm : INotifyPropertyChanged
 {
+    /// <summary>The expanded tiles, in creation order. No fixed count and no empty
+    /// placeholders: the grid divides itself as lanes arrive (§8 as revised by the operator,
+    /// 2026-08-18). Named `Slots` still because that is what `ui dump` calls it, and what the
+    /// UI testifies to must not change shape just because the layout got better (§17).</summary>
     public ObservableCollection<PaneView> Slots { get; } = new();
+
+    /// <summary>Lanes the operator collapsed, as chips. Wrapped rather than one row each, so
+    /// twenty of them cost two lines instead of eating the grid they were collapsed to
+    /// protect. The operator asked for no scrolling anywhere: panes shrink, and crowding is
+    /// the cue to collapse more.</summary>
+    public ObservableCollection<PaneView> CollapsedLanes { get; } = new();
+
+    public Visibility CollapsedVisibility => CollapsedLanes.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>
+    /// How many columns the expanded grid divides into. Grows with the work, and deliberately
+    /// prefers WIDE over tall: a transcript is vertical, so a pane that loses height stops
+    /// showing conversation faster than one that loses width stops showing lines.
+    ///
+    /// No scrolling and no cap — the operator's call. Past a dozen the tiles are genuinely
+    /// small, and that is the signal to collapse some, not for the system to start hiding
+    /// work (LANE-LIFECYCLE §2).
+    /// </summary>
+    public int GridColumns => Slots.Count switch
+    {
+        0 or 1 => 1,
+        2 => 2,
+        3 or 4 => 2,
+        <= 6 => 3,
+        <= 9 => 3,
+        <= 12 => 4,
+        <= 16 => 4,
+        <= 20 => 5,
+        _ => 6,
+    };
+
     public ObservableCollection<FeedView> Feed { get; } = new();
     public ObservableCollection<string> Tray { get; } = new();
     public ObservableCollection<ToastView> Toasts { get; } = new();
@@ -325,8 +374,20 @@ public sealed class MainVm : INotifyPropertyChanged
     /// replaced by an invitation and the input box still works, because typing is the front
     /// door whether anything is running or not.</summary>
     public bool BootToZero { get => _bootToZero; private set { _bootToZero = value; Notify(nameof(BootToZero)); Notify(nameof(GridVisibility)); Notify(nameof(ZeroVisibility)); } }
-    public Visibility GridVisibility => _bootToZero ? Visibility.Collapsed : Visibility.Visible;
-    public Visibility ZeroVisibility => _bootToZero ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>
+    /// The grid shows whenever there is anything to show. Deliberately NOT keyed to
+    /// `BootToZero`: that was the first version, and it hid the grid in every POSE, because a
+    /// pose sets panes but names no workspace. Worse, `poses_render_distinct` still passed —
+    /// the screenshots differed because the FEED differed — so a completely blank grid shipped
+    /// behind a green check. A window holding tiles must render them whatever else is true.
+    /// </summary>
+    public Visibility GridVisibility => Slots.Count > 0 || CollapsedLanes.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>The zero state is for a window with nothing to show AND no workspace awake —
+    /// both halves, so it can never appear over a grid that has lanes in it.</summary>
+    public Visibility ZeroVisibility => _bootToZero && Slots.Count == 0 && CollapsedLanes.Count == 0
+        ? Visibility.Visible : Visibility.Collapsed;
 
     PaneView? _overlayPane;
     public PaneView? OverlayPane { get => _overlayPane; set { _overlayPane = value; Notify(nameof(OverlayPane)); Notify(nameof(OverlayVisible)); } }
@@ -396,11 +457,23 @@ public sealed class MainVm : INotifyPropertyChanged
         }
         else _pulseUntil.Clear();
 
+        // One tile per live lane, in order. Expanded ones go to the grid; collapsed ones
+        // become chips. The palette index is the lane's POSITION IN ORDER, which is stable for
+        // as long as its neighbours live — that is what §8's sticky slots were protecting, and
+        // it survives without a fixed count.
         Slots.Clear();
-        for (int i = 0; i < 6; i++)
-            Slots.Add(s.Slots.Length > i && s.Slots[i] is PaneSnap p
-                ? PaneView.From(p, i, pulsing: _pulseUntil.TryGetValue(p.LaneId, out var u) && u > now)
-                : new PaneView { Slot = i, IsEmpty = true });
+        CollapsedLanes.Clear();
+        var live = s.Slots.OfType<PaneSnap>().ToList();
+        for (int i = 0; i < live.Count; i++)
+        {
+            var p = live[i];
+            var view = PaneView.From(p, i, pulsing: _pulseUntil.TryGetValue(p.LaneId, out var u) && u > now);
+            if (p.Collapsed) CollapsedLanes.Add(view); else Slots.Add(view);
+        }
+        Notify(nameof(GridColumns));
+        Notify(nameof(CollapsedVisibility));
+        Notify(nameof(GridVisibility));
+        Notify(nameof(ZeroVisibility));
 
         // Bands first: the feed's workspace chips borrow their colours, so a row from
         // "personal" is the same hue in the feed as the band it came from.

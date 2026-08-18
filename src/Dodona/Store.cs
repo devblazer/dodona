@@ -1,3 +1,4 @@
+using System.Linq;
 using Microsoft.Data.Sqlite;
 
 namespace Dodona;
@@ -239,6 +240,34 @@ sealed class Store : IDisposable, ILaneSink
             c.Parameters.AddWithValue("$v", value);
             c.ExecuteNonQuery();
         }
+    }
+
+    /// <summary>
+    /// Which lanes the operator has collapsed (ORCHESTRATOR-DESIGN §8 as revised: the grid
+    /// grows with the work instead of capping at six, and the operator collapses what they are
+    /// not dealing with).
+    ///
+    /// It lives in the STORE rather than in the window, for the m3 reason that decided
+    /// everything else: the UI owns nothing. A view choice this deliberate should survive
+    /// closing the window — and it has to be the same answer for every window looking at this
+    /// workspace, which a per-process field could never be.
+    ///
+    /// Deliberately NOT a `lanes` column: collapse says nothing about the lane's life, only
+    /// about how much room you want it to take right now. Nothing reads it for authority.
+    /// </summary>
+    public HashSet<long> CollapsedLanes()
+    {
+        var set = new HashSet<long>();
+        foreach (var part in (KvGet("collapsed_lanes") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
+            if (long.TryParse(part.Trim(), out var id)) set.Add(id);
+        return set;
+    }
+
+    public void LaneCollapsed(long id, bool collapsed)
+    {
+        var set = CollapsedLanes();
+        if (collapsed) set.Add(id); else set.Remove(id);
+        KvSet("collapsed_lanes", string.Join(",", set.OrderBy(x => x)));
     }
 
     public string? KvGet(string key)

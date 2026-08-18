@@ -131,6 +131,10 @@ async Task<int> Dispatch() => cmd switch
     "approve" => Client(new { cmd = "approve", ticket = long.Parse(pos[0]) }),
     "tickets" => Client(new { cmd = "tickets" }),
     "focus" => Client(new { cmd = "focus", lane = long.Parse(pos[0]) }),
+    // Collapse a lane's tile to a one-line strip, or expand it again. A view choice the
+    // operator makes; the grid itself grows on its own (§8 as revised).
+    "lane-collapse" => Client(new { cmd = "lane-collapse", lane = long.Parse(pos[0]), collapsed = true }),
+    "lane-expand" => Client(new { cmd = "lane-collapse", lane = long.Parse(pos[0]), collapsed = false }),
     "input" => Client(new { cmd = "input", text = string.Join(" ", pos) }),
     "router-start" => Client(new { cmd = "router-start", child = One("child"), model = One("model"), effort = One("effort") }),
     "compressor-start" => Client(new { cmd = "compressor-start", child = One("child"), model = One("model"), effort = One("effort"),
@@ -875,6 +879,8 @@ static void Help() => Console.WriteLine("""
       dodona swaps
     lanes & the brain (§3):
       dodona lane-rename <lane> <TITLE> | lane-respawn <lane> | lane-stop <lane>
+      dodona lane-collapse <lane> | lane-expand <lane>
+              the grid GROWS with the work; you collapse what you are not dealing with
       dodona brain-start [--hi]             (warm the dispatcher brain; hi = expensive tier)
     ui (§8/§17 — talks to the DodonaUi process, not the daemon):
       dodona ui type <text>                 (submit through the same path as Enter — no focus)

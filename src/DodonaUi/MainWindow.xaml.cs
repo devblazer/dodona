@@ -190,8 +190,18 @@ public partial class MainWindow : Window
                 {
                     slot = s.Slot, empty = false, lane = s.LaneId, title = s.Title, color = s.ColorHex,
                     state = s.State, presence = s.Presence, badge = s.Badge, blocked = s.Blocked,
-                    focused = s.Focused, repo = s.Repo, pulsing = s.Pulsing, lines = s.Lines.Select(l => l.Text).ToList(),
+                    focused = s.Focused, repo = s.Repo, pulsing = s.Pulsing, collapsed = false,
+                    lines = s.Lines.Select(l => l.Text).ToList(),
                 }).ToList(),
+            // Collapsed lanes are reported separately AND as part of `slots` shape-compatible
+            // rows, because the question "what is on screen" has two honest halves now: the
+            // tiles, and the chips. `columns` says how the grid divided itself.
+            columns = _vm.GridColumns,
+            collapsedLanes = _vm.CollapsedLanes.Select(s => new
+            {
+                lane = s.LaneId, title = s.Title, presence = s.Presence, badge = s.Badge,
+                blocked = s.Blocked, focused = s.Focused, collapsed = true,
+            }).ToList(),
             quota = _vm.QuotaText,
             tray = _vm.Tray.ToList(),
             // `lines` and the feed's existing keys keep their shape: what the UI testifies to
@@ -381,6 +391,24 @@ public partial class MainWindow : Window
         if ((sender as FrameworkElement)?.DataContext is not PaneView p || p.IsEmpty) return;
         Send(new { cmd = "lane-stop", lane = p.LaneId });
         e.Handled = true;                       // not a pane click; do not also focus it
+    }
+
+    /// <summary>Collapse a tile to a chip, or expand it again — a store write like every other
+    /// click (m3: the UI owns nothing), so the choice survives closing the window and every
+    /// window over this workspace agrees. Nothing about the lane's life changes.</summary>
+    void Pane_Collapse(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not PaneView p || p.IsEmpty) return;
+        Send(new { cmd = "lane-collapse", lane = p.LaneId, collapsed = !p.Collapsed });
+        e.Handled = true;                       // not a pane click; do not also focus it
+    }
+
+    /// <summary>Clicking a collapsed chip expands it. The one thing a chip does.</summary>
+    void Collapsed_Click(object sender, MouseButtonEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not PaneView p) return;
+        Send(new { cmd = "lane-collapse", lane = p.LaneId, collapsed = false });
+        e.Handled = true;
     }
 
     void Pane_Wake(object sender, RoutedEventArgs e)

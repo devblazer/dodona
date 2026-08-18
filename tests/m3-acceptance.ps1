@@ -173,12 +173,15 @@ print(db.execute('SELECT undone FROM routing_decisions ORDER BY id DESC LIMIT 1'
 
     # ---- poses (§17): each visual state on demand, deterministic, distinct ----
     $poseHashes = @{}
-    foreach ($pose in 'full', 'badges', 'blocked', 'empty-slot', 'tray', 'overlay') {
+    # 'collapsed' replaced 'empty-slot': with a grid that divides itself there are no empty
+    # placeholders left to pose. 'two' and 'twelve' are new, and are the fixtures that catch a
+    # layout which only looks right at six.
+    foreach ($pose in 'full', 'badges', 'blocked', 'collapsed', 'tray', 'overlay', 'two', 'twelve') {
         Dodona @("ui", "pose", $pose) | Out-Null
         Dodona @("ui", "screenshot", "--out", "$out\pose-$pose.png") | Out-Null
         $poseHashes[$pose] = (Get-FileHash "$out\pose-$pose.png").Hash
     }
-    Check 'poses_render_distinct' (($poseHashes.Values | Select-Object -Unique).Count -eq 6) (($poseHashes.Values | Select-Object -Unique).Count)
+    Check 'poses_render_distinct' (($poseHashes.Values | Select-Object -Unique).Count -eq 8) (($poseHashes.Values | Select-Object -Unique).Count)
 
     Dodona @("ui", "pose", "blocked") | Out-Null
     $d = Dump

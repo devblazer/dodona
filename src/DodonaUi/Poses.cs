@@ -10,7 +10,11 @@ static class Poses
 {
     public static readonly string[] Names =
     {
-        "full", "badges", "blocked", "feed", "empty-slot", "tray", "overlay", "long",
+        "full", "badges", "blocked", "feed", "collapsed", "tray", "overlay", "long",
+        // "two" and "twelve" exist because the grid divides itself now (§8 as revised): the
+        // failure they catch is a layout that only looks right at six. Two lanes side by side
+        // and twelve at 4x3 are the ends of the range a person actually reaches.
+        "two", "twelve",
         // The multi-workspace shell (WORKSPACES-CONCIERGE.md §6). Every new affordance owes
         // a deterministic pose (CLAUDE.md §3), and these are the three states a screenshot
         // could not otherwise reach without two live daemons and a concierge.
@@ -53,9 +57,23 @@ static class Poses
             "agent_line|Two failures: one flaky timeout, one real regression in asset packing."),
     };
 
+    /// <summary>Every pose except boot-zero is a window looking at a workspace, so they all
+    /// name one. Without this they posed a state that cannot occur — panes present, no workspace
+    /// — which is how a blank grid once rendered behind a passing test.</summary>
+    static Snapshot InWorkspace(Snapshot s) =>
+        s with { FocusedWorkspace = "dodona-dev-3f9a", FocusedWorkspaceName = "dodona-dev" };
+
     /// <summary>Returns the posed snapshot, plus overlay/toast side-channels. Null when
     /// the name is unknown.</summary>
     public static (Snapshot Snap, string? OverlayTitle, ToastView? Toast)? Get(string name)
+    {
+        var posed = GetRaw(name);
+        if (posed is null) return null;
+        var (snap, overlay, toast) = posed.Value;
+        return (name == "boot-zero" ? snap : InWorkspace(snap), overlay, toast);
+    }
+
+    static (Snapshot Snap, string? OverlayTitle, ToastView? Toast)? GetRaw(string name)
     {
         switch (name)
         {
@@ -83,12 +101,42 @@ static class Poses
             case "feed":
                 return (new Snapshot(SixPanes(), new(), Feed(8), null), null, null);
 
-            case "empty-slot":
+            // Some lanes set aside as chips. Replaces the old "empty-slot" fixture, which
+            // posed something that can no longer happen: with a grid that divides itself there
+            // are no empty placeholders to render, so the state worth having a fixture for is
+            // "collapsed", not "empty".
+            case "collapsed":
             {
                 var s = SixPanes();
-                s[4] = null;
-                s[5] = null;
-                return (new Snapshot(s, new(), Feed(2), null), null, null);
+                s[3] = s[3]! with { Collapsed = true, Lines = new List<LineSnap>() };
+                s[4] = s[4]! with { Collapsed = true, Lines = new List<LineSnap>(), Badge = 2 };
+                s[5] = s[5]! with { Collapsed = true, Lines = new List<LineSnap>(),
+                                    Presence = "waiting on you: merge", Blocked = true, Badge = 1 };
+                return (new Snapshot(s, new(), Feed(3), null), null, null);
+            }
+
+            // Two lanes: the grid must give them half the window each, not two cells of six.
+            case "two":
+                return (new Snapshot(SixPanes().Take(2).ToArray(), new(), Feed(2), null), null, null);
+
+            // Twelve: the far end of what the operator will actually let build up before
+            // collapsing. Catches tiles that stop being readable, and a header that wraps.
+            case "twelve":
+            {
+                var six = SixPanes();
+                var many = new List<PaneSnap?>();
+                for (int i = 0; i < 12; i++)
+                {
+                    var src = six[i % 6]!;
+                    many.Add(src with
+                    {
+                        LaneId = i + 1,
+                        Title = i < 6 ? src.Title : src.Title + "-2",
+                        Lines = src.Lines.Take(2).ToList(),
+                        Focused = i == 0,
+                    });
+                }
+                return (new Snapshot(many.ToArray(), new(), Feed(4), null), null, null);
             }
             case "tray":
                 return (new Snapshot(SixPanes(), new List<string> { "TERRAIN", "SFX" }, Feed(3), null), null, null);

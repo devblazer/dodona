@@ -505,6 +505,22 @@ sealed class Daemon
                 w.WriteLine($"focused lane {lane}");
                 break;
             }
+            case "lane-collapse":
+            {
+                // A view choice, but a durable one, so it goes through the daemon like every
+                // other write (m3: the UI owns nothing). Collapsing NEVER touches the lane's
+                // life — no agent stops, no slot frees, nothing is demoted. It only says how
+                // much room you want it to take, which is why LANE-LIFECYCLE §2's rejection of
+                // slot-pressure eviction is untouched by it: this is the operator's hand, not
+                // the system reclaiming space.
+                var lane = e.GetProperty("lane").GetInt64();
+                var on = !e.TryGetProperty("collapsed", out var cv) || cv.ValueKind != JsonValueKind.False;
+                if (_store.LanesAll().All(l => l.Id != lane)) { w.WriteLine($"error: no lane {lane}"); break; }
+                _store.LaneCollapsed(lane, on);
+                _store.Event(on ? "lane_collapsed" : "lane_expanded", lane, "operator");
+                w.WriteLine($"{(on ? "collapsed" : "expanded")} lane {lane}");
+                break;
+            }
             case "input":
             {
                 var text = e.GetProperty("text").GetString()!;

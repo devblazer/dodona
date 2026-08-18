@@ -302,12 +302,28 @@ tool, which checks the token.
 Windows app. All agents presented as separate conversations, indistinguishable from
 talking to individuals, even though it is one process behind them.
 
-**Even grid, fixed positions.** Say 3×2. A pane must not move when a neighbour closes —
-the slot stays, empty or reused. Your eye learns "SKYBOX is bottom-left" and that must
-stay true all session, or you re-read titles on every glance. Attention-sized panes were
-considered and rejected: harder to follow. One keystroke **overlay-maximizes** a pane
-(raw transcripts and diffs need somewhere to render); Esc restores; the grid never
-reflows underneath.
+**Even grid, stable order.** *(Revised 2026-08-18 by the operator: "6 slots was your idea. I
+want self dividing self optimising layout that grows splits as needed. Ability to also collapse
+tiles if im not currently dealing with them." and "i dont want scroll. if needed user will just
+collapse more." The fixed 3×2 and the six-lane cap below are superseded; what follows is what
+survived and why.)*
+
+The grid **divides itself** as lanes arrive — 1 fills the pane, 2 side by side, 3–4 at 2×2,
+5–6 at 3×2, 7–9 at 3×3, and on. Panes shrink; **nothing scrolls**, and crowding is the
+operator's cue to collapse rather than the system's cue to hide. The operator collapses any
+tile to a one-line chip that keeps its colour, presence, badge and blocked glyph, and clicking
+it expands again. Collapse is a store row, so it survives closing the window.
+
+**What the fixed grid was protecting is kept, because it was right: stable ORDER.** Lanes are
+ordered by creation and never reshuffle, so "SKYBOX is the second tile" stays true all session
+and you do not re-read titles on every glance. Growth appends; a lane that dies leaves its
+neighbours' order alone. Colour still means the lane.
+
+**Attention-sized panes stay rejected** — tiles are uniform. Growing with the count is not the
+same as sizing by who wants attention, which is the thing that was harder to follow.
+
+One keystroke **overlay-maximizes** a pane (raw transcripts and diffs need somewhere to
+render); Esc restores; the grid never reflows underneath.
 
 **The unit is a lane, not an agent.** Agents are fungible — one can die, restart, or be
 swapped for a fresh context, and the thread must survive that. A lane groups related
@@ -316,11 +332,17 @@ tickets; sequential work in the same area shares one.
 - Colour + one-word title (`SKYBOX`, `WATER`, `UI`).
 - **Colour means the lane, not the state.** A pane that changes colour moves in your
   peripheral vision.
-- **Cap the grid.** Six lanes; a seventh queues in a tray until a slot frees. That is a
-  feature — it stops you starting nine things and tracking none. **Trayed lanes are
-  dormant** — no agent, no worktree until promoted, and promotion into a freed slot is
-  itself an announced, undoable decision. An active-but-invisible lane would defeat the
-  cap and could be blocked on you with no visible signal; forbidden.
+- **No cap on the grid.** *(Superseded 2026-08-18.)* The cap was justified as a feature —
+  it stops you starting nine things and tracking none — but the operator now favours a new
+  lane per distinct task (WORKSPACES-CONCIERGE.md §5), so a cap fights the routing policy
+  instead of protecting them from it. The grid grows; the operator collapses.
+  **Trayed lanes are still dormant** — the tray means "not started", nothing else.
+  **An active-but-invisible lane is still forbidden**, and that clause is the reason the cap
+  had to go rather than merely being relaxed: the implementation had drifted into violating
+  it. A seventh live lane appeared only as a NAME in the tray — agent running, badge
+  unseeable, and it could have been blocked on you with no visible signal. Now every live
+  lane has a tile, expanded or a chip, and a collapsed chip still carries its badge and its
+  blocked glyph. `tests/ui-use-acceptance.ps1` asserts exactly that.
 - **Dispatcher pane fixed in the right column**, outside the grid, always in the same
   place. Right, not bottom: conversation history is vertical, the panes stay squarer, and
   the column is the natural home for the decision feed and the tray.

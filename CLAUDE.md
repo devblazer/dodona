@@ -159,9 +159,14 @@ still work. Test windows popping up and stealing the operator's keyboard mid-wor
 priority complaint; `SendKeys` is banned for the same reason (it needs focus) — drive
 input with `dodona ui type "<text>"`, which submits through the same code path as Enter.
 
-Poses are deterministic fixtures (`full`, `badges`, `blocked`, `feed`, `empty-slot`,
-`tray`, `overlay`, `long`, `bands`, `merged-feed`, `boot-zero`). `--pose` needs a `--root`
+Poses are deterministic fixtures (`full`, `badges`, `blocked`, `feed`, `collapsed`,
+`tray`, `overlay`, `long`, `two`, `twelve`, `bands`, `merged-feed`, `boot-zero`). `--pose` needs a `--root`
 or `--shell`; without either you get the picker.
+
+**The grid divides itself** (§8 revised): no slot cap, panes shrink as lanes arrive, nothing
+scrolls, and the operator collapses tiles to chips (`dodona lane-collapse|lane-expand <lane>`).
+A collapsed chip still carries its badge and blocked glyph — an active-but-invisible lane stays
+forbidden.
 
 **The window is now one shell over N workspaces** (`DodonaUi.exe --shell`): the focused
 workspace holds the grid, every other awake one is a band of lane chips, and the feed is a

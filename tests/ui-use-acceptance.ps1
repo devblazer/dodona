@@ -201,6 +201,106 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
         Check 'close_button_stops_the_lane' ($left.Count -eq 0) (($left | ConvertTo-Json -Compress))
     }
 
+    # =====================================================================================
+    # THE SELF-DIVIDING GRID (ORCHESTRATOR-DESIGN §8, revised by the operator 2026-08-18)
+    #
+    # The six-slot cap is gone: the grid divides itself as lanes arrive, and the operator
+    # collapses what they are not dealing with. No scrolling anywhere -- panes shrink, and
+    # crowding is the cue to collapse ("i dont want scroll. if needed user will just collapse
+    # more").
+    #
+    # This also closes a hole §8 itself called forbidden. It said an active-but-invisible lane
+    # "could be blocked on you with no visible signal; forbidden" -- yet a seventh live lane used
+    # to appear only as a NAME in the tray, agent running, badge unseeable. The last check here
+    # is the one that matters: a COLLAPSED lane still shows blocked-on-you.
+    #
+    # These checks must run while the single-workspace window is still UP. The first draft
+    # anchored them after `ui close` below, so every one of them ran against a window that was
+    # already gone -- which is the same class of mistake this whole suite exists to catch.
+    # =====================================================================================
+
+    # Lanes made explicitly, not by typing. Typing three similar sentences produces ONE lane
+    # today, because the classifier has no "new task" verdict yet and everything after the
+    # first goes to the focused lane — which is the very gap lane granularity closes. This
+    # section is about LAYOUT, so it must not depend on routing behaviour that is still to come.
+    foreach ($n in 'ALPHA', 'BETA', 'GAMMA') {
+        Dodona @("lane-start", "--title", $n, "--child", $fake) | Out-Null
+    }
+    Start-Sleep -Seconds 2
+    $d = Dump
+    Check 'grid_grows_to_the_number_of_lanes' ((@($d.slots).Count) -eq 3) "tiles=$(@($d.slots).Count)"
+    Check 'grid_has_no_empty_placeholders' ((@($d.slots | Where-Object { $_.empty }).Count) -eq 0) ($d.slots | ConvertTo-Json -Compress)
+    Check 'three_lanes_divide_into_two_columns' ($d.columns -eq 2) "columns=$($d.columns)"
+
+    # ---- the collapse control is a real button, and it collapses ---------------------------
+    $win3 = $null
+    $all3 = $AE::RootElement.FindAll('Children',
+        (New-Object System.Windows.Automation.PropertyCondition $AE::ControlTypeProperty, ([System.Windows.Automation.ControlType]::Window)))
+    foreach ($w in $all3) { if ($w.Current.Name -like "Dodona*") { $win3 = $w; break } }
+    $collapseBtn = if ($win3) { $win3.FindFirst('Descendants',
+        (New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::NameProperty), 'collapse-lane')) } else { $null }
+    Check 'collapse_button_exists' ($null -ne $collapseBtn) ''
+    if ($collapseBtn) {
+        ($collapseBtn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()
+        Start-Sleep -Seconds 2
+        $d = Dump
+        Check 'collapse_takes_it_out_of_the_grid' ((@($d.slots).Count) -eq 2) "tiles=$(@($d.slots).Count)"
+        Check 'collapsed_lane_becomes_a_chip' ((@($d.collapsedLanes).Count) -eq 1) ($d.collapsedLanes | ConvertTo-Json -Compress)
+    }
+
+    # ---- collapsing is NOT stopping ------------------------------------------------------
+    $chipLane = (@((Dump).collapsedLanes) | Select-Object -First 1).lane
+    $st = Dodona @("status")
+    $chipRow = @(($st -split "`r?`n") | Where-Object { $_ -match "^lane $chipLane\s" })
+    Check 'collapse_does_not_stop_the_lane' (($chipRow -join '') -match 'state=alive') ($chipRow -join '')
+    Dodona @("say", "$chipLane", "say still listening while collapsed") | Out-Null
+    Start-Sleep -Seconds 2
+    Check 'a_collapsed_lane_still_works' ((Dodona @("tail", "$chipLane", "5")) -match 'still listening while collapsed') ''
+
+    # ---- it is a store row, so the choice survives the window ----------------------------
+    Dodona @("ui", "close") | Out-Null
+    Start-Sleep -Seconds 1
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
+    Start-Sleep -Seconds 4
+    $d = Dump
+    Check 'collapse_survives_reopening_the_window' `
+        (((@($d.collapsedLanes).Count) -eq 1) -and ((@($d.collapsedLanes)[0].lane) -eq $chipLane)) `
+        ($d.collapsedLanes | ConvertTo-Json -Compress)
+
+    # ---- expanding puts it back ----------------------------------------------------------
+    Dodona @("lane-expand", "$chipLane") | Out-Null
+    Start-Sleep -Seconds 2
+    $d = Dump
+    Check 'expanding_returns_it_to_the_grid' `
+        (((@($d.slots).Count) -eq 3) -and ((@($d.collapsedLanes).Count) -eq 0)) `
+        "tiles=$(@($d.slots).Count) chips=$(@($d.collapsedLanes).Count)"
+
+    # ---- THE ONE THAT MATTERS: a collapsed lane can still say "you are needed" ------------
+    # §8 forbids an active-but-invisible lane precisely because it could be blocked on you with
+    # no visible signal. Collapsing must therefore never be a way to lose an attention signal —
+    # the chip keeps its badge. `undo-route` is the cheapest way to a genuine UNACKED
+    # announcement on a chosen lane (the same technique the badge-timing checks above use;
+    # a `result` does not badge, by design — progress never badges).
+    Dodona @("focus", "$chipLane") | Out-Null
+    Dodona @("input", "note this for the collapsed lane") | Out-Null
+    Start-Sleep -Seconds 2
+    $route = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fetchone()[0])
+") | Out-String
+    Dodona @("undo-route", $route.Trim()) | Out-Null
+    Dodona @("lane-collapse", "$chipLane") | Out-Null
+    Start-Sleep -Seconds 3
+    $chip = @((Dump).collapsedLanes) | Where-Object { $_.lane -eq $chipLane }
+    Check 'a_collapsed_lane_still_shows_its_badge' ($chip.badge -ge 1) ($chip | ConvertTo-Json -Compress)
+    Dodona @("ui", "screenshot", "--out", "$out\collapsed-live.png") | Out-Null
+
+    # tidy: expanded and stopped before the shell section takes the window over
+    Dodona @("lane-expand", "$chipLane") | Out-Null
+    foreach ($t in @((Dump).slots)) { Dodona @("lane-stop", "$($t.lane)") | Out-Null }
+    Start-Sleep -Seconds 1
+
     Dodona @("ui", "screenshot", "--out", "$out\after-typing.png") | Out-Null
     Dodona @("ui", "close") | Out-Null
     Start-Sleep -Milliseconds 600

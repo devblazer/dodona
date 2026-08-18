@@ -3,15 +3,31 @@ using System.Text.Json;
 namespace DodonaUi;
 
 /// <summary>
-/// Reads the store every 250ms, builds a Snapshot, hands it to the window when it
-/// changed. Slots are sticky (§8): a lane keeps its position for the UI's lifetime even
-/// after it dies — the slot stays, empty-looking or reused, but never reflows. Work
-/// lanes past six go to the tray; router/dispatcher lanes never occupy the grid.
+/// Reads the store every 250ms, builds a Snapshot, hands it to the window when it changed.
+///
+/// **The grid grows with the work.** ORCHESTRATOR-DESIGN §8 originally capped it at six with a
+/// seventh lane queueing in a tray, and called the cap a feature: it stops you starting nine
+/// things and tracking none. The operator has superseded that (2026-08-18): they favour a new
+/// lane per distinct task, so a fixed cap now fights the routing policy rather than protecting
+/// them from it. The layout divides itself as lanes arrive, and the operator collapses what
+/// they are not dealing with.
+///
+/// What §8 was actually protecting is kept, because it was right: **stable order.** Lanes are
+/// ordered by creation and never reshuffle, so "SKYBOX is the second tile" stays true all
+/// session and your eye does not re-read titles on every glance. Growth adds at the end; a
+/// lane that dies leaves the order of its neighbours alone. Colour still means the lane.
+///
+/// This also fixes a drift §8 itself forbade. It said "an active-but-invisible lane would
+/// defeat the cap and could be blocked on you with no visible signal; forbidden" — and yet a
+/// seventh live lane appeared only as a NAME in the tray, agent running, badge unseeable. Now
+/// every live lane has a tile: expanded, or a one-line strip you can click. The tray goes back
+/// to meaning only what §8 said it meant — lanes that have not started.
+///
+/// Router, compressor, brain and dispatcher lanes never occupy the grid.
 /// </summary>
 sealed class Poller
 {
     readonly StoreReader _reader;
-    readonly Dictionary<long, int> _slotOf = new();     // laneId -> sticky slot
     string _lastJson = "";
     public volatile string? OverlayTitle;               // set by the window; poller fills lines
 
@@ -61,43 +77,34 @@ sealed class Poller
         var now = DateTime.UtcNow;
         var focusedLane = long.TryParse(_reader.Kv("focused_lane"), out var f) ? f : -1;
 
-        // Sticky slot assignment: first-seen work lane takes the lowest free slot, keeps it
-        // for as long as it lives, and never moves when a neighbour goes (§8).
-        //
-        // A lane the operator STOPPED leaves the grid and frees its slot — undo has to
-        // look like undo, and with six slots the grid cannot be a graveyard. Its rows are
-        // untouched in the store, so `tail` and the overlay still have the whole
-        // transcript. A lane that went UNREACHABLE stays visible on purpose: that one is
-        // a problem to notice, not a decision you made.
-        var slots = new PaneSnap?[6];
+        // Ordered by creation, one tile per live work lane, no fixed count and no empty
+        // placeholders. Order is what must be stable, not position in a fixed array: a lane
+        // the operator STOPPED disappears and its neighbours keep their relative order, so
+        // undo looks like undo and the grid never becomes a graveyard. Its rows are untouched
+        // in the store, so `tail` and the overlay still hold the whole transcript. A lane that
+        // went UNREACHABLE stays visible on purpose: that one is a problem to notice, not a
+        // decision you made.
+        var collapsed = _reader.CollapsedLanes();
         var tray = new List<string>();
-        var shown = lanes.Where(l => l.Role == "work" && l.State != "dead").ToList();
-        foreach (var goneId in _slotOf.Keys.Where(id => shown.All(l => l.Id != id)).ToList())
-            _slotOf.Remove(goneId);
+        var shown = lanes.Where(l => l.Role == "work" && l.State != "dead").OrderBy(l => l.Id).ToList();
 
-        foreach (var l in shown.OrderBy(l => l.Id))
-        {
-            if (!_slotOf.TryGetValue(l.Id, out var slot))
-            {
-                var taken = _slotOf.Values.ToHashSet();
-                slot = Enumerable.Range(0, 6).FirstOrDefault(i => !taken.Contains(i), -1);
-                if (slot < 0) { tray.Add(l.Title); continue; }   // grid capped at six (§8)
-                _slotOf[l.Id] = slot;
-            }
-            slots[slot] = new PaneSnap(l.Id, l.Title, l.State,
+        var slots = shown.Select(l => new PaneSnap(l.Id, l.Title, l.State,
                 Liveness(l.Presence, l.State, lastSeen.TryGetValue(l.Id, out var seen) ? seen : null, now),
                 badges.GetValueOrDefault(l.Id),
                 l.Presence.StartsWith("waiting on you", StringComparison.OrdinalIgnoreCase),
                 l.Id == focusedLane,
                 // 12 was what fitted a pane that could not scroll. It can now, so a pane
                 // carries real scrollback — bounded, because this whole snapshot is
-                // serialized and compared every 250ms.
-                _reader.Tail(l.Id, 40))
+                // serialized and compared every 250ms. A collapsed tile shows no transcript
+                // at all, so it costs nothing to read and nothing to serialize.
+                collapsed.Contains(l.Id) ? new List<LineSnap>() : _reader.Tail(l.Id, 40))
             {
                 Repo = multiRepo && ticketRepos.TryGetValue(l.Id, out var rp) && rp != "." ? rp : "",
                 LastInputId = lastInput.GetValueOrDefault(l.Id),
-            };
-        }
+                Collapsed = collapsed.Contains(l.Id),
+            })
+            .Cast<PaneSnap?>()
+            .ToArray();
 
         var laneTitle = lanes.ToDictionary(l => l.Id, l => l.Title);
         // By role, not by title: "the system speaking in its own voice" is what the
