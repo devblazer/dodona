@@ -120,7 +120,7 @@ commit instead of a timestamp.
 
 | item | what |
 |---|---|
-| P2.1 | One `git worktree` per concurrent agent session under `.claude/worktrees/<session>` (already gitignored; the harness creates and removes them). CLAUDE.md §0 names it as the **only** supported way to run two sessions. |
+| P2.1 | ~~CLAUDE.md §0 names worktrees the **only** supported way to run two sessions.~~ **SUPERSEDED BY §5 D-7**: naming it in prose is the shape D-6 forbids. Implemented instead as two enforcement layers — a `PreToolUse` hook that refuses writes to the main checkout, and a `pre-commit` hook that refuses commits from it — plus `dev worktree <name>` and one deliberate override. |
 | P2.2 | `PreToolUse` hook in `.claude/settings.json` denying `git add -A`, `git add .`, `git commit -a`, with a message naming the substitute. The repo already knows how to write this file — `DeployGate` generates one at [Daemon.cs:2457](../src/Dodona/Daemon.cs#L2457) — and CLAUDE.md §7 records the measurement that PreToolUse hooks still fire under `bypassPermissions`. |
 
 ### 2b — `main` is the only thing that publishes itself
@@ -276,8 +276,8 @@ is believed — a check that has not been seen red is worth nothing, and that is
 | `dev check` → "in the build output: nothing" | I1 | 3 pids |
 | `git status --porcelain` empty after a full suite run | I5 | 48 dirty |
 | lane pipes == `ps` lanes | I3 | 11 vs 7 |
-| two agents `dev build` concurrently, both succeed | I2 | one kills the other's daemons |
-| `dev suites` green while the live app runs, app untouched | I1, I2 | contends on `bin` and `obj` |
+| two agents `dev build` concurrently, both succeed | I2 | **earned 2a** — but weaker than it reads: two concurrent builds of one *shared* tree were measured and both succeeded, so this row is regression protection for worktree builds, not proof of the fix |
+| `dev suites` green while the live app runs, app untouched | I1, I2 | **earned 2a** — asserts the live app's pids survive the suites; prints `n/a` rather than a green line when no app is running |
 | `Measure-Command { dev suites }` under 60 s | I7 | 5 m 16 s |
 | repo lint clean | I8 | 2 corrupt lines |
 | `dodona status` build SHA is a commit `git log` knows | I2 | a timestamp mapping to nothing |
@@ -356,6 +356,33 @@ Recorded with the reason, in the style of `docs/LANE-LIFECYCLE.md` §2.
   sound check `VACUOUS`. After P0.3, require `src/` specifically to differ, and add a third
   outcome: *"passes against HEAD because HEAD already contains the change"*, distinct from
   *"vacuous"*.
+
+- **D-7. Per-session trees are ENFORCED, not documented.** *(operator + session, 2026-08-18)*
+  P2.1 as written said CLAUDE.md §0 would name worktrees "the only supported way to run two
+  sessions". That is a documentation line, which is precisely the shape **D-6** forbids — and
+  the failure it guards has already happened once: `f9aaf25` carried another lane's
+  `lanes.cwd` migration and `Ver.cs` edits into an unrelated routing fix, because two sessions
+  shared one checkout and `git add` cannot tell whose edit is whose. A sentence would not have
+  stopped that. So P2.1 is superseded by **two layers**, the same doctrine as the claim gate
+  plus the merge backstop (design §6):
+
+  1. **layer 1** — a `PreToolUse` hook (`.claude/hooks/no-main-tree.ps1`, registered in the
+     tracked `.claude/settings.json`) denies any Edit/Write whose target is inside the main
+     checkout. One stateless test: git leaves `.git` a **FILE** in a worktree and a
+     **DIRECTORY** in the main checkout — no registry, no lock, nothing that can go stale.
+  2. **layer 2** — `.git/hooks/pre-commit` aborts any commit whose worktree is the main
+     checkout. Git runs it with no agent cooperation, at the boundary where the damage becomes
+     permanent. `tools/dev.ps1` installs it on **every** run, the way `DeployGate` deploys to
+     `.git/info/exclude`, because an install step someone must remember is not enforcement.
+
+  `dev worktree <name>` makes compliance five seconds, and layer 1's refusal names that exact
+  command. `DODONA_ALLOW_MAIN_TREE=1` is the one deliberate override, named in both refusals:
+  an enforcement with no escape is a new way to be stuck, which is the standing directive
+  (CLAUDE.md §0.1) violated in a fresh costume.
+
+  **The scope, stated rather than papered over:** this binds AGENTS — the Edit/Write/Bash
+  tools and `git commit` — not a human with a text editor. The incident was agent-caused, so
+  that is the right scope, but it is a scope and not a guarantee.
 
 - **D-6. A documented warning is not a fix.** Reason: CLAUDE.md §3.1 documented "a daemon
   outlives its window and the operator believes the machine is idle", and the identical

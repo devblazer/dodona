@@ -23,6 +23,42 @@ If you learn something load-bearing mid-task, put it in one of those places *in 
 commit as the work*. A lesson that lives anywhere else is a lesson the next session
 re-learns the expensive way.
 
+### 0.0 Work in a tree of your own — and the repo now refuses otherwise
+
+**The shared checkout is a source of truth, not a workspace.** Every session works in its own
+git worktree:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 worktree <name>
+# -> .claude\worktrees\<name>, its own bin and obj, cd there and work
+```
+
+This is **enforced in two layers**, not requested (RECOVERY-PHASES §5 D-7 — and the reason it
+is not merely written here is that a written rule is exactly what D-6 forbids):
+
+- **layer 1** — a `PreToolUse` hook refuses any Edit/Write into the main checkout, and its
+  refusal prints the `dev worktree` command. Registered in the tracked `.claude/settings.json`.
+- **layer 2** — `.git/hooks/pre-commit` aborts any commit made *from* the main checkout. Git
+  runs it itself, so it catches what layer 1 cannot see: a heredoc, `sed`, a shell redirect.
+  `tools/dev.ps1` reinstalls it on every run — never edit `.git/hooks/pre-commit` by hand,
+  edit `.claude/hooks/pre-commit` and let the next `dev` command deploy it.
+
+Why, in one line: `f9aaf25` committed another lane's `lanes.cwd` migration along with its own
+routing fix, because both sat in one working tree and `git add` cannot tell whose edit is
+whose.
+
+**The one override, and it is a choice rather than a wall** (§0.1): `DODONA_ALLOW_MAIN_TREE=1`
+lifts both layers, for when the shared checkout genuinely is the right place — a release
+commit, installing the hooks themselves.
+
+**The limit, stated plainly:** this binds AGENTS — the Edit/Write/Bash tools and `git
+commit` — not a human with a text editor, and not a process that writes files by some other
+route. The incident was agent-caused, so that is the right scope; it is a scope, not a
+guarantee. `dev gate` asserts both layers are still alive, because an enforcement that quietly
+stops enforcing is the failure mode this project keeps paying for (§3's dead routing ladder,
+and layer 1 itself spent part of the session it was written in unparseable and therefore
+denying nothing).
+
 ## 0.1 How the operator works (previously unwritten)
 
 - They state **goals, not metric specs** — "make it feel instant" is the requirement;
@@ -118,6 +154,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. |
 | `gate` | The pre-commit gate: runs the suites, then **asserts** the invariants — nothing left running in the build output, and a suite run that dirtied nothing. Prints the six rows of `RECOVERY-PHASES` §2 it does not cover yet, so it can never be mistaken for a full pass. |
 | `ship` | build + suites + publish. |
+| `worktree <name>` | a tree of your own under `.claude\worktrees\`. All work goes in one (§0.0). |
 
 It is a **script, not a `dodona` subcommand**, and deliberately so: a tool whose job is to fix
 a blocked or broken build cannot itself require a build. It runs on a tree that will not
@@ -458,10 +495,19 @@ each one is a way to lose someone's work silently.
 - Cutting a NEW branch (`checkout -b`, `switch -c`) is fine and necessary — that is the PR
   flow. The rule is "no checking out branches that already exist", never "no branch but
   main".
-- **A lane currently has no working directory of its own** (no `cwd` column; `_primary` is
-  hardcoded in `SpawnAgentLaneAsync` and `RespawnLaneAsync`). Until that lands, assume any
-  lane you start is running in the operator's live tree and can switch their branch out from
-  under them. Do not add anything that checks out a branch on that path.
+- **A lane DOES carry its own working directory, and half of this bullet used to deny it.**
+  Corrected 2026-08-18 after reading the code (RECOVERY-PHASES P5.4 flagged the staleness;
+  this settles it). `lanes.cwd` exists — the `ALTER TABLE lanes ADD COLUMN cwd` migration at
+  [Store.cs:214](src/Dodona/Store.cs#L214) under schema 8, written by `Store.LaneCwd`, read
+  back in `Store.LanesAll`. `AttachShimAsync` records it for **every** spawn and uses it as
+  the shim's `WorkingDirectory`, and `RespawnLaneAsync` prefers the recorded value, falling
+  back to `_primary` only for a lane older than the column. Landed by `f9aaf25` — which is
+  itself the cross-session carry that D-7 now prevents.
+  **What is still true:** `SpawnAgentLaneAsync` passes `_primary` (Daemon.cs:1554), and so
+  does the plain `lane-start` path, so a fresh agent lane *does* run in the operator's live
+  tree. Assume that, and do not add anything that checks out a branch on that path. The
+  difference matters for scoping: handing each lane its own tree is now a **spawn-site
+  change**, not a schema change — the column and the plumbing are already there.
 
 ## 6. Where things are written down
 

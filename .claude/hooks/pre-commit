@@ -1,0 +1,57 @@
+#!/bin/sh
+# Dodona enforcement layer 2: git itself refuses a commit made from the SHARED CHECKOUT.
+#
+# Source of truth for this file is .claude/hooks/pre-commit (tracked). tools/dev.ps1 copies
+# it into the repository's .git/hooks/ on every run, because .git/hooks is not versioned and
+# an install step someone has to remember is not enforcement (CLAUDE.md 0.3 / D-6). That is
+# the same reason DeployGate writes .git/info/exclude rather than asking.
+#
+# WHY A SECOND LAYER. Layer 1 (.claude/hooks/no-main-tree.ps1) is a PreToolUse hook, so it
+# binds the Edit/Write tools and nothing else: a heredoc, sed, or a shell redirect writes
+# into the shared checkout without ever consulting it. Git runs THIS with no agent
+# cooperation at all, at the boundary where the damage actually became permanent -- f9aaf25
+# was a COMMIT that carried another lane's work, not an edit. Gate plus backstop, the same
+# pair as the claim gate and the merge-time diff (design 6).
+#
+# THE TEST, same stateless one as layer 1: git leaves `.git` as a FILE in a worktree and a
+# DIRECTORY in the main checkout. No registry, no lock, nothing that can go stale or jam.
+#
+# SCOPED TO THIS REPOSITORY ON PURPOSE. Never `git config --global core.hooksPath`: all 11
+# suites build temp repos and run `git commit -m init` in them, every one of those a main
+# checkout, and a global install would abort all of them. Checked before installing.
+
+# The one deliberate override (D-7 item 4), same variable as layer 1: sometimes the shared
+# checkout is genuinely right -- a release commit, or installing these hooks. A choice you
+# make, never a wall you hit (CLAUDE.md 0.1).
+if [ "$DODONA_ALLOW_MAIN_TREE" = "1" ]; then
+    exit 0
+fi
+
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -n "$top" ] || exit 0
+
+# A FILE means worktree, which is where work belongs. Only a DIRECTORY is the shared checkout.
+if [ ! -d "$top/.git" ]; then
+    exit 0
+fi
+
+name="w$(date +%m%d-%H%M)"
+cat >&2 <<MSG
+
+COMMIT REFUSED -- this is the shared checkout ($top), not a worktree.
+
+Two sessions in one checkout cannot tell whose edit is whose, and this is the boundary
+where that becomes permanent: f9aaf25 committed another lane's lanes.cwd migration and
+Ver.cs changes along with its own routing fix, because both sat in the same working tree.
+
+Move the work to a tree of its own:
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools/dev.ps1 worktree $name
+    git -C .claude/worktrees/$name ...      # commit from there
+
+If the shared checkout is genuinely the right place (a release commit, installing hooks):
+    DODONA_ALLOW_MAIN_TREE=1 git commit ...
+
+This is Dodona enforcement layer 2 (RECOVERY-PHASES D-7). Layer 1 is the PreToolUse hook
+in .claude/settings.json; this one exists because layer 1 cannot see a shell redirect.
+MSG
+exit 1
