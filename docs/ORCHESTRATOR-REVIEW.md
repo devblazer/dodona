@@ -508,3 +508,9 @@ coordinator at all — the forge already serializes merges, with CI and required
 better than a local token can. It is a parallel-lane orchestrator with claim-based
 collision avoidance. That is a narrower role than §7 assumes, and worth saying out loud
 before building against the wrong one.
+
+**The plan for all of it** is [`M5-DELIVERY-PLAN.md`](M5-DELIVERY-PLAN.md), written after
+tracing the operator's real `start-ticket` / `finish-ticket` skills against the running
+system. It is the authority for this work and it supersedes design §7.1 on two points: a
+ticket is an ordered GROUP of repo members (the one-repo rule is gone), and the token is not
+jobless in `delivery: pr` — it becomes a per-repo release slot.

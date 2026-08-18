@@ -5,6 +5,8 @@
 | `ORCHESTRATOR-DESIGN.md` | **The authority.** Every `§n` reference in this codebase points here. |
 | `ORCHESTRATOR-REVIEW.md` | The review and milestone plan: rationale, measurements, what is carried. |
 | `LANE-LIFECYCLE.md` | Lane closing and the attention model — decisions taken, **and ideas already rejected**. |
+| `WORKSPACES-CONCIERGE.md` | Workspaces and the concierge: named identity, the group-scope ladder, the fence. |
+| `M5-DELIVERY-PLAN.md` | **The plan for M5:** foreign git processes, multi-repo ticket groups, and ships that outlive an agent. Authority for that work; supersedes design §7.1 on two points. |
 
 ## Why these are copies
 

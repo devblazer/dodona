@@ -307,13 +307,20 @@ merge**. For those repos it never does, and the whole token/FIFO/fence tier has 
 forge already serializes merges, with CI and required reviews, strictly better than a local
 token can.
 
+**Superseded in two places by [M5-DELIVERY-PLAN.md](M5-DELIVERY-PLAN.md)**, which is the
+authority for this work: (a) a ticket is no longer one repository — it is an ordered GROUP of
+repo members, because the real workflow always touches core AND a game with a dependency
+between them; (b) the token is NOT jobless here — it becomes a per-repo **release slot**, since
+two concurrent ships both minting the next version number is a race no forge can serialize.
+
 So delivery is one per-repo axis in that repo's `dodona.json` (`Config.For` already falls
 back per-repository, so this needs no new plumbing):
 
 - **`delivery: local-merge`** (the default; everything above) — Dodona names the branch,
   holds the token, executes the ff-only land, runs post-land verify, prunes.
 - **`delivery: pr`** — Dodona provides *isolation only*. It never merges, never deletes a
-  branch, never requests a token. The project's skills own branch naming, push, and the PR.
+  branch, never requests a MERGE token (it still takes a release slot — plan doc §9). The
+  project's skills own branch naming, push, and the PR.
 
 **Isolation and ceremony are separable, and that is the whole design.** The worktree is
 isolation — it is what stops two lanes fighting over one index, and it costs the project

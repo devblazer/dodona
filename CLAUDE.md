@@ -192,10 +192,20 @@ dodona ui key shift+enter | enter   # the keystroke, through the real PreviewKey
 dodona ui input-resize <dy|reset>   # the grip: +px taller, reset = fit the text
 ```
 
-`ui dump` gained an `input` key (`text`, `lines`, `height`, `sized`, `hint`) — `lines` is
-LOGICAL lines, not wrapped rows. Note §0.2's WPF trap is load-bearing here: with
-`AcceptsReturn` the TextBox class handler eats Enter before an instance `KeyDown`, so the
-handler is `PreviewKeyDown` and `tests/ui-use-acceptance.ps1` now proves Enter still sends.
+`ui dump` gained an `input` key (`text`, `lines`, `height`, `fit`, `sized`, `remembered`,
+`hint`) — `lines` is LOGICAL lines, not wrapped rows; `fit` is the default height and
+`remembered` is what is on disk. The box **opens at three lines** and **remembers the size
+you last dragged it to**, in `<DODONA_HOME>\ui.json` — a file and not the store, because the
+shell window spans workspaces and booted to zero has no store to read (§5). It is a
+preference, so every read failure falls back to the default silently: a corrupt `ui.json`
+must never be able to stop the window opening, since the box is the one thing you would use
+to say so. A double-click on the grip forgets it.
+
+Two WPF facts this cost, both now in code comments: `MinLines`/`MaxLines` are **ignored**
+once `TextWrapping` is on (the default height is a measured `MinHeight`, and `ui dump`'s
+`fit=28` is what caught it), and §0.2's trap is load-bearing here — with `AcceptsReturn` the
+TextBox class handler eats Enter before an instance `KeyDown`, so the handler is
+`PreviewKeyDown` and `tests/ui-use-acceptance.ps1` now proves Enter still sends.
 
 Poses are deterministic fixtures (`full`, `badges`, `blocked`, `feed`, `collapsed`,
 `tray`, `overlay`, `long`, `two`, `twelve`, `bands`, `merged-feed`, `boot-zero`). `--pose` needs a `--root`
@@ -290,9 +300,10 @@ delivery process changes, change the skill in the same commit.
 Some repos own their ticket lifecycle in their own CLAUDE.md and skills: branch off
 `develop` with a naming convention, push, open a PR, a human reviews, the forge merges.
 Dodona's §7 assumes the opposite (it performs an ff-only local merge itself), so this is a
-per-repo mode — `"delivery": "pr" | "local-merge"` in that repo's `dodona.json`. Read
-`docs/ORCHESTRATOR-DESIGN.md` §7.1 and §7.2 before touching any of it; the traps below are
-the short version, and each one is a way to lose someone's work silently.
+per-repo mode — `"delivery": "pr" | "local-merge"` in that repo's `dodona.json`. The plan for
+all of it is `docs/M5-DELIVERY-PLAN.md` (the authority; design §7.1/§7.2 are superseded on two
+points there). Read it before touching any of this; the traps below are the short version, and
+each one is a way to lose someone's work silently.
 
 - **A worktree's directory name and its branch name are unrelated.** `t7` can hold
   `feature/ABC-123`. Nothing outside Dodona sees the directory, so never rename a worktree
