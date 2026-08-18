@@ -33,6 +33,7 @@ async Task<int> Dispatch() => cmd switch
     "daemon" => await Daemon.RunAsync(Path.GetFullPath(root), instanceId, ctlPipe, opts.ContainsKey("successor")),
     "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), model = One("model"), effort = One("effort"), childArgs = Many("child-arg") }),
     "lane-stop" => Client(new { cmd = "lane-stop", lane = long.Parse(pos[0]) }),
+    "lane-respawn" => Client(new { cmd = "lane-respawn", lane = long.Parse(pos[0]) }),
     "say" => Client(new { cmd = "say", lane = long.Parse(pos[0]), text = pos[1] }),
     "tail" => Client(new { cmd = "tail", lane = long.Parse(pos[0]), n = pos.Count > 1 ? int.Parse(pos[1]) : 20 }),
     "status" => Client(new { cmd = "status" }),

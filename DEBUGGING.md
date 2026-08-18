@@ -142,7 +142,10 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   (prefix|focus|classifier), target_lane, delivered_lane, confidence, retargeted,
   undone`. `undone` is reserved for the UI's undo keystroke — free labeled data for
   tuning the confidence threshold.
-- **`kv`** — small state: `focused_lane`, `dispatcher_lane`.
+- **`kv`** — small state: `focused_lane`, `dispatcher_lane`, `rate_limit` (the latest
+  `rate_limit_event` off any lane's wire, with the timestamp it was observed — the
+  authoritative 5-hour-window number the dispatcher column shows, aged honestly because
+  it only updates when a lane takes a turn).
 - **`lanes`** additionally carries `presence` (derived by code from tool_use wire
   events — never a model) and `role ∈ work | router | compressor | dispatcher`. Only
   `work` lanes take a grid slot, receive routed input, or have their turn-finals
@@ -164,7 +167,10 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   `worktree_prune_failed`, `ticket_git_failed`. Routing kinds: `classified` (with
   latency), `routed_retarget`, `classifier_timeout`, `classifier_failed`,
   `route_undone`. Compression kinds: `compressed` (with latency and before→after sizes),
-  `compressor_timeout`, `compressor_failed`. Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
+  `compressor_timeout`, `compressor_failed`. Lifecycle kinds: `lane_stopped`,
+  `lane_dormant` (its ticket landed — the agent was retired, the lane keeps the thread),
+  `lane_respawned` (a fresh agent resumed the recorded session).
+  Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
   `swap_forced`, `swap_refused`, `swap_failed`, `daemon_handoff`, `binary_gc`,
   `binary_gc_skipped`. **If a state change happened with no event row naming why, that
   is a bug — report it as one.**

@@ -141,6 +141,22 @@ sealed class LaneRuntime
                     _store.LanePresence(Id, "idle");
                     _resultTcs?.TrySetResult(body);
                     break;
+                case "rate_limit_event":
+                    // The authoritative quota number, pushed unasked (observed live:
+                    // five_hour, utilization 0.97). Kept as the latest reading in kv with
+                    // its own timestamp — it only arrives when a lane takes a turn, so the
+                    // UI must show it as "as of", never imply it is live. No pane row:
+                    // quota is ambient state, not lane conversation.
+                    if (d.RootElement.TryGetProperty("rate_limit_info", out var rl))
+                    {
+                        _store.KvSet("rate_limit", JsonSerializer.Serialize(new
+                        {
+                            observedTs = DateTime.UtcNow.ToString("o"),
+                            lane = Id,
+                            info = rl,
+                        }));
+                    }
+                    break;
             }
         }
         catch { /* unparseable stays kind=wire, body=raw */ }

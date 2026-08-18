@@ -162,6 +162,56 @@ print(r[0] if r else 'none')
     Check 'override_recorded_in_causal_chain' ($choice -match 'haiku/low' -and $choice -match 'overridden=True') $choice
     Check 'choice_announced_to_operator' ((@($d.feed | Where-Object { $_.lane -eq 'SPELLING' -and $_.body -match 'haiku/low' })).Count -ge 1) ($d.feed | ConvertTo-Json -Compress)
 
+    # ---- attention timing (docs/LANE-LIFECYCLE.md §4): a badge that appears while the
+    # agent is still working says "something happened", not "you are needed". The rows
+    # exist immediately; the COUNT defers until the turn's result. Timing behaviour, so it
+    # must be asserted DURING the turn — a dump after everything settles would pass even
+    # when the live experience is wrong (that is how the first dead end shipped).
+    $d = Dump
+    $lane3 = ($d.slots | Where-Object { -not $_.empty } | Select-Object -First 1).lane
+    Dodona @("input", "make a note of this") | Out-Null      # a routing decision to undo
+    Start-Sleep -Milliseconds 600
+    # 14s turn: the elapsed clock deliberately withholds itself for the first 10s (a
+    # snappy turn must not flicker digits), so the mid-turn look happens at ~11s in.
+    Dodona @("say", "$lane3", "sleep:20 then say slow turn done") | Out-Null
+    Start-Sleep -Milliseconds 800                             # presence is now working/sleeping
+    $route = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$root\.dodona\store.db')
+print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fetchone()[0])
+") | Out-String
+    Dodona @("undo-route", $route.Trim()) | Out-Null          # writes an unacked announcement mid-turn
+    Start-Sleep -Seconds 13                                   # comfortably past the 10s clock threshold
+    $mid = (Dump).slots | Where-Object { -not $_.empty } | Where-Object { $_.lane -eq $lane3 }
+    Check 'badge_defers_while_agent_works' ($mid.badge -eq 0) "badge=$($mid.badge) presence=$($mid.presence)"
+    Check 'liveness_shows_a_moving_clock' ($mid.presence -match '\d+s') $mid.presence
+    Start-Sleep -Seconds 9                                    # the turn ends; deferred badges flush
+    $after = (Dump).slots | Where-Object { -not $_.empty } | Where-Object { $_.lane -eq $lane3 }
+    Check 'badge_flushes_at_turn_end' ($after.badge -ge 1 -and $after.presence -eq 'idle') "badge=$($after.badge) presence=$($after.presence)"
+
+    # ---- the 5-hour quota line: the CLI's own number, from the wire, no estimation ----
+    Dodona @("say", "$lane3", "ratelimit:0.42 say quota reported") | Out-Null
+    Start-Sleep -Seconds 2
+    $d = Dump
+    Check 'quota_line_from_wire' ($d.quota -match '5h window 42%') "quota='$($d.quota)'"
+
+    # ---- the pane's close button is a real button (CLAUDE.md: the feed telling a GUI
+    # user to type "dodona lane-stop 3" was this project's original sin) ----
+    $win2 = $null
+    $all2 = $AE::RootElement.FindAll('Children',
+        (New-Object System.Windows.Automation.PropertyCondition $AE::ControlTypeProperty, ([System.Windows.Automation.ControlType]::Window)))
+    $leaf2 = Split-Path $root -Leaf
+    foreach ($w in $all2) { if ($w.Current.Name -like "Dodona*$leaf2") { $win2 = $w; break } }
+    $closeBtn = $win2.FindFirst('Descendants',
+        (New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::NameProperty), 'close-lane'))
+    Check 'close_button_exists' ($null -ne $closeBtn) ''
+    if ($closeBtn) {
+        ($closeBtn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()
+        Start-Sleep -Seconds 2
+        $left = @((Dump).slots | Where-Object { -not $_.empty } | Where-Object { $_.lane -eq $lane3 })
+        Check 'close_button_stops_the_lane' ($left.Count -eq 0) (($left | ConvertTo-Json -Compress))
+    }
+
     Dodona @("ui", "screenshot", "--out", "$out\after-typing.png") | Out-Null
     Dodona @("ui", "close") | Out-Null
     Dodona @("stop-daemon") | Out-Null

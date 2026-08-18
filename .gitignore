@@ -7,3 +7,4 @@ spikes/spike3/workspace/
 
 # Dodona instance state: the store is runtime, never repo content
 .dodona/
+.cmp3/

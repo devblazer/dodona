@@ -128,8 +128,9 @@ public partial class MainWindow : Window
                 {
                     slot = s.Slot, empty = false, lane = s.LaneId, title = s.Title, color = s.ColorHex,
                     state = s.State, presence = s.Presence, badge = s.Badge, blocked = s.Blocked,
-                    focused = s.Focused, lines = s.Lines.Select(l => l.Text).ToList(),
+                    focused = s.Focused, repo = s.Repo, lines = s.Lines.Select(l => l.Text).ToList(),
                 }).ToList(),
+            quota = _vm.QuotaText,
             tray = _vm.Tray.ToList(),
             feed = _vm.Feed.Select(f => new { id = f.Id, lane = f.LaneTitle, body = f.Body, acked = f.Acked }).ToList(),
             toasts = _vm.Toasts.Select(t => new { ts = t.Ts, lane = t.Lane, reason = t.Reason }).ToList(),
@@ -300,6 +301,20 @@ public partial class MainWindow : Window
     {
         if ((sender as FrameworkElement)?.DataContext is not FeedView f) return;
         Send(new { cmd = "ack", id = f.Id });
+    }
+
+    void Pane_Close(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not PaneView p || p.IsEmpty) return;
+        Send(new { cmd = "lane-stop", lane = p.LaneId });
+        e.Handled = true;                       // not a pane click; do not also focus it
+    }
+
+    void Pane_Wake(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not PaneView p || p.IsEmpty) return;
+        Send(new { cmd = "lane-respawn", lane = p.LaneId });
+        e.Handled = true;
     }
 
     void Input_KeyDown(object sender, KeyEventArgs e)

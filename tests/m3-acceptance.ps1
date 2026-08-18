@@ -18,6 +18,8 @@ New-Item -ItemType Directory -Force "$root\src\water", "$root\src\sky" | Out-Nul
 Set-Content "$root\src\water\sim.cs" "// water"
 Set-Content "$root\src\sky\box.cs" "// sky"
 Set-Content "$root\.gitignore" ".dodona/"
+# agent = fake: lane-respawn spawns from config, and a suite must never start real claude
+Set-Content "$root\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0 } | ConvertTo-Json)
 git -C $root init -b main -q
 git -C $root add -A
 git -C $root -c user.email=t@t -c user.name=t commit -q -m init
@@ -116,6 +118,33 @@ db = sqlite3.connect(r'$root\.dodona\store.db')
 print(db.execute('SELECT undone FROM routing_decisions ORDER BY id DESC LIMIT 1').fetchone()[0])
 ") | Out-String
     Check 'undo_route_retracts' ($tail -match 'Disregard' -and $undone.Trim() -eq '1') "undone=$($undone.Trim()) tail=$tail"
+
+    # ---- landing retires the agent, the lane survives, wake resumes it ----
+    # (docs/LANE-LIFECYCLE.md §3: the prune deletes the directory the agent stands in, so
+    # an agent left running there was the most confusing state the system could be in.)
+    $wt1 = "$root\.dodona\wt\t1"
+    Set-Content "$wt1\src\water\sim.cs" "// landed work"
+    git -C $wt1 add -A
+    git -C $wt1 -c user.email=t@t -c user.name=t commit -q -m "water work"
+    $shimInfo = Get-Content "$root\.dodona\shim-lane$waterLane.json" | ConvertFrom-Json
+    Dodona @("token-request", "1") | Out-Null
+    $land = Dodona @("land", "1")
+    Check 'land_succeeds' ($land -match 'landed ticket 1') $land
+    Start-Sleep -Seconds 2
+    Check 'land_retires_the_agent' (-not (Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue)) "agent pid $($shimInfo.childPid) still alive"
+    $d = Dump
+    $water = $d.slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }
+    Check 'lane_survives_as_dormant' ($water.state -eq 'dormant') ($water | ConvertTo-Json -Compress)
+    Check 'lane_keeps_its_slot_and_thread' ($water.slot -eq 0 -and (($water.lines) -join '|') -match 'water ready') ''
+
+    # wake: a fresh agent resumes the thread (fake = fresh session; real claude = --resume)
+    Dodona @("lane-respawn", "$waterLane") | Out-Null
+    Start-Sleep -Milliseconds 900
+    Dodona @("say", "$waterLane", "say woke up fine") | Out-Null
+    Start-Sleep -Milliseconds 900
+    $d = Dump
+    $water = $d.slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }
+    Check 'wake_revives_the_lane' ($water.state -eq 'alive' -and (($water.lines) -join '|') -match 'woke up fine') ($water | ConvertTo-Json -Compress)
 
     # ---- overlay maximize: verb-driven, grid never reflows underneath ----
     Dodona @("ui", "overlay", "WATER") | Out-Null

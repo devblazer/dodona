@@ -283,6 +283,41 @@ sealed class Daemon
                 w.WriteLine($"-> lane {lane}");
                 break;
             }
+            case "lane-respawn":
+            {
+                // Agents are fungible; the lane is the thread (§11). A dormant lane (its
+                // ticket landed) or an unreachable one (its shim died) comes back as a
+                // fresh process resuming the recorded session — spike 1 measured that
+                // `--resume` restores full context with the same id and no fork. This is
+                // what makes retiring agents cheap enough to do automatically.
+                var lane = e.GetProperty("lane").GetInt64();
+                var row = _store.LanesAll().FirstOrDefault(l => l.Id == lane);
+                if (row is null) { w.WriteLine($"error: no lane {lane}"); break; }
+                if (_lanes.TryGetValue(lane, out var lrt2) && lrt2.Connected) { w.WriteLine($"lane {lane} is already connected"); break; }
+
+                var child2 = _config.Agent;
+                var args2 = new List<string>();
+                if (IsClaude(child2))
+                {
+                    args2 = ClaudeArgs(_config.Model, _config.Effort, LaneSystemPrompt(row.Title), acceptEdits: true);
+                    if (row.Session is { Length: > 0 } sess && !sess.StartsWith("fake-"))
+                    { args2.Add("--resume"); args2.Add(sess); }
+                }
+                // The pipe name is deterministic per lane, and the old shim is gone —
+                // the name is free to reclaim, which is the whole point of never keying
+                // anything to pids (§13).
+                var (rid, rmsg) = await RespawnLaneAsync(row.Id, row.Title, args2, child2);
+                if (rid > 0)
+                {
+                    _store.LaneState(lane, "alive");
+                    _store.LanePresence(lane, "idle");
+                    _store.PaneEvent(lane, "announcement",
+                        row.Session is { Length: > 0 } ? "agent respawned — session resumed, context intact" : "agent respawned — fresh session", null, null, acked: true);
+                    _store.Event("lane_respawned", lane, $"session={row.Session ?? "-"}");
+                }
+                w.WriteLine(rmsg);
+                break;
+            }
             case "lane-stop":
             {
                 // The undo for an auto-started lane. The shim owns the agent, so stopping
@@ -1143,6 +1178,20 @@ sealed class Daemon
     {
         var id = _store.LaneCreate(title);
         _store.LaneRole(id, role);
+        return await AttachShimAsync(id, title, role, workDir, child, childArgs);
+    }
+
+    /// <summary>Respawn an agent into an EXISTING lane row — the thread survives its
+    /// agent (§11). Same pipe name (deterministic per lane, and the dead shim freed it),
+    /// same pane, fresh process.</summary>
+    Task<(long Id, string Msg)> RespawnLaneAsync(long laneId, string title, List<string> childArgs, string child)
+    {
+        var role = _store.LanesAll().FirstOrDefault(l => l.Id == laneId)?.Role ?? "work";
+        return AttachShimAsync(laneId, title, role, _root, child, childArgs);
+    }
+
+    async Task<(long Id, string Msg)> AttachShimAsync(long id, string title, string role, string workDir, string child, List<string> childArgs)
+    {
         var pipe = Instance.LanePipe(_instanceId, id);
         _store.LanePipe(id, pipe);
 
@@ -1479,6 +1528,27 @@ sealed class Daemon
         }
         if (cfg.Verify.Length > 0) { _store.Event("verify_green", null, $"ticket {tid}"); verifyMsg = "verify green"; }
         verified:
+
+        // Landing retires the agent BEFORE the ground is pulled from under it
+        // (docs/LANE-LIFECYCLE.md §3): the prune below deletes the directory the agent is
+        // standing in, and an agent left running in a deleted worktree was this system's
+        // most confusing possible state. The LANE stays — dormant, visible, its thread
+        // intact — because §8 says lanes group sequential work and the next ticket in
+        // this area belongs here. The session id is recorded, so a future respawn can
+        // resume the context.
+        if (t.LaneId is long landedLane)
+        {
+            if (_lanes.TryGetValue(landedLane, out var lrt))
+            {
+                lrt.Shutdown();
+                _lanes.Remove(landedLane);
+            }
+            _store.LaneState(landedLane, "dormant");
+            _store.LanePresence(landedLane, "landed");
+            _store.PaneEvent(landedLane, "announcement",
+                $"ticket {tid} landed — agent retired, lane keeps this thread", null, null, acked: true);
+            _store.Event("lane_dormant", landedLane, $"ticket {tid} landed");
+        }
 
         // Worktree prune — retryable, never silent (§15).
         var (wc, wOut) = Git.Run(repoPath, "worktree", "remove", "--force", t.Worktree);

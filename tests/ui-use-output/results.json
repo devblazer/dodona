@@ -21,5 +21,11 @@
     "override_lane_started":  "PASS",
     "override_tokens_stripped_from_prompt":  "PASS",
     "override_recorded_in_causal_chain":  "PASS",
-    "choice_announced_to_operator":  "PASS"
+    "choice_announced_to_operator":  "PASS",
+    "badge_defers_while_agent_works":  "PASS",
+    "liveness_shows_a_moving_clock":  "PASS",
+    "badge_flushes_at_turn_end":  "PASS",
+    "quota_line_from_wire":  "PASS",
+    "close_button_exists":  "PASS",
+    "close_button_stops_the_lane":  "PASS"
 }

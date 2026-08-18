@@ -98,12 +98,29 @@
                                                Opacity="{Binding TitleOpacity}" VerticalAlignment="Center">
                                         <Run Text="{Binding FocusMark, Mode=OneWay}"/><Run Text="{Binding Title, Mode=OneWay}"/>
                                     </TextBlock>
+                                    <!-- which repository this lane's ticket lands in; a single-repo
+                                         project never shows this at all -->
+                                    <TextBlock DockPanel.Dock="Left" Text="{Binding Repo, Mode=OneWay}" FontSize="10"
+                                               Foreground="#FF6B7079" Margin="6,2,0,0" VerticalAlignment="Center"
+                                               Visibility="{Binding RepoVisibility}"/>
                                     <TextBlock DockPanel.Dock="Left" Text=" ⚠" FontSize="14" Foreground="White"
                                                Visibility="{Binding GlyphVisibility}" VerticalAlignment="Center"/>
                                     <Border DockPanel.Dock="Left" Background="#FFCB4B4B" CornerRadius="8" Padding="6,1"
                                             Margin="8,0,0,0" Visibility="{Binding BadgeVisibility}" VerticalAlignment="Center">
                                         <TextBlock Text="{Binding BadgeText, Mode=OneWay}" FontSize="11" Foreground="White" FontWeight="Bold"/>
                                     </Border>
+                                    <!-- the lane's controls: buttons, because a feed row that says
+                                         "undo: dodona lane-stop 3" at a GUI user was this project's
+                                         original sin. ✕ retires the agent (the thread survives, and
+                                         wake resumes the session — agents are fungible, §11). -->
+                                    <Button DockPanel.Dock="Right" Content="✕" FontSize="11" Padding="5,0" Margin="6,0,0,0"
+                                            AutomationProperties.Name="close-lane" ToolTip="Retire this lane's agent (wake resumes it)"
+                                            Visibility="{Binding CloseVisibility}" Click="Pane_Close"
+                                            Background="Transparent" Foreground="#FF6B7079" BorderThickness="0" Cursor="Hand"/>
+                                    <Button DockPanel.Dock="Right" Content="wake" FontSize="10" Padding="6,1" Margin="6,0,0,0"
+                                            AutomationProperties.Name="wake-lane" ToolTip="Respawn the agent, resuming its session"
+                                            Visibility="{Binding WakeVisibility}" Click="Pane_Wake"
+                                            Background="#FF31363D" Foreground="#FFD8DCE0" BorderThickness="0" Cursor="Hand"/>
                                     <TextBlock DockPanel.Dock="Right" Text="{Binding Presence, Mode=OneWay}" FontSize="11"
                                                Foreground="#FF9BA3AD" TextTrimming="CharacterEllipsis"
                                                HorizontalAlignment="Right" VerticalAlignment="Center"/>
@@ -179,7 +196,13 @@
                     </ScrollViewer>
                 </Border>
 
-                <TextBlock Grid.Row="2" Text="{Binding TrayText}" FontSize="11" Foreground="#FF8A9099" Margin="4,6,0,0"/>
+                <DockPanel Grid.Row="2" Margin="4,6,4,0">
+                    <TextBlock DockPanel.Dock="Left" Text="{Binding TrayText}" FontSize="11" Foreground="#FF8A9099"/>
+                    <!-- the 5-hour window (§2.6): the CLI's own number, with its age when
+                         stale — it only updates when a lane takes a turn -->
+                    <TextBlock DockPanel.Dock="Right" Text="{Binding QuotaText}" FontSize="11"
+                               Foreground="{Binding QuotaBrush}" HorizontalAlignment="Right"/>
+                </DockPanel>
                 <!-- wraps: a status line that matters is usually the one too long to fit -->
                 <TextBlock Grid.Row="3" Text="{Binding Status}" FontSize="11" Foreground="#FF6FA8DC" Margin="4,4,0,4"
                            TextWrapping="Wrap" MaxHeight="60"/>

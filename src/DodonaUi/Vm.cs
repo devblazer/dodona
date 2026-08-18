@@ -11,9 +11,18 @@ namespace DodonaUi;
 
 public record LineSnap(string Kind, string Body);
 public record PaneSnap(long LaneId, string Title, string State, string Presence, int Badge,
-                       bool Blocked, bool Focused, List<LineSnap> Lines);
+                       bool Blocked, bool Focused, List<LineSnap> Lines)
+{
+    /// <summary>Which repository this lane's open ticket lands in — "" in a single-repo
+    /// project, which must never see the word.</summary>
+    public string Repo { get; init; } = "";
+}
 public record FeedSnap(long Id, string LaneTitle, string Ts, string Body, bool Acked, bool IsSystem);
-public record Snapshot(PaneSnap?[] Slots, List<string> Tray, List<FeedSnap> Feed, PaneSnap? Overlay);
+public record Snapshot(PaneSnap?[] Slots, List<string> Tray, List<FeedSnap> Feed, PaneSnap? Overlay)
+{
+    /// <summary>The 5-hour-window line, or null when no reading has ever arrived.</summary>
+    public string? Quota { get; init; }
+}
 
 // ---------------------------------------------------------------- bindable views
 
@@ -123,9 +132,17 @@ public sealed class PaneView
     public bool Focused { get; init; }
     public List<LineView> Lines { get; init; } = new();
 
+    public string Repo { get; init; } = "";
+
     public string ColorHex => Palette[Slot % Palette.Length];
     public Brush LaneBrush => new SolidColorBrush((Color)ColorConverter.ConvertFromString(ColorHex));
     public string FocusMark => Focused ? "▶ " : "";
+    public Visibility RepoVisibility => Repo.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    // The lane's controls: close (retire it) always; wake only when there is something to
+    // wake. Buttons, because the feed saying "undo: dodona lane-stop 3" at a GUI user was
+    // this project's original sin.
+    public Visibility CloseVisibility => IsEmpty ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility WakeVisibility => !IsEmpty && State is "dormant" or "unreachable" ? Visibility.Visible : Visibility.Collapsed;
     // Blocked-on-you: border highlight + glyph — border, not fill; colour still means the lane (§8).
     public Brush BorderBrushValue => Blocked ? Brushes.White : new SolidColorBrush(Color.FromRgb(0x3A, 0x3E, 0x44));
     public Thickness BorderThicknessValue => Blocked ? new Thickness(2) : new Thickness(1);
@@ -139,7 +156,7 @@ public sealed class PaneView
     public static PaneView From(PaneSnap s, int slot) => new()
     {
         Slot = slot, LaneId = s.LaneId, Title = s.Title, State = s.State, Presence = s.Presence,
-        Badge = s.Badge, Blocked = s.Blocked, Focused = s.Focused,
+        Badge = s.Badge, Blocked = s.Blocked, Focused = s.Focused, Repo = s.Repo,
         Lines = s.Lines.Select(LineView.From).ToList(),
     };
 }
@@ -195,6 +212,15 @@ public sealed class MainVm : INotifyPropertyChanged
     string _trayText = "";
     public string TrayText { get => _trayText; set { _trayText = value; Notify(nameof(TrayText)); } }
 
+    string _quotaText = "";
+    public string QuotaText { get => _quotaText; set { _quotaText = value; Notify(nameof(QuotaText)); Notify(nameof(QuotaBrush)); } }
+    /// <summary>Amber past the CLI's own warning threshold — the UI follows the CLI's
+    /// escalation rather than inventing colour bands.</summary>
+    public Brush QuotaBrush => System.Text.RegularExpressions.Regex.Match(_quotaText, @"(\d+)%") is { Success: true } m
+        && int.Parse(m.Groups[1].Value) >= 90
+            ? new SolidColorBrush(Color.FromRgb(0xE0, 0xA9, 0x4E))
+            : new SolidColorBrush(Color.FromRgb(0x8A, 0x90, 0x99));
+
     /// <summary>Non-null while a pose is applied — the poller stands down (§17).</summary>
     public volatile string? PoseName;
 
@@ -230,6 +256,7 @@ public sealed class MainVm : INotifyPropertyChanged
         Tray.Clear();
         foreach (var t in s.Tray) Tray.Add(t);
         TrayText = s.Tray.Count == 0 ? "tray: empty" : $"tray: {string.Join(", ", s.Tray)}";
+        QuotaText = s.Quota ?? "";
 
         if (s.Overlay is PaneSnap ov && OverlayPane is not null)
             OverlayPane = PaneView.From(ov, Slots.FirstOrDefault(x => x.Title.Equals(ov.Title, StringComparison.OrdinalIgnoreCase))?.Slot ?? 0);

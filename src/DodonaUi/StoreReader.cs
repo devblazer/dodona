@@ -63,7 +63,12 @@ sealed class StoreReader : IDisposable
     }
 
     /// <summary>Unacked announcement count per lane — the only thing that badges (§8:
-    /// progress never badges).</summary>
+    /// progress never badges) — and DEFERRED while the lane is mid-turn
+    /// (docs/LANE-LIFECYCLE.md §4): a badge that appears while the agent is still working
+    /// says "something happened" when it must say "you are needed". The rows are written
+    /// immediately either way; when the turn ends presence flips to idle and everything
+    /// deferred flushes into the count at once. Blocked-on-you is never deferred — waiting
+    /// on a merge approval is true the instant it happens.</summary>
     public Dictionary<long, int> Badges()
     {
         var map = new Dictionary<long, int>();
@@ -71,9 +76,52 @@ sealed class StoreReader : IDisposable
         try
         {
             using var c = _db!.CreateCommand();
-            c.CommandText = "SELECT lane_id, COUNT(*) FROM pane_events WHERE kind = 'announcement' AND acked = 0 GROUP BY lane_id;";
+            c.CommandText = """
+                SELECT p.lane_id, COUNT(*) FROM pane_events p JOIN lanes l ON l.id = p.lane_id
+                WHERE p.kind = 'announcement' AND p.acked = 0
+                  AND (l.presence IN ('idle', 'landed', 'system', '')
+                       OR l.presence LIKE 'waiting on you%'
+                       OR l.state != 'alive'
+                       OR p.body LIKE '%waiting on you%')
+                GROUP BY p.lane_id;
+                """;
             using var r = c.ExecuteReader();
             while (r.Read()) map[r.GetInt64(0)] = r.GetInt32(1);
+        }
+        catch { }
+        return map;
+    }
+
+    /// <summary>When each lane last said anything on the wire — the liveness input: a
+    /// static `working…` cannot tell thinking from wedged, a moving clock can.</summary>
+    public Dictionary<long, DateTime> LastActivity()
+    {
+        var map = new Dictionary<long, DateTime>();
+        if (!Open()) return map;
+        try
+        {
+            using var c = _db!.CreateCommand();
+            c.CommandText = "SELECT lane_id, MAX(ts) FROM pane_events GROUP BY lane_id;";
+            using var r = c.ExecuteReader();
+            while (r.Read())
+                if (!r.IsDBNull(1) && DateTime.TryParse(r.GetString(1), null, System.Globalization.DateTimeStyles.RoundtripKind, out var ts))
+                    map[r.GetInt64(0)] = ts.ToUniversalTime();
+        }
+        catch { }
+        return map;
+    }
+
+    /// <summary>Open tickets' repo per lane — the pane subtitle in a multi-repo workspace.</summary>
+    public Dictionary<long, string> TicketRepoByLane()
+    {
+        var map = new Dictionary<long, string>();
+        if (!Open()) return map;
+        try
+        {
+            using var c = _db!.CreateCommand();
+            c.CommandText = "SELECT lane_id, repo FROM tickets WHERE state = 'open' AND lane_id IS NOT NULL;";
+            using var r = c.ExecuteReader();
+            while (r.Read()) map[r.GetInt64(0)] = r.GetString(1);
         }
         catch { }
         return map;

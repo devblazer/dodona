@@ -74,6 +74,24 @@ while ((line = Console.ReadLine()) is not null)
             },
         });
 
+    // ratelimit:0.42 — emit the CLI's rate_limit_event shape (observed live 2026-08-17),
+    // so the quota indicator is testable without a real session ever being consulted.
+    var rl = Regex.Match(text, @"ratelimit:([\d.]+)");
+    if (rl.Success)
+        Emit(new
+        {
+            type = "rate_limit_event",
+            session_id = sessionId,
+            rate_limit_info = new
+            {
+                status = "allowed_warning",
+                resetsAt = DateTimeOffset.UtcNow.AddHours(2).ToUnixTimeSeconds(),
+                rateLimitType = "five_hour",
+                utilization = double.Parse(rl.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture),
+                isUsingOverage = false,
+            },
+        });
+
     var sleep = Regex.Match(text, @"sleep:(\d+)");
     if (sleep.Success) Thread.Sleep(int.Parse(sleep.Groups[1].Value) * 1000);
 

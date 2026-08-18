@@ -92,7 +92,7 @@ If the only failure is uncommitted work, **do not refuse — make the state safe
 it to the ticket branch as WIP first, then the act destroys nothing. The branch is the
 durable artifact; use it.
 
-### The one unambiguous bug to fix first
+### The one unambiguous bug to fix first — **FIXED (2026-08-18)**
 
 `land` currently prunes the worktree and deletes the branch **but leaves the agent
 running with its working directory deleted underneath it.** That is not a policy
@@ -102,7 +102,11 @@ judgement work above — it needs no policy at all.
 
 ---
 
-## 4. Attention: the badge is firing at the wrong moment
+## 4. Attention: the badge is firing at the wrong moment — **IMPLEMENTED (2026-08-18)**
+
+*(Deferral is live: the badge count excludes announcements in lanes that are mid-turn,
+and flushes when presence returns to idle. Blocked-on-you stays immediate. Asserted
+mid-turn in `ui-use-acceptance`. The rest of this section stands as the rationale.)*
 
 **Observed.** The notification badge appears almost as soon as the agent produces
 output — while the agent is *still working*. Nothing is being asked of the operator at
@@ -137,7 +141,12 @@ absent, and only after the result that it appears.
 
 ---
 
-## 5. Liveness: "is it working, or is it stuck?"
+## 5. Liveness: "is it working, or is it stuck?" — **IMPLEMENTED (2026-08-18)**
+
+*(The pane clock is live: `working… 40s` after 10s of silence, `quiet Nm` past five
+minutes, `unreachable`/`landed` from lane state. Also live: `land` retires the agent and
+leaves the lane dormant; `dodona lane-respawn <id>` / the pane's `wake` button bring it
+back, resuming the recorded session for real claude. The rest stands as rationale.)*
 
 **What already exists.** Each pane's presence line is the busy indicator, and it is
 derived in code from the agent's wire events, never from a model: `idle`, `working…`, or
