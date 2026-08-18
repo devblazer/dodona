@@ -2531,8 +2531,17 @@ sealed class Daemon
         if (!File.Exists(exclude) || !File.ReadAllText(exclude).Contains(marker))
             File.AppendAllText(exclude, $"\n{marker}\n.claude/settings.local.json\ndodona-gate.ps1\n.dodona-bypass.log\n");
 
+        // The hook is dodona.exe itself (`gate-hook`), not a generated PowerShell script. A
+        // .ps1 that fails to parse runs NOTHING -- it denies nothing while still being
+        // registered and still looking installed, which is a live failure this project has
+        // already paid for. The same mistake in C# cannot be shipped, because it does not
+        // compile. It is also one process instead of two: the script's whole job was to read
+        // stdin, shell out to this same binary, and format the refusal.
+        var exe = Environment.ProcessPath ?? "dodona.exe";
+        var hookCmd = JsonSerializer.Serialize($"\"{exe}\" gate-hook --ticket {ticketId} " +
+                                               $"--workspace \"{_instanceId}\" --worktree \"{worktree}\"");
         Directory.CreateDirectory(Path.Combine(worktree, ".claude"));
-        File.WriteAllText(Path.Combine(worktree, ".claude", "settings.local.json"), """
+        File.WriteAllText(Path.Combine(worktree, ".claude", "settings.local.json"), $$"""
             {
               "hooks": {
                 "PreToolUse": [
@@ -2541,7 +2550,7 @@ sealed class Daemon
                     "hooks": [
                       {
                         "type": "command",
-                        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$CLAUDE_PROJECT_DIR/dodona-gate.ps1\""
+                        "command": {{hookCmd}}
                       }
                     ]
                   }
@@ -2550,28 +2559,13 @@ sealed class Daemon
             }
             """);
 
-        var gate = """
-            # Dodona claim gate (generated; design doc §6). Denies writes outside this
-            # ticket's claim; asks the daemon, which answers in code. Fails OPEN with a
-            # bypass log — the merge-time diff backstop catches what slips through.
-            $in = [Console]::In.ReadToEnd()
-            try { $j = $in | ConvertFrom-Json } catch { exit 0 }
-            $fp = $j.tool_input.file_path
-            if (-not $fp) { exit 0 }
-            & '__DODONA__' claim-check __TICKET__ "$fp" --workspace '__WSID__' > $null 2> $null
-            if ($LASTEXITCODE -eq 0) { exit 0 }
-            if ($LASTEXITCODE -eq 1) {
-                $reason = "outside ticket __TICKET__'s claim: $fp. Stay within claimed paths, or request an extension: dodona claim-extend __TICKET__ --claim <spec> --workspace '__WSID__'"
-                @{ hookSpecificOutput = @{ hookEventName = 'PreToolUse'; permissionDecision = 'deny'; permissionDecisionReason = $reason } } | ConvertTo-Json -Compress
-                exit 0
-            }
-            Add-Content '__WT__\.dodona-bypass.log' ("{0:o} gate fail-open: {1}" -f (Get-Date), $fp)
-            exit 0
-            """;
-        gate = gate.Replace("__DODONA__", Environment.ProcessPath ?? "dodona.exe")
-                   .Replace("__TICKET__", ticketId.ToString())
-                   .Replace("__WSID__", _instanceId)
-                   .Replace("__WT__", worktree);
-        File.WriteAllText(Path.Combine(worktree, "dodona-gate.ps1"), gate);
+        // A worktree adopted from an older build may still carry the generated script. Remove
+        // it, so there is exactly one gate and nobody debugs the one that is no longer wired.
+        try
+        {
+            var stale = Path.Combine(worktree, "dodona-gate.ps1");
+            if (File.Exists(stale)) File.Delete(stale);
+        }
+        catch { /* a leftover file is untidy, never fatal */ }
     }
 }

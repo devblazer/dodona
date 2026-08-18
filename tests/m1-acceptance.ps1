@@ -63,7 +63,12 @@ try {
     Check 'worktree1_exists' (Test-Path "$root\.dodona\wt\t1\src\water\sim.cs")
     # settings.LOCAL.json: merged over any tracked project settings.json, so a repo with
     # its own .claude/ keeps its hooks and never sees a dirty tracked file in the worktree
-    Check 'gate_deployed' ((Test-Path "$root\.dodona\wt\t1\.claude\settings.local.json") -and (Test-Path "$root\.dodona\wt\t1\dodona-gate.ps1"))
+    # The gate is dodona.exe's own `gate-hook` subcommand now, not a generated .ps1: a script
+    # that fails to parse denies NOTHING while still looking installed, and the same mistake in
+    # C# cannot be shipped because it does not compile. So what must exist is the registration,
+    # and what must NOT exist is a stale script that nobody is running any more.
+    Check 'gate_deployed' ((Test-Path "$root\.dodona\wt\t1\.claude\settings.local.json") -and
+        (-not (Test-Path "$root\.dodona\wt\t1\dodona-gate.ps1")))
     # and a repo's own tracked settings must be untouched by gate deployment
     Check 'tracked_settings_untouched' (-not (Test-Path "$root\.dodona\wt\t1\.claude\settings.json") -or
         ((git -C "$root\.dodona\wt\t1" status --porcelain ".claude/settings.json" | Out-String).Trim() -eq ''))
@@ -81,9 +86,17 @@ try {
     $wt1 = "$root\.dodona\wt\t1"
     $inJson  = @{ tool_name = 'Write'; tool_input = @{ file_path = "$wt1\src\water\sim.cs" } } | ConvertTo-Json -Compress
     $outJson = @{ tool_name = 'Write'; tool_input = @{ file_path = "$wt1\src\sky\box.cs" } }   | ConvertTo-Json -Compress
-    $allow = $inJson  | powershell -NoProfile -ExecutionPolicy Bypass -File "$wt1\dodona-gate.ps1" | Out-String
-    $deny  = $outJson | powershell -NoProfile -ExecutionPolicy Bypass -File "$wt1\dodona-gate.ps1" | Out-String
-    Check 'gate_allows_inside_claim' (-not ($allow -match 'deny'))
+    # Drive THE COMMAND CLAUDE CODE WOULD ACTUALLY RUN, read out of settings.local.json, rather
+    # than a hard-coded path. This test used to invoke dodona-gate.ps1 directly, and when that
+    # script stopped being generated the deny check went red while the ALLOW check went GREEN --
+    # because a missing script makes PowerShell print a banner, and a banner contains no "deny".
+    # A check that passes when the thing under test is absent is worth nothing (CLAUDE.md 0.3),
+    # so it now exercises whatever is wired, whatever that turns out to be.
+    $hookCmd = ((Get-Content "$wt1\.claude\settings.local.json" -Raw | ConvertFrom-Json).hooks.PreToolUse[0].hooks[0].command)
+    Check 'gate_registration_names_a_command' ([bool]$hookCmd) "settings.local.json: $hookCmd"
+    $allow = $inJson  | & cmd /c $hookCmd | Out-String
+    $deny  = $outJson | & cmd /c $hookCmd | Out-String
+    Check 'gate_allows_inside_claim' ($allow.Trim() -eq '') "expected silence, got: $allow"
     Check 'gate_denies_outside_claim' ($deny -match '"permissionDecision":"deny"') $deny
 
     # ---- 5. agent work: commit in wt1 (the test IS the agent at the git layer) ----

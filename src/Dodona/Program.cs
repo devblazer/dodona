@@ -157,6 +157,7 @@ async Task<int> Dispatch() => cmd switch
     "ticket-create" => Client(new { cmd = "ticket-create", title = One("title") ?? "TICKET", mode = One("mode") ?? "on-approval", repo = One("repo"), claims = Many("claim") }),
     "repos" => Client(new { cmd = "repos" }),
     "claim-check" => Client(new { cmd = "claim-check", ticket = long.Parse(pos[0]), path = pos[1] }),
+    "gate-hook" => GateHook(),
     "claim-extend" => Client(new { cmd = "claim-extend", ticket = long.Parse(pos[0]), claims = Many("claim") }),
     "approve" => Client(new { cmd = "approve", ticket = long.Parse(pos[0]) }),
     "tickets" => Client(new { cmd = "tickets" }),
@@ -622,6 +623,88 @@ int Version()
         Console.WriteLine($"  exe            {Ver.ExePath}");
         Console.WriteLine($"  published to   {Ver.BinRoot}");
     }
+    return 0;
+}
+
+/// <summary>
+/// The claim gate itself (design §6 layer 1), as a COMPILED subcommand rather than a generated
+/// PowerShell script.
+///
+/// WHY THIS IS NOT A .ps1 ANY MORE. A script that fails to parse runs NOTHING: it exits with a
+/// parse error and denies nothing, while still being registered and still sitting on disk
+/// looking installed. That is not hypothetical -- it happened during Phase 2 to a different
+/// hook, where one line of message text ended in a backtick (PowerShell's escape character),
+/// which swallowed the terminator of a here-string and killed the whole file. The same mistake
+/// in C# is a BUILD failure: loud, immediate, and impossible to ship.
+///
+/// It is also one process instead of two. The script's entire job was to read stdin, shell out
+/// to `dodona claim-check`, and format the refusal -- so every gated edit started PowerShell
+/// (~136 ms measured) purely to start dodona.exe. And the suites can now call this directly and
+/// assert its answer, which a generated script made awkward.
+///
+/// FAILS OPEN, deliberately and unchanged (§6): if anything here cannot reach a verdict, the
+/// write is allowed and the reason is appended to the bypass log. The merge-time diff backstop
+/// catches what slips through, and a broken gate must never brick a lane.
+/// </summary>
+int GateHook()
+{
+    if (!long.TryParse(One("ticket"), out var ticket)) return 0;      // no ticket: not our business
+
+    string input;
+    try { input = Console.In.ReadToEnd(); } catch { return 0; }
+
+    string? path = null;
+    try
+    {
+        using var doc = JsonDocument.Parse(input);
+        if (doc.RootElement.TryGetProperty("tool_input", out var ti) &&
+            ti.TryGetProperty("file_path", out var fp)) path = fp.GetString();
+    }
+    catch { return 0; }                                              // unparseable input: fail open
+    if (string.IsNullOrEmpty(path)) return 0;                        // not a file write
+
+    // Client() prints the daemon's reply to stdout, and stdout here IS the hook's verdict --
+    // Claude Code parses it as JSON. So it is silenced for the duration, which is exactly what
+    // the old script's `> $null 2> $null` was doing.
+    int code;
+    var saved = Console.Out;
+    try
+    {
+        Console.SetOut(TextWriter.Null);
+        code = Client(new { cmd = "claim-check", ticket, path });
+    }
+    catch { code = 2; }
+    finally { Console.SetOut(saved); }
+
+    if (code == 0) return 0;                                         // covered by the claim
+    if (code == 1)
+    {
+        var ws = One("workspace") ?? "";
+        var reason = $"outside ticket {ticket}'s claim: {path}. Stay within claimed paths, or request " +
+                     $"an extension: dodona claim-extend {ticket} --claim <spec>" +
+                     (ws.Length > 0 ? $" --workspace '{ws}'" : "");
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            hookSpecificOutput = new
+            {
+                hookEventName = "PreToolUse",
+                permissionDecision = "deny",
+                permissionDecisionReason = reason,
+            }
+        }));
+        return 0;                                                    // the DECISION is the output, not the exit code
+    }
+
+    // Anything else (no daemon, a pipe error) is a fail-open, logged where the merge backstop's
+    // reader will look for it.
+    try
+    {
+        var wt = One("worktree");
+        if (wt is { Length: > 0 })
+            File.AppendAllText(Path.Combine(wt, ".dodona-bypass.log"),
+                $"{DateTime.Now:o} gate fail-open (claim-check exit {code}): {path}{Environment.NewLine}");
+    }
+    catch { /* a log we cannot write must still not block the write */ }
     return 0;
 }
 
@@ -1118,6 +1201,9 @@ static void Help() => Console.WriteLine("""
       dodona token-request <ticket> [--lease sec] | token-renew | token-release | token-status
       dodona land <ticket>
     hot swap (§13/§14 — nothing interrupted, no session lost):
+      dodona gate-hook --ticket <n> [--workspace <id>] [--worktree <dir>]
+              the claim gate, run BY CLAUDE CODE and not by hand: reads a PreToolUse
+              payload on stdin and answers deny/allow. Deployed by DeployGate.
       dodona stop-all [--lanes] [--orphans]
               --orphans also stops live daemons this registry does not own (another
               DODONA_HOME's test run, say). Without it they are listed and left alone.
