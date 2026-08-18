@@ -471,13 +471,20 @@ dodona ui key <enter|shift+enter>                # Enter sends; Shift+Enter is a
 dodona ui input-resize <dy|reset>                # the resize grip, without a mouse
 ```
 
-The dispatcher box is **multiline**: it auto-grows to 200px as lines arrive, the grip above
-it drags further (capped at 60% of the window — the feed absorbs it, so the window itself
-never moves), and double-clicking the grip refits it to the text. `ui dump` reports it under
-`input`: `text`, `lines` (LOGICAL lines, not wrapped rows), `height`, `sized` (the operator
-overruled the auto-fit), `hint` (the placeholder is showing). A newline reaches the agent
-intact because `Say` serializes the whole message to ONE json line — the shim's stdin
-protocol is line-delimited and would otherwise have cut the prompt in half.
+The dispatcher box is **multiline**: it **opens at three lines** (a measured `MinHeight` —
+`MinLines` is ignored once `TextWrapping` is on, which `ui dump` caught as `fit=28`),
+auto-grows to 200px as lines arrive, the grip above it drags further (capped at 60% of the
+window — the feed absorbs it, so the window itself never moves), and double-clicking the grip
+refits it. **The dragged size is remembered** in `<DODONA_HOME>\ui.json`
+(`{"inputHeight": 173.5}`) — a file rather than a store row because the shell spans
+workspaces and boots to zero with no store at all; it therefore survives a restart AND a
+publish hot-swap, and a double-click forgets it. Delete the file to reset by hand.
+
+`ui dump` reports all of it under `input`: `text`, `lines` (LOGICAL lines, not wrapped rows),
+`height`, `fit` (the default), `sized` (the operator overruled the auto-fit), `remembered`
+(what is on disk), `hint` (the placeholder is showing). A newline reaches the agent intact
+because `Say` serializes the whole message to ONE json line — the shim's stdin protocol is
+line-delimited and would otherwise have cut the prompt in half.
 
 Most "does the UI show X" questions are text questions — ask `ui dump` and read JSON.
 Screenshots are for layout and visual judgment only. `pose long` is the one to reach for

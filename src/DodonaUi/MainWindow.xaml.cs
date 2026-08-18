@@ -68,6 +68,7 @@ public partial class MainWindow : Window
         };
         pulseTick.Start();
 
+        Loaded += (_, _) => RestoreInputHeight();
         Closed += (_, _) => { _cts.Cancel(); _shell.Dispose(); };
     }
 
@@ -242,6 +243,10 @@ public partial class MainWindow : Window
                 height = (int)Math.Round(InputBox.ActualHeight),
                 sized = !double.IsNaN(InputBox.Height),
                 hint = InputHint.Visibility == Visibility.Visible,
+                // `fit` is the default (MinLines, measured); `remembered` is what is on disk,
+                // so a test can prove the size outlived the window rather than the process.
+                fit = (int)Math.Round(_inputFit),
+                remembered = UiSettings.Load().InputHeight,
             },
         };
         return JsonSerializer.Serialize(dump);
@@ -503,7 +508,34 @@ public partial class MainWindow : Window
     // for more room has said something the default cannot know.
     const double InputAutoCap = 200;
 
-    void InputGrip_DragDelta(object sender, DragDeltaEventArgs e) => ResizeInput(-e.VerticalChange);
+    // The DEFAULT height, read off the real layout rather than guessed: MinHeight="64" in
+    // the XAML, which is three lines at this font plus padding and border. Three lines, not
+    // one — a box that opens as a one-line sliver invites one-line prompts, and the point of
+    // the multiline box is that a prompt is often a paragraph. MinHeight and not MinLines="3":
+    // WPF ignores MinLines/MaxLines once TextWrapping is on, and `ui dump` caught it doing
+    // exactly that (fit=28, one line, with MinLines set). MinHeight is only a floor, so the
+    // box still grows past it as lines arrive. It doubles as the floor for a drag — an
+    // explicit Height under it would clip the text instead of shrinking the box.
+    double _inputFit;
+
+    /// <summary>Restore the size the operator last set. Runs on Loaded, once the box has
+    /// been measured — so the default is read off the real layout instead of a font
+    /// calculation, and the remembered height lands in the same layout pass (no visible
+    /// jump). It deliberately survives a publish hot-swap as well: the successor window reads
+    /// the same file, and a box that silently reverted to default on every swap is exactly
+    /// the "quietly outdated" failure the standing directive forbids.</summary>
+    void RestoreInputHeight()
+    {
+        _inputFit = InputBox.ActualHeight;
+        if (UiSettings.Load().InputHeight is double h) SetInputHeight(h, remember: false);
+    }
+
+    void InputGrip_DragDelta(object sender, DragDeltaEventArgs e) => ResizeInput(-e.VerticalChange, remember: false);
+
+    /// <summary>One save per drag, at the end: persisting every DragDelta would rewrite the
+    /// file a hundred times while the mouse moves.</summary>
+    void InputGrip_DragCompleted(object sender, DragCompletedEventArgs e) =>
+        UiSettings.SaveInputHeight(double.IsNaN(InputBox.Height) ? null : InputBox.Height);
 
     void InputGrip_Reset(object sender, MouseButtonEventArgs e)
     {
@@ -513,25 +545,36 @@ public partial class MainWindow : Window
 
     /// <summary>Resize the dispatcher box: <paramref name="dy"/> pixels taller (negative
     /// shorter), or null to hand it back to fitting its own text. Dragging UP grows it,
-    /// which is why the grip negates. The feed absorbs the change (its row is the only
-    /// star-sized one) and the cap keeps something of it on screen — a box that could eat
-    /// the whole window would be a way to lose the work you were watching.</summary>
-    public double ResizeInput(double? dy)
+    /// which is why the grip negates.</summary>
+    public double ResizeInput(double? dy, bool remember = true)
     {
-        if (dy is null)
+        if (dy is null) return SetInputHeight(null, remember);
+        var from = double.IsNaN(InputBox.Height) ? InputBox.ActualHeight : InputBox.Height;
+        return SetInputHeight(from + dy.Value, remember);
+    }
+
+    /// <summary>The one place the box's height is set — and the one place it is remembered,
+    /// so a drag, the `ui input-resize` verb and a restore cannot drift apart. The feed
+    /// absorbs the change (its row is the only star-sized one) and the cap keeps something of
+    /// it on screen: a box that could eat the whole window would be a way to lose the work
+    /// you were watching.</summary>
+    double SetInputHeight(double? height, bool remember)
+    {
+        if (height is null)
         {
-            InputBox.Height = double.NaN;
+            InputBox.Height = double.NaN;             // back to fitting the text, floored by MinLines
             InputBox.MaxHeight = InputAutoCap;
         }
         else
         {
-            var from = double.IsNaN(InputBox.Height) ? InputBox.ActualHeight : InputBox.Height;
-            var want = Math.Max(InputBox.MinHeight, from + dy.Value);
+            var floor = Math.Max(24, _inputFit);
+            var want = Math.Max(floor, Math.Min(height.Value, Math.Max(floor, ActualHeight * 0.6)));
             // The drag overrules the auto cap — otherwise the grip stops dead at 200px with
             // nothing to explain why. It never overrules the window.
             InputBox.MaxHeight = Math.Max(InputAutoCap, want);
-            InputBox.Height = Math.Min(want, Math.Max(InputBox.MinHeight, ActualHeight * 0.6));
+            InputBox.Height = want;
         }
+        if (remember) UiSettings.SaveInputHeight(double.IsNaN(InputBox.Height) ? null : InputBox.Height);
         InputBox.UpdateLayout();
         return InputBox.ActualHeight;
     }

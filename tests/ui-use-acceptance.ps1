@@ -124,6 +124,24 @@ try {
     Check 'second_sentence_reuses_the_lane' ($lanes.Count -eq 1) "$($lanes.Count) lanes"
     Check 'second_message_delivered' ((($lanes[0].lines) -join '|') -match 'make it resizable') ''
 
+    # ---- the box opens at a usable size, and grows past it -------------------------------
+    # A one-line sliver invites one-line prompts. `fit` is the default the XAML floor
+    # measures to (three lines); `height` equal to it means the box opened there.
+    $d = Dump
+    Check 'the_box_opens_at_three_lines' `
+        ($d.input.fit -ge 55 -and $d.input.fit -le 85 -and $d.input.height -eq $d.input.fit -and $d.input.sized -eq $false) `
+        ($d.input | ConvertTo-Json -Compress)
+    Dodona @('ui', 'compose', 'say one') | Out-Null
+    1..5 | ForEach-Object {
+        Dodona @('ui', 'key', 'shift+enter') | Out-Null
+        Dodona @('ui', 'compose', "line $_") | Out-Null
+    }
+    $d = Dump
+    Check 'the_box_grows_past_the_default' ($d.input.lines -eq 6 -and $d.input.height -gt $d.input.fit) ($d.input | ConvertTo-Json -Compress)
+    Dodona @('ui', 'key', 'enter') | Out-Null          # send it, emptying the box for the next check
+    Start-Sleep -Seconds 2
+    Check 'the_box_shrinks_back_to_the_default' ((Dump).input.height -eq $d.input.fit) ((Dump).input | ConvertTo-Json -Compress)
+
     # ---- the box is MULTILINE: Shift+Enter is a newline, Enter still sends -------------
     # A prompt is often a paragraph, and the old box swallowed the second sentence you tried
     # to write. Driven the way a person drives it: characters, a Shift+Enter, more characters,
@@ -149,8 +167,6 @@ print(db.execute('''SELECT COUNT(*) FROM pane_events WHERE kind='user_input' '''
     Check 'shift_enter_sends_nothing' ($d.input.text -match 'roomier' -and $d.input.text -match 'send key') ($d.input | ConvertTo-Json -Compress)
     $inputsMid = InputRows
     Check 'shift_enter_delivered_nothing_anywhere' ($inputsMid -eq $inputsBefore) "before=$inputsBefore mid=$inputsMid"
-    # the box grew itself to hold the second line — no typing into a one-line slot
-    Check 'the_box_grows_with_the_text' ($d.input.height -ge 38) "height=$($d.input.height)"
 
     # the grip is a real affordance, not only a verb
     $grip = ByName (UiWindow) 'resize-input'
@@ -170,6 +186,10 @@ print(db.execute('''SELECT COUNT(*) FROM pane_events WHERE kind='user_input' '''
     $d = Dump
     Check 'double_click_refits_the_box' ($d.input.height -le $hFit + 2 -and $d.input.sized -eq $false) "fit=$hFit after=$($d.input.height)"
     Check 'resizing_kept_the_draft' ($d.input.text -match 'roomier') $d.input.text
+    # left set on purpose: the window-reopen section below asserts this exact height came back
+    Dodona @('ui', 'input-resize', '96') | Out-Null
+    Start-Sleep -Milliseconds 300
+    $sizedTo = (Dump).input.height
 
     # Enter sends the WHOLE paragraph, newline intact all the way to the agent's stdin: Say
     # serializes it to ONE json line, so the shim's line protocol cannot split it in half.
@@ -342,6 +362,15 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     Check 'collapse_survives_reopening_the_window' `
         (((@($d.collapsedLanes).Count) -eq 1) -and ((@($d.collapsedLanes)[0].lane) -eq $chipLane)) `
         ($d.collapsedLanes | ConvertTo-Json -Compress)
+
+    # ...and the size the operator set outlives the WINDOW, not just the drag: it is on disk
+    # under DODONA_HOME (ui.json), so it survives a restart and a publish hot-swap alike.
+    Check 'the_box_remembers_the_size_i_set' `
+        ($d.input.sized -eq $true -and [Math]::Abs($d.input.height - $sizedTo) -le 2) `
+        ($d.input | ConvertTo-Json -Compress)
+    Check 'the_remembered_size_is_on_disk' ([Math]::Abs($d.input.remembered - $sizedTo) -le 2) "remembered=$($d.input.remembered) set=$sizedTo"
+    Dodona @('ui', 'input-resize', 'reset') | Out-Null   # leave the box as the suite found it
+
 
     # ---- expanding puts it back ----------------------------------------------------------
     Dodona @("lane-expand", "$chipLane") | Out-Null
