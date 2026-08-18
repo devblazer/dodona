@@ -1,10 +1,14 @@
 # Dodona Workspaces & the Concierge
 
-Status: **agreed design, pre-implementation — HIGH PRIORITY** (operator, 2026-08-18:
-everything in this document is high priority; it is the next body of work, not a
-someday list). The outcome of the 2026-08-18 planning session with the operator. Decisions here were taken deliberately; §8 records the ideas
-already rejected *with their reasons*, in the LANE-LIFECYCLE §2 style, so they are never
-re-proposed. This document is authored in-repo (no `..\MassWorks\` master exists for it).
+Status: **slices 2–5 BUILT (2026-08-18); slice 1 deliberately not** — see §9 for what that
+means and why. Sections 1.1, 2.1 and 6.1 record the decisions implementation forced that the
+planning session did not reach, with their reasons.
+
+Originally the outcome of the 2026-08-18 planning session with the operator, whose standing
+note was that everything here is high priority and is the next body of work rather than a
+someday list. Decisions were taken deliberately; §8 records the ideas already rejected *with
+their reasons*, in the LANE-LIFECYCLE §2 style, so they are never re-proposed. This document
+is authored in-repo (no `..\MassWorks\` master exists for it).
 
 The problem it answers: the operator runs work and personal projects at the same time and
 wants **one app** over both — one window, one input box, one prompting system — without
@@ -373,6 +377,69 @@ Costs owned up front: new deterministic poses (bands, merged feed, boot-to-zero)
 ui-use check per new affordance (CLAUDE.md §3); `dodona ui dump` grows a workspace
 dimension.
 
+## 6.1 Decided while building milestones 4 and 5
+
+- **`DodonaUi.exe --shell` is how you open a window over everything**, and it is what makes
+  boot-to-zero reachable at all. `--root` still opens one workspace and the picker still
+  browses for a folder; without a third way in, a window always had a workspace and §4's
+  "no workspace awake" state could never occur. The shell owns no store and no daemon — its
+  only resource is a pipe (`dodona-shell-ui`), so `dodona ui dump --shell` addresses it.
+  It cannot borrow one workspace's ui pipe, because it shows all of them.
+
+- **`ui workspace <name|id>` is the band click without a mouse.** A band is a `Border`; UIA
+  can find one but cannot invoke it, and `SendKeys` is banned because it needs focus (the
+  operator's keyboard was stolen mid-work by exactly that). So the verb goes through
+  `FocusWorkspace` — the identical code path a click takes — for the same reason `ui type`
+  goes through `SubmitInput`.
+
+- **Which door the input box opens depends on whether there is a question to answer.** One
+  workspace on screen → straight to its daemon: there is nothing to disambiguate (the
+  concierge's own rung 1b), so a hop through the concierge would buy nothing and would mean
+  the input box stopped working whenever the concierge would not start. Several workspaces, or
+  none awake → through the concierge's `route`, which resolves, wakes, creates-if-new, and
+  then hands **the whole sentence** to that workspace's own dispatcher. The concierge stops at
+  the workspace boundary: it never picks the lane, names it, or judges whether it deserves a
+  ticket (§8's two-ladders decision, and this is where it would be easiest to break).
+
+- **A rung-4 "ask" delivers nothing at all.** `route` holds the sentence rather than guessing,
+  because a wrong workspace is not undoable — §5's error asymmetry applies at group scope too.
+  The feed row carries the answer command; answering delivers.
+
+- **Workspaces get their own colour palette, not the six lane hues.** A workspace is not a
+  seventh lane, and reusing the lane palette would say it was — the same reasoning that gives
+  Dodona's own feed rows the oak's trunk colour and a *round* chip. The focused workspace holds
+  palette slot 0 so its colour is stable as bands come and go.
+
+- **The feed's workspace chip is suppressed when only one workspace is on screen.** That axis
+  carries no information there, and a chip answering a question nobody asked is exactly the
+  noise a single-project operator should never meet — the same rule as the repo tag on a pane.
+
+- **Acking a merged-feed row goes back to the store it came from.** Row ids are only unique
+  within one store, so a single `ack` path would have cleared an unrelated row that happened to
+  share a number. Concierge rows ack to the concierge's pipe; workspace rows to that daemon's.
+
+- **The band strip scrolls and is capped.** Ten awake workspaces is a shape this design
+  invites, and a strip that grew without bound would silently squeeze the panes it exists to
+  complement.
+
+- **`DODONA_HOME` scopes the concierge's and the shell's pipe names too**, and that turned out
+  to be load-bearing rather than tidy. The concierge is machine-global by design — one mutex,
+  one pipe — but `DODONA_HOME` creates a separate logical machine. Without the suffix, a
+  concierge started under one home kept serving clients pointing at a *different* registry,
+  because the mutex made the second refuse to start and the CLI talked to the first. Measured:
+  a concierge leaked by the ui-use suite answered the concierge suite's questions using
+  ui-use's workspaces, failing 21 checks that passed in isolation. Under the default home the
+  ids are still plain `concierge` and `shell`, so nothing about an installation changes.
+
+- **Workspace resolution had to become LAZY.** Doing it eagerly meant *any* command
+  created-or-migrated a workspace for whatever the cwd happened to be, purely as a side effect
+  of being run there — and worse, when migration was legitimately refused (a pre-workspace
+  daemon still holding the store) commands that never needed a workspace failed with it. Found
+  live: `publish` run in a source tree whose own daemon was running could not publish, because
+  resolving a workspace it did not need refused first. Nothing resolves now until something
+  asks, and `publish` says so and still exits 0 when only the swap could not happen — the build
+  is real either way.
+
 ## 7. `publish --all` gets instance scoping
 
 `--all` currently broadcasts a swap to every ctl pipe on the machine, which
@@ -416,14 +483,24 @@ nothing in this document is background material to the slices; each slice IS one
 things decided in the planning session. Each ships alone; current two-window behavior
 keeps working throughout.
 
-1. **Lane granularity (§5)** — severable, ships first, on today's system: the four-kind
-   verdict, spawn-and-deliver for new-task, suite coverage in brain-acceptance.
-2. **Workspace identity + registry** — id-slug instances, store relocation, member
-   attachment, repo-exclusivity enforcement + workspace-suite test, migration of
-   root-anchored instances.
-3. **Concierge daemon** — registry service, resolver rungs behind the fake-agent seam,
-   group ladder, review-behind, merged-feed spine.
-4. **Shell read side** — bands, merged feed, boot-to-zero, `(workspace, lane)` dump keys,
-   poses, ui-use checks.
-5. **Prompt-first wiring + publish scoping** — input box through the concierge,
-   wake/create-on-prompt, `publish` targeting, and the suite `--all` never had.
+1. **Lane granularity (§5)** — **NOT BUILT, deliberately.** Its mechanism is a placeholder
+   awaiting the operator's own design, so slices 2–5 shipped around it. The two code facts
+   §5 records are still true and were treated as constraints throughout: `RouteInput`'s
+   classifier has no "new lane" verdict, and a misdelivered continuation is not undoable.
+   The concierge inherits that asymmetry one level up — a rung-4 "ask" delivers nothing at
+   all, and the review-behind reports a group misroute without pretending it can retract it.
+2. **Workspace identity + registry** — **done** (commit "Workspaces are named, not
+   located"). Decisions in §1.1.
+3. **Concierge daemon** — **done** (commit "The concierge: one per machine"). Decisions in
+   §2.1.
+4. **Shell read side** — **done.** Bands, merged feed, boot-to-zero, the workspace dimension
+   in `ui dump`, three new poses (`bands`, `merged-feed`, `boot-zero`), thirteen new
+   ui-use checks. Decisions in §6.1.
+5. **Prompt-first wiring + publish scoping** — **done.** Input box through the concierge when
+   there is a group-scope question to answer, wake- and create-on-prompt via `dodona route`,
+   explicit `publish` targeting, and `tests/publish-acceptance.ps1` — the suite `--all` never
+   had, now possible because targets resolve through the registry rather than by scraping the
+   OS pipe namespace.
+
+Eleven model-free suites, 281 checks, green together and individually. The degenerate case —
+one workspace, one member — stayed green throughout, which is what the whole design rested on.

@@ -18,6 +18,21 @@ public partial class App : Application
             if (e.Args[i] == "--shot" && i + 1 < e.Args.Length) shot = e.Args[++i];
         }
 
+        // --shell: open over NO particular workspace (WORKSPACES-CONCIERGE.md §4). Whatever
+        // is awake becomes bands, the first of them takes the grid, and if nothing is awake
+        // that is boot-to-zero — a real state with just feed and input, not an error. This is
+        // the front door the one-window design points at; --root remains the direct way into
+        // one workspace, and the picker remains the browse-for-a-folder way in.
+        if (e.Args.Contains("--shell"))
+        {
+            var shell = new MainWindow("", Instance.ShellId, "", e.Args.Contains("--successor"));
+            if (e.Args.Contains("--test-window")) MakeTestWindow(shell);
+            shell.Show();
+            if (pose is not null) shell.ApplyPose(pose);
+            if (shot is not null) Capture(shell, shot);
+            return;
+        }
+
         // Nothing named → ask which one (the normal way in). --root or --workspace is the
         // direct way in: what tests and shortcuts use, and it skips the picker entirely.
         Window win;
@@ -69,17 +84,7 @@ public partial class App : Application
             // operator was interrupted by test windows stealing focus while they worked.
             // Off-screen, never activated, not in the taskbar; screenshots, dumps and UIA
             // all still work, and a human never sees it.
-            if (e.Args.Contains("--test-window"))
-            {
-                // Qualified: bare `MainWindow` inside an Application resolves to
-                // Application.MainWindow (a Window), not to our type.
-                DodonaUi.MainWindow.TestWindow = true;  // survives a UI hot swap
-                main.WindowStartupLocation = WindowStartupLocation.Manual;
-                main.ShowActivated = false;
-                main.ShowInTaskbar = false;
-                main.Left = -4200;
-                main.Top = 0;
-            }
+            if (e.Args.Contains("--test-window")) MakeTestWindow(main);
             win = main;
             main.Show();
             if (pose is not null) main.ApplyPose(pose);
@@ -89,11 +94,32 @@ public partial class App : Application
         // picker, which has no control pipe of its own.
         // Render the WINDOW, not its content: RenderTargetBitmap works in the element's
         // own coordinate space, so capturing a margined child crops it by that margin.
-        if (shot is not null)
-            win.Dispatcher.BeginInvoke(new Action(() =>
-            {
-                Shot.Save(win, shot);
-                Shutdown();
-            }), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        if (shot is not null) Capture(win, shot);
     }
+
+    /// <summary>--test-window: exists for suites and agent runs, and for one reason — the
+    /// operator was interrupted by test windows stealing focus while they worked. Off-screen,
+    /// never activated, not in the taskbar; screenshots, dumps, poses and UIA all still work,
+    /// and a human never sees it.</summary>
+    static void MakeTestWindow(MainWindow w)
+    {
+        // Qualified inside an Application, where bare `MainWindow` is Application.MainWindow.
+        DodonaUi.MainWindow.TestWindow = true;      // survives a UI hot swap
+        w.WindowStartupLocation = WindowStartupLocation.Manual;
+        w.ShowActivated = false;
+        w.ShowInTaskbar = false;
+        w.Left = -4200;
+        w.Top = 0;
+    }
+
+    /// <summary>--shot &lt;png&gt;: render this window and exit. Works on any window, including
+    /// the picker, which has no control pipe of its own. Render the WINDOW, not its content:
+    /// RenderTargetBitmap works in the element's own coordinate space, so capturing a margined
+    /// child crops it by that margin.</summary>
+    void Capture(Window win, string shot) =>
+        win.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            Shot.Save(win, shot);
+            Shutdown();
+        }), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
 }

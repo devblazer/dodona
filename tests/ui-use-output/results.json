@@ -27,5 +27,18 @@
     "badge_flushes_at_turn_end":  "PASS",
     "quota_line_from_wire":  "PASS",
     "close_button_exists":  "PASS",
-    "close_button_stops_the_lane":  "PASS"
+    "close_button_stops_the_lane":  "PASS",
+    "shell_boots_to_zero_with_nothing_awake":  "PASS",
+    "boot_to_zero_shows_no_bands":  "PASS",
+    "boot_to_zero_still_has_an_input_box":  "PASS",
+    "a_waking_workspace_takes_the_grid":  "PASS",
+    "second_awake_workspace_becomes_a_band":  "PASS",
+    "band_carries_its_lane_chips":  "PASS",
+    "focused_workspace_still_holds_the_grid":  "PASS",
+    "band_does_not_evict_or_demote_a_lane":  "PASS",
+    "band_click_swaps_the_grid":  "PASS",
+    "the_previous_workspace_becomes_a_band":  "PASS",
+    "the_grid_shows_the_new_workspaces_lanes":  "PASS",
+    "merged_feed_spans_both_workspaces":  "PASS",
+    "merged_feed_labels_rows_by_workspace":  "PASS"
 }

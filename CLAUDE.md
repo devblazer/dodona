@@ -111,6 +111,12 @@ desktop shortcut. Safe to run while the operator is working — that is the whol
 the hot swap, verified by `tests/m4-acceptance.ps1`. Work in progress gets published too
 when the operator wants to trial it; that is what a trial is.
 
+`--all` now means **every live workspace in the registry, plus the concierge** — resolved by
+id, never by scraping every `dodona-*-ctl` pipe off the OS. A live daemon belonging to no
+registered workspace is never a swap target, which is what finally made
+`tests/publish-acceptance.ps1` possible. Narrower: `--workspace <name>...` and `--concierge`;
+with neither, the workspace that owns `--project`.
+
 Two things publish cannot do, so say them plainly when they apply:
 
 - **A running UI window does not hot-swap.** The daemon and lanes survive; the window is
@@ -120,7 +126,7 @@ Two things publish cannot do, so say them plainly when they apply:
 
 ## 3. Verify with the suites, not by looking
 
-Ten model-free suites, all fake agents, all free. Run the ones your change touches; run
+Eleven model-free suites, all fake agents, all free. Run the ones your change touches; run
 all of them before publishing something structural:
 
 ```powershell
@@ -134,6 +140,7 @@ powershell ... tests\ui-use-acceptance.ps1    # the UI driven like a person
 powershell ... tests\compression-acceptance.ps1  # selective compression (§5)
 powershell ... testsrain-acceptance.ps1     # the dispatcher brain and its routing ladder
 powershell ... tests\concierge-acceptance.ps1 # the group-scope ladder, the fence, the review-behind
+powershell ... tests\publish-acceptance.ps1   # publish targeting: --all spares foreign instances
 ```
 
 `ui-use` is the one that matters most for UI work: dumps and screenshots prove the UI
@@ -153,7 +160,15 @@ priority complaint; `SendKeys` is banned for the same reason (it needs focus) �
 input with `dodona ui type "<text>"`, which submits through the same code path as Enter.
 
 Poses are deterministic fixtures (`full`, `badges`, `blocked`, `feed`, `empty-slot`,
-`tray`, `overlay`, `long`). `--pose` needs a `--root`; without one you get the picker.
+`tray`, `overlay`, `long`, `bands`, `merged-feed`, `boot-zero`). `--pose` needs a `--root`
+or `--shell`; without either you get the picker.
+
+**The window is now one shell over N workspaces** (`DodonaUi.exe --shell`): the focused
+workspace holds the grid, every other awake one is a band of lane chips, and the feed is a
+union with a workspace chip per row. Address that window with `--shell` on any `ui` verb,
+and give a band the grid with `dodona ui workspace <name>` — the same code path a click
+takes, without stealing focus. `DodonaUi.exe --shell` with nothing awake is **boot-to-zero**,
+a real state: just feed and input, and typing is how you leave it.
 
 ## 4. Never kill processes by name
 

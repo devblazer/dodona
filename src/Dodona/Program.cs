@@ -10,63 +10,56 @@ var (cmd, root, opts, pos) = ParseArgs(args);
 if (cmd is null) { Help(); return 1; }
 
 // ---------------------------------------------------------------- who am I talking to
-// Identity is the WORKSPACE (docs/WORKSPACES-CONCIERGE.md §1), not a hash of --root.
-// Two ways in, and they are deliberately different:
-//   --workspace <name|id|alias>  addresses a workspace directly; never creates one,
-//                                because naming one that does not exist is a typo.
-//   --root <path>  (the default)  asks the registry who owns that path — and if nobody
-//                                does, migrates or creates a workspace for it, which is
-//                                what makes every pre-workspace project and every
-//                                existing acceptance suite keep working untouched.
-// Registry-free commands (`version`, and the workspace verbs that manage the registry
-// themselves) are resolved lazily so a broken registry never stops you inspecting a binary.
-// Concierge commands address the machine-global concierge (§2), never a workspace, so they
-// skip workspace resolution entirely — asking "which workspace is this" of the component
-// that belongs to none is the category error §2's authority cap exists to prevent.
-var conciergeCmds = new HashSet<string>
-{
-    "concierge", "concierge-status", "concierge-resolve", "concierge-feed",
-    "concierge-ack", "concierge-questions", "concierge-answer", "concierge-review",
-    "concierge-stop",
-};
+// Identity is the WORKSPACE (docs/WORKSPACES-CONCIERGE.md §1), not a hash of --root. Two
+// ways in, and they are deliberately different:
+//   --workspace <name|id|alias>  addresses a workspace directly; never creates one, because
+//                                naming one that does not exist is a typo.
+//   --root <path>  (the default) asks the registry who owns that path — and if nobody does,
+//                                MIGRATES or CREATES a workspace for it, which is what makes
+//                                every pre-workspace project and every existing acceptance
+//                                suite keep working untouched.
+//
+// **Resolved LAZILY, and that is load-bearing.** Doing it eagerly meant any command at all
+// created-or-migrated a workspace for whatever the cwd happened to be, purely as a side
+// effect of being run there — `dodona swaps`, `dodona ui dump --shell`, `dodona publish`.
+// Worse, when migration was legitimately refused (a pre-workspace daemon still holding the
+// store), commands that never needed a workspace failed with it. Found live: `publish` run
+// from a source tree whose own daemon was running could not publish, because resolving a
+// workspace it did not need refused first. Nothing resolves now until something asks.
+Workspace? wsCache = null;
 
-string instanceId = "", wsName = "", primary = Path.GetFullPath(root);
-if (cmd is not ("version" or "workspaces" or "workspace-create") && !conciergeCmds.Contains(cmd))
+Workspace Ws()
 {
-    try
+    if (wsCache is not null) return wsCache;
+    using var reg = new Registry();
+    if (One("workspace") is { Length: > 0 } named)
     {
-        using var reg0 = new Registry();
-        Workspace? ws;
-        if (One("workspace") is { Length: > 0 } named)
+        var found = WorkspaceResolve.ByNameOrId(reg, named);
+        if (found is null)
         {
-            ws = WorkspaceResolve.ByNameOrId(reg0, named);
-            if (ws is null)
-            {
-                var have = reg0.All();
-                Console.Error.WriteLine($"no workspace \"{named}\"" +
-                    (have.Count > 0 ? $" — have: {string.Join(", ", have.Select(x => x.Name))}" : " — none exist yet"));
-                Console.Error.WriteLine("       make one:  dodona workspace-create --name <NAME> --member <path>");
-                return 2;
-            }
+            var have = reg.All();
+            throw new WorkspaceUnavailable(
+                $"no workspace \"{named}\"" +
+                (have.Count > 0 ? $" — have: {string.Join(", ", have.Select(x => x.Name))}" : " — none exist yet") +
+                "\n       make one:  dodona workspace-create --name <NAME> --member <path>");
         }
-        else
-        {
-            var resolved = WorkspaceResolve.ForPath(reg0, root);
-            ws = resolved.Ws;
-            // Announced, not silent (§11): a workspace appearing, or a store moving out of
-            // a project folder, is exactly the kind of thing an operator must be able to
-            // see in the scrollback afterwards.
-            if (resolved.Note is not null) Console.Error.WriteLine($"dodona: {resolved.Note}");
-        }
-        instanceId = ws.Id;
-        wsName = ws.Name;
-        primary = ws.Primary ?? primary;
+        return wsCache = found;
     }
-    catch (Exception ex) { return Fail($"workspace registry: {ex.Message}"); }
+    var resolved = WorkspaceResolve.ForPath(reg, root);
+    // Announced, not silent (§11): a workspace appearing, or a store moving out of a project
+    // folder, is exactly the kind of thing an operator must be able to see afterwards.
+    if (resolved.Note is not null) Console.Error.WriteLine($"dodona: {resolved.Note}");
+    return wsCache = resolved.Ws;
 }
 
-string ctlPipe = Instance.CtlPipe(instanceId);
-string uiPipe = Instance.UiPipe(instanceId);
+string WsId() => Ws().Id;
+string WsName() => Ws().Name;
+string WsPrimary() => Ws().Primary ?? Path.GetFullPath(root);
+string CtlPipe() => Instance.CtlPipe(WsId());
+
+// `--shell` addresses the one-window shell, which belongs to no workspace (§4/§6): it shows
+// every awake workspace, so it cannot borrow the ui pipe of one of them.
+string UiPipeName() => opts.ContainsKey("shell") ? Instance.UiPipe(Instance.ShellId) : Instance.UiPipe(WsId());
 
 // A missing or malformed argument is a usage mistake, not a crash. Without this a bare
 // `dodona lane-stop` threw an unhandled IndexOutOfRange and printed a stack trace at the
@@ -79,13 +72,16 @@ try
 catch (ArgumentOutOfRangeException) { return Usage(); }
 catch (IndexOutOfRangeException) { return Usage(); }
 catch (FormatException) { return Fail($"{cmd}: a numeric argument was expected"); }
+// A workspace that cannot be resolved is a usage problem too, not a crash — and its message
+// already says what to do about it (rename, move, or stop the daemon holding the store).
+catch (WorkspaceUnavailable ex) { return Fail(ex.Message); }
 
 int Usage() => Fail($"{cmd}: missing an argument — see `dodona` with no arguments for usage");
 
 async Task<int> Dispatch() => cmd switch
 {
     "version" => Version(),
-    "daemon" => await Daemon.RunAsync(primary, instanceId, wsName, ctlPipe, opts.ContainsKey("successor")),
+    "daemon" => await Daemon.RunAsync(WsPrimary(), WsId(), WsName(), CtlPipe(), opts.ContainsKey("successor")),
     // ---- workspaces (WORKSPACES-CONCIERGE.md §1). Answered in THIS process, deliberately,
     // even now that a concierge exists: the concierge owns the registry as the thing that
     // RESOLVES and LEARNS from it (§2.1), while the file itself stays safe for several
@@ -106,11 +102,17 @@ async Task<int> Dispatch() => cmd switch
     "concierge" => await Concierge.RunAsync(),
     "concierge-status" => Cx(new { cmd = "status" }),
     "concierge-resolve" => Cx(new { cmd = "resolve", text = string.Join(" ", pos), from = One("from") }),
+    // Prompt-first (§4): resolve, WAKE the workspace if it is asleep, and hand the sentence to
+    // ITS dispatcher. This is what the shell's input box calls when several workspaces are on
+    // screen. Needs no entry in a skip list: workspace resolution is lazy, so a command that
+    // never asks for a workspace never resolves one.
+    "route" => Cx(new { cmd = "route", text = string.Join(" ", pos), from = One("from") }),
     "concierge-feed" => Cx(new { cmd = "feed", n = int.TryParse(One("n"), out var fn) ? fn : 30 }),
     "concierge-ack" => Cx(new { cmd = "ack", id = long.Parse(pos[0]) }),
     "concierge-questions" => Cx(new { cmd = "questions" }),
     "concierge-answer" => Cx(new { cmd = "answer", id = long.Parse(pos[0]), answer = string.Join(" ", pos.Skip(1)) }),
     "concierge-review" => Cx(new { cmd = "review", text = string.Join(" ", pos), workspace = One("workspace-id") ?? One("from") }),
+    "concierge-focus" => Cx(new { cmd = "focus", workspace = One("workspace-id") ?? (pos.Count > 0 ? pos[0] : "") }),
     "concierge-stop" => Cx(new { cmd = "stop" }),
     "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), model = One("model"), effort = One("effort"), childArgs = Many("child-arg") }),
     "lane-stop" => Client(new { cmd = "lane-stop", lane = long.Parse(pos[0]) }),
@@ -253,7 +255,7 @@ int WorkspaceAttach()
     int worst = 0;
     foreach (var m in members)
         foreach (var path in opts.ContainsKey("bulk") ? WorkspaceResolve.BulkCandidates(m) : new List<string> { m })
-            worst = Math.Max(worst, AttachOne(reg, instanceId, path));
+            worst = Math.Max(worst, AttachOne(reg, WsId(), path));
     return worst;
 }
 
@@ -268,10 +270,12 @@ string RequireMember() => One("member") ?? (pos.Count > 0 ? pos[0] : throw new A
 
 int WorkspaceEdit(Func<Registry, string, string?> op, string verb)
 {
+    // Ws() BEFORE the registry opens, so the name we report is the one before a rename.
+    var was = Ws();
     using var reg = new Registry();
-    var err = op(reg, instanceId);
+    var err = op(reg, was.Id);
     if (err is not null) return Fail($"error: {err}");
-    Console.WriteLine($"{verb}: workspace {wsName} ({instanceId})");
+    Console.WriteLine($"{verb}: workspace {was.Name} ({was.Id})");
     return 0;
 }
 
@@ -281,25 +285,24 @@ int WorkspaceEdit(Func<Registry, string, string?> op, string verb)
 /// wants to read a store must be able to ask rather than reconstruct.</summary>
 int Where()
 {
-    var storeDir = Paths.WorkspaceDir(instanceId);
+    var ws = Ws();
+    var storeDir = Paths.WorkspaceDir(ws.Id);
     if (opts.ContainsKey("json"))
     {
-        using var reg = new Registry();
-        var ws = reg.ById(instanceId);
         Console.WriteLine(JsonSerializer.Serialize(new
         {
-            id = instanceId, name = wsName, live = Instance.IsLive(instanceId),
-            dir = storeDir, store = Paths.Store(instanceId), primary,
-            ctlPipe, uiPipe, registry = Paths.Registry,
-            members = ws?.Members.Select(m => m.Path).ToList() ?? new List<string>(),
+            id = ws.Id, name = ws.Name, live = Instance.IsLive(ws.Id),
+            dir = storeDir, store = Paths.Store(ws.Id), primary = ws.Primary ?? "",
+            ctlPipe = Instance.CtlPipe(ws.Id), uiPipe = Instance.UiPipe(ws.Id), registry = Paths.Registry,
+            members = ws.Members.Select(m => m.Path).ToList(),
         }));
         return 0;
     }
-    Console.WriteLine($"workspace  {wsName} ({instanceId}){(Instance.IsLive(instanceId) ? "  [daemon running]" : "")}");
-    Console.WriteLine($"  store    {Paths.Store(instanceId)}");
+    Console.WriteLine($"workspace  {ws.Name} ({ws.Id}){(Instance.IsLive(ws.Id) ? "  [daemon running]" : "")}");
+    Console.WriteLine($"  store    {Paths.Store(ws.Id)}");
     Console.WriteLine($"  dir      {storeDir}       (shim-lane<N>.json live here too)");
-    Console.WriteLine($"  primary  {primary}");
-    Console.WriteLine($"  ctl pipe {ctlPipe}");
+    Console.WriteLine($"  primary  {ws.Primary ?? "(no members)"}");
+    Console.WriteLine($"  ctl pipe {Instance.CtlPipe(ws.Id)}");
     Console.WriteLine($"  registry {Paths.Registry}");
     return 0;
 }
@@ -379,12 +382,63 @@ int Publish()
     if (!File.Exists(newExe)) return Fail($"published, but {newExe} is missing");
     Shortcut(outDir);
 
-    var targets = opts.ContainsKey("all") ? Instance.LiveCtlPipes() : new List<string> { ctlPipe };
+    // ---- who gets the swap (WORKSPACES-CONCIERGE.md §7) --------------------------------
+    // `--all` used to broadcast to every ctl pipe on the machine, which ORCHESTRATOR-REVIEW
+    // already flagged as untestable: a suite exercising it would hot-swap the operator's live
+    // instances. So targeting is now explicit and the suite can finally exist.
+    //
+    //   --workspace <name> ...   these workspaces (repeatable)
+    //   --concierge              the concierge too (it has no workspace of its own)
+    //   --all                    every live workspace daemon in the REGISTRY, plus the
+    //                            concierge — still "everything", but everything Dodona
+    //                            knows it owns, resolved by id rather than by scraping a
+    //                            pipe name off the OS
+    //   (none)                   the workspace owning --project, or the cwd
+    //
+    // Any lingering pipe that belongs to no registered workspace is left alone. That is the
+    // whole difference: a stale or foreign `dodona-*-ctl` is no longer a swap target.
+    var targets = new List<(string Label, string Pipe)>();
+    var named = Many("workspace");
+    if (opts.ContainsKey("all"))
+    {
+        using var reg = new Registry();
+        foreach (var w in reg.All().Where(w => Instance.IsLive(w.Id)))
+            targets.Add(($"{w.Name} ({w.Id})", Instance.CtlPipe(w.Id)));
+        if (Instance.IsLive(Instance.ConciergeId)) targets.Add(("concierge", Instance.CtlPipe(Instance.ConciergeId)));
+    }
+    else if (named.Count > 0)
+    {
+        using var reg = new Registry();
+        foreach (var n in named)
+        {
+            var w = WorkspaceResolve.ByNameOrId(reg, n);
+            if (w is null) { Console.Error.WriteLine($"error: no workspace \"{n}\" to publish to"); return 2; }
+            targets.Add(($"{w.Name} ({w.Id})", Instance.CtlPipe(w.Id)));
+        }
+        if (opts.ContainsKey("concierge") && Instance.IsLive(Instance.ConciergeId))
+            targets.Add(("concierge", Instance.CtlPipe(Instance.ConciergeId)));
+    }
+    else
+    {
+        // The workspace owning what we just built. Resolved HERE and not earlier, so a
+        // publish never migrates a store as a side effect of being run in a source tree
+        // (found live: the tree's own pre-workspace daemon was holding it, and publish
+        // refused before it had built anything).
+        try { targets.Add(($"{WsName()} ({WsId()})", CtlPipe())); }
+        catch (WorkspaceUnavailable ex)
+        {
+            Console.WriteLine($"published {newExe}");
+            Console.Error.WriteLine($"note: nothing was swapped — {ex.Message}");
+            Console.Error.WriteLine("      name targets explicitly:  --workspace <name> ... [--concierge]   or  --all");
+            return 0;                                   // the build is real; only the swap did not happen
+        }
+    }
+
     int worst = 0;
     if (targets.Count == 0) Console.WriteLine($"published {newExe}; no daemon running to swap");
-    foreach (var target in targets)
+    foreach (var (label, target) in targets)
     {
-        Console.WriteLine($"— swapping instance on {target}");
+        Console.WriteLine($"— swapping {label} on {target}");
         var code = Client(new { cmd = "swap", exe = newExe, mode = One("mode") ?? "ask" }, target);
         worst = Math.Max(worst, code);
     }
@@ -396,8 +450,23 @@ int Publish()
     var newUiExe = Path.Combine(outDir, "DodonaUi.exe");
     if (File.Exists(newUiExe))
     {
-        var uiTargets = opts.ContainsKey("all") ? Instance.LiveUiPipes() : new List<string> { uiPipe };
-        foreach (var target in uiTargets.Where(t => Instance.LiveUiPipes().Contains(t, StringComparer.OrdinalIgnoreCase)))
+        // Scoped the same way, and the SHELL's window is always a candidate: it is one
+        // window over N workspaces, so it belongs to no workspace's pipe and would otherwise
+        // never be refreshed at all (§6).
+        var uiCandidates = new List<string>();
+        if (opts.ContainsKey("all"))
+        {
+            using var reg = new Registry();
+            foreach (var w in reg.All()) uiCandidates.Add(Instance.UiPipe(w.Id));
+        }
+        else
+            foreach (var (_, pipe) in targets)
+                uiCandidates.Add(pipe.Replace("-ctl", "-ui"));
+        uiCandidates.Add(Instance.UiPipe(Instance.ShellId));
+
+        var liveUi = Instance.LiveUiPipes();
+        foreach (var target in uiCandidates.Distinct(StringComparer.OrdinalIgnoreCase)
+                     .Where(t => liveUi.Contains(t, StringComparer.OrdinalIgnoreCase)))
         {
             Console.WriteLine($"— updating UI on {target}");
             worst = Math.Max(worst, Client(new { verb = "update", exe = newUiExe }, target));
@@ -453,13 +522,15 @@ int Ui()
     if (pos.Count == 0) return Fail("ui verb required: dump | screenshot | pose <name> | overlay <PANE|off> | update <exe> | close");
     return pos[0] switch
     {
-        "dump" => Client(new { verb = "dump" }, uiPipe),
-        "screenshot" => Client(new { verb = "screenshot", @out = Path.GetFullPath(One("out") ?? "dodona-ui.png"), pane = One("pane") }, uiPipe),
-        "pose" => pos.Count > 1 ? Client(new { verb = "pose", name = pos[1] }, uiPipe) : Fail("ui pose <name|live>"),
-        "type" => pos.Count > 1 ? Client(new { verb = "type", text = string.Join(" ", pos.Skip(1)) }, uiPipe) : Fail("ui type <text>"),
-        "overlay" => pos.Count > 1 ? Client(new { verb = "overlay", pane = pos[1] }, uiPipe) : Fail("ui overlay <PANE|off>"),
-        "update" => pos.Count > 1 ? Client(new { verb = "update", exe = Path.GetFullPath(pos[1]) }, uiPipe) : Fail("ui update <DodonaUi.exe>"),
-        "close" => Client(new { verb = "close" }, uiPipe),
+        "dump" => Client(new { verb = "dump" }, UiPipeName()),
+        "screenshot" => Client(new { verb = "screenshot", @out = Path.GetFullPath(One("out") ?? "dodona-ui.png"), pane = One("pane") }, UiPipeName()),
+        "pose" => pos.Count > 1 ? Client(new { verb = "pose", name = pos[1] }, UiPipeName()) : Fail("ui pose <name|live>"),
+        "type" => pos.Count > 1 ? Client(new { verb = "type", text = string.Join(" ", pos.Skip(1)) }, UiPipeName()) : Fail("ui type <text>"),
+        // Give a band the grid — the same code path a click takes, without needing focus.
+        "workspace" => pos.Count > 1 ? Client(new { verb = "workspace", workspace = pos[1] }, UiPipeName()) : Fail("ui workspace <name|id>"),
+        "overlay" => pos.Count > 1 ? Client(new { verb = "overlay", pane = pos[1] }, UiPipeName()) : Fail("ui overlay <PANE|off>"),
+        "update" => pos.Count > 1 ? Client(new { verb = "update", exe = Path.GetFullPath(pos[1]) }, UiPipeName()) : Fail("ui update <DodonaUi.exe>"),
+        "close" => Client(new { verb = "close" }, UiPipeName()),
         _ => Fail($"unknown ui verb: {pos[0]}"),
     };
 }
@@ -468,7 +539,7 @@ int Ui()
 
 int Client(object request, string? pipeName = null)
 {
-    pipeName ??= ctlPipe;
+    pipeName ??= CtlPipe();
     var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
     try { pipe.Connect(3000); }
     catch
@@ -478,14 +549,16 @@ int Client(object request, string? pipeName = null)
         // always there and the daemon is summoned. This is also the recovery path from a
         // failed swap or a crash: the next command brings the daemon back, and the shims
         // have been buffering the whole time.
-        if (pipeName != ctlPipe || cmd == "stop-daemon" || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
+        var isWorkspaceCtl = wsCache is not null && pipeName == Instance.CtlPipe(wsCache.Id);
+        if (!isWorkspaceCtl || cmd == "stop-daemon" || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
             return Fail(
-                pipeName == ctlPipe ? $"daemon not running for this root (ctl pipe {pipeName})"
+                isWorkspaceCtl ? $"daemon not running for workspace {wsCache!.Name} (ctl pipe {pipeName})"
                 : pipeName == Instance.CtlPipe(Concierge.Id) ? $"concierge not running (ctl pipe {pipeName})"
-                : $"UI not running for this root (pipe {pipeName})");
+                : pipeName.EndsWith("-ui") ? $"no Dodona UI on pipe {pipeName}"
+                : $"nothing listening on pipe {pipeName}");
 
-        var reborn = Autostart(instanceId, primary);
-        if (reborn is not null) return Fail($"could not start a daemon for workspace {wsName}: {reborn}");
+        var reborn = Autostart(WsId(), WsPrimary());
+        if (reborn is not null) return Fail($"could not start a daemon for workspace {WsName()}: {reborn}");
         pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
         try { pipe.Connect(15000); }
         catch { pipe.Dispose(); return Fail("started a daemon but it never answered its control pipe"); }
@@ -540,7 +613,7 @@ static (string? cmd, string root, Dictionary<string, List<string>> opts, List<st
 {
     // Valueless flags must be declared: otherwise `--json` at the end of a line is
     // indistinguishable from a positional argument, and silently becomes one.
-    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk" };
+    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk", "shell", "concierge" };
 
     string? cmd = null;
     string root = Environment.CurrentDirectory;
@@ -585,6 +658,7 @@ static void Help() => Console.WriteLine("""
       dodona concierge                      (run it; any concierge-* command starts one)
       dodona concierge-status               (tiers, the search fence, open questions)
       dodona concierge-resolve <text>       (walk the ladder, print the verdict as JSON)
+      dodona route <text>                   (resolve, WAKE that workspace, deliver to it)
       dodona concierge-feed | concierge-ack <id>
       dodona concierge-questions | concierge-answer <id> <name|new:NAME>
               answering TEACHES an alias, so the next one resolves for free
@@ -612,9 +686,12 @@ static void Help() => Console.WriteLine("""
       dodona token-request <ticket> [--lease sec] | token-renew | token-release | token-status
       dodona land <ticket>
     hot swap (§13/§14 — nothing interrupted, no session lost):
-      dodona publish [--project <dir>] [--all] [--exe <prebuilt>] [--mode now] [--shortcut]
+      dodona publish [--project <dir>] [--exe <prebuilt>] [--mode now] [--shortcut]
+              [--workspace <name>]...  swap exactly these  [--concierge]  and the concierge
+              [--all]                  every LIVE registered workspace, plus the concierge
+              (neither)                the workspace that owns --project / the cwd
               --shortcut puts Dodona on the desktop; later publishes keep it current
-              swaps live daemons, then refreshes live UIs (they are separate processes)
+              swaps daemons, then refreshes live UIs including the shell (separate processes)
       dodona swap <new dodona.exe> [--mode now] | swap-answer <now|when-it-lands|hold>
       dodona swaps
     lanes & the brain (§3):
@@ -624,6 +701,9 @@ static void Help() => Console.WriteLine("""
       dodona ui type <text>                 (submit through the same path as Enter — no focus)
       DodonaUi.exe --test-window            (off-screen, never activates: for tests/agents)
       dodona ui dump | ui screenshot [--pane <PANE>] --out <png> | ui pose <name|live>
+      dodona ui workspace <name|id>         (give a band the grid — the same path a click takes)
+      DodonaUi.exe --shell                  (one window over every awake workspace; boots to zero)
+      add --shell to any ui verb to address that window instead of one workspace's
       dodona ui overlay <PANE|off> | ui update <DodonaUi.exe> | ui close
       dodona ack <pane_event_id> | undo-route <routing_decision_id>
       dodona stop-daemon

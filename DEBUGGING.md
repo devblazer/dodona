@@ -381,6 +381,33 @@ Start-on-demand means *any* client command revives a dead daemon. Set
 `DODONA_NO_AUTOSTART=1` when you want the honest "daemon not running" instead — the
 acceptance tests all do, so they own daemon lifetime.
 
+## The shell: one window over N workspaces (WORKSPACES-CONCIERGE.md §6)
+
+```
+DodonaUi.exe --shell [--test-window]     # over every AWAKE workspace; boots to zero
+DodonaUi.exe --root <path>               # over one workspace, as before
+dodona ui dump --shell                   # add --shell to any ui verb to address that window
+dodona ui workspace <name|id> --shell    # give a band the grid (the path a click takes)
+dodona ui pose bands|merged-feed|boot-zero --shell
+```
+
+The focused workspace holds the full 3×2 grid; every other awake workspace is a **band** —
+one row of lane chips with attention badges. Clicking a band swaps which workspace holds the
+grid, and that is *all* it does: a band is a view, never an eviction. The six-slot cap,
+`focused_lane` and the dispatcher lane stay per-workspace concepts inside each store.
+
+`ui dump` grew a workspace dimension — `workspace`, `workspaceName`, `bootToZero`, `bands`,
+and a `workspace` plus `concierge` key on every feed row. Everything that was there before
+kept its shape: what the UI testifies to must not change because it gained a dimension.
+
+**Boot-to-zero** (`bootToZero: true`) is a window with no workspace awake — a real state,
+not an error. The grid is an invitation, the feed still shows the concierge, and the input
+box still works: it routes through the concierge, which wakes or creates a workspace.
+
+**The merged feed is a union** across workspaces plus the concierge, newest first. Ack goes
+back to the store the row came from — ids are only unique within one store, so a single ack
+path would clear an unrelated row that happened to share a number.
+
 ## The UI can testify (§17)
 
 `DodonaUi.exe --root <root> [--pose <name>]` is a dumb view over the store: read-only

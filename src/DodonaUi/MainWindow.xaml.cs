@@ -16,8 +16,11 @@ public partial class MainWindow : Window
 {
     readonly string _root, _instanceId;
     readonly MainVm _vm = new();
-    readonly StoreReader _reader;
-    readonly Poller _poller;
+    // One shell over N workspaces (WORKSPACES-CONCIERGE.md §6). _instanceId stays the
+    // workspace this window was OPENED for -- its ui pipe, and the daemon a click defaults
+    // to; the shell tracks which workspace currently holds the grid, which the operator can
+    // change by clicking a band without any of this window's identity moving.
+    readonly Shell _shell;
     readonly CancellationTokenSource _cts = new();
 
     /// <summary>Which workspace this window is showing — the picker uses it to raise an
@@ -43,11 +46,14 @@ public partial class MainWindow : Window
         // member is still the tooltip, because "which folder is this" stays a fair question.
         _vm.ProjectName = workspaceName;
         _vm.ProjectPath = primary;
-        Title = $"Dodona — {workspaceName}";
+        Title = workspaceName.Length > 0 ? $"Dodona — {workspaceName}" : "Dodona";
 
-        _reader = new StoreReader(Paths.Store(instanceId));
-        _poller = new Poller(_reader);
-        _ = _poller.RunAsync(_vm, snap => Dispatcher.InvokeAsync(() => ApplySnapshot(snap)).Task, _cts.Token);
+        // ShellId is a sentinel for "opened over no particular workspace" (§4), not a
+        // workspace: handing it to the Shell made it open a StoreReader over a store that
+        // does not exist and then treat that phantom as focused, so boot-to-zero never
+        // triggered and a real workspace waking up could never take the grid.
+        _shell = new Shell(instanceId == Instance.ShellId ? "" : instanceId, workspaceName);
+        _ = _shell.RunAsync(_vm, snap => Dispatcher.InvokeAsync(() => ApplySnapshot(snap)).Task, _cts.Token);
         UiPipe.Start(Instance.UiPipe(instanceId), this, successor);
         if (successor) _ = Task.Run(SignalReadyAsync);
         // The poller only re-applies when the STORE changes, but a pulse must fade on its
@@ -63,7 +69,7 @@ public partial class MainWindow : Window
         };
         pulseTick.Start();
 
-        Closed += (_, _) => { _cts.Cancel(); _reader.Dispose(); };
+        Closed += (_, _) => { _cts.Cancel(); _shell.Dispose(); };
     }
 
     /// <summary>Tell the outgoing UI we are up (§13). Sent only once the window exists, so
@@ -91,6 +97,11 @@ public partial class MainWindow : Window
         if (_vm.PoseName is not null) return;
         _lastSnap = snap;
         var newlyBlocked = _vm.Apply(snap);
+        // The title follows whichever workspace holds the grid: in the shell that changes
+        // when the operator clicks a band, and a window titled after a workspace it stopped
+        // showing is worse than one titled after nothing.
+        var want = snap.FocusedWorkspaceName.Length > 0 ? $"Dodona — {snap.FocusedWorkspaceName}" : "Dodona";
+        if (Title != want) Title = want;
         // Toast rule (§8): only when the app lacks focus AND a lane is blocked on you.
         // Never for progress — muted toasts help nobody.
         foreach (var lane in newlyBlocked)
@@ -137,6 +148,12 @@ public partial class MainWindow : Window
                 SubmitInput();
                 return "typed";
             }
+            // Clicking a band, without a mouse and without focus. Same reasoning as `type`:
+            // it goes through EXACTLY the code path a click takes (FocusWorkspace), so a test
+            // drives the real affordance rather than a parallel one — and a band is a Border,
+            // which UIA can find but cannot invoke.
+            case "workspace":
+                return FocusWorkspace(e.GetProperty("workspace").GetString() ?? "");
             case "close":
                 Dispatcher.BeginInvoke(() => Application.Current.Shutdown());
                 return "closing";
@@ -155,6 +172,18 @@ public partial class MainWindow : Window
             window = new { w = (int)Width, h = (int)Height, title = Title, active = IsActive, root = _root },
             pose = _vm.PoseName,
             overlay = _vm.OverlayPane?.Title,
+            // The workspace dimension §6 asks for. `workspace` is which one holds the grid,
+            // `bands` is every other awake one, and `bootToZero` is the real state of having
+            // none awake at all -- so a dump can answer "which of my lives is on screen"
+            // without a screenshot.
+            workspace = _vm.FocusedWorkspace,
+            workspaceName = _vm.FocusedWorkspaceName,
+            bootToZero = _vm.BootToZero,
+            bands = _vm.Bands.Select(b => new
+            {
+                workspace = b.WorkspaceId, name = b.Name, live = b.Live, badge = b.Badge, color = b.ColorHex,
+                lanes = b.Lanes.Select(l => new { lane = l.LaneId, title = l.Title, badge = l.Badge, blocked = l.Blocked }).ToList(),
+            }).ToList(),
             slots = _vm.Slots.Select(s => s.IsEmpty
                 ? (object)new { slot = s.Slot, empty = true }
                 : new
@@ -165,7 +194,10 @@ public partial class MainWindow : Window
                 }).ToList(),
             quota = _vm.QuotaText,
             tray = _vm.Tray.ToList(),
-            feed = _vm.Feed.Select(f => new { id = f.Id, lane = f.LaneTitle, body = f.Body, acked = f.Acked }).ToList(),
+            // `lines` and the feed's existing keys keep their shape: what the UI testifies to
+            // must not change because it got a new dimension (§17). `workspace` is added.
+            feed = _vm.Feed.Select(f => new
+            { id = f.Id, lane = f.LaneTitle, body = f.Body, acked = f.Acked, workspace = f.Workspace, concierge = f.IsConcierge }).ToList(),
             toasts = _vm.Toasts.Select(t => new { ts = t.Ts, lane = t.Lane, reason = t.Reason }).ToList(),
             status = _vm.Status,
         };
@@ -243,8 +275,8 @@ public partial class MainWindow : Window
         {
             _vm.PoseName = null;
             _vm.OverlayPane = null;
-            _poller.OverlayTitle = null;
-            _poller.Invalidate();
+            if (_shell.FocusedPoller is Poller fp) fp.OverlayTitle = null;
+            _shell.Invalidate();
             return "pose live (store polling resumed)";
         }
         var pose = Poses.Get(name);
@@ -266,16 +298,16 @@ public partial class MainWindow : Window
         if (paneTitle is null)
         {
             _vm.OverlayPane = null;
-            _poller.OverlayTitle = null;
+            if (_shell.FocusedPoller is Poller fp0) fp0.OverlayTitle = null;
             return "overlay off";
         }
         var pane = _vm.Slots.FirstOrDefault(s => !s.IsEmpty && s.Title.Equals(paneTitle, StringComparison.OrdinalIgnoreCase));
         if (pane is null) return $"error: no pane titled '{paneTitle}'";
         _vm.OverlayPane = pane;                    // immediate, with the pane's current lines
-        if (_vm.PoseName is null)
+        if (_vm.PoseName is null && _shell.FocusedPoller is Poller fp1)
         {
-            _poller.OverlayTitle = pane.Title;     // next poll deepens it to 120 raw rows
-            _poller.Invalidate();
+            fp1.OverlayTitle = pane.Title;         // next poll deepens it to 120 raw rows
+            _shell.Invalidate();
         }
         return $"overlay {pane.Title}";
     }
@@ -337,7 +369,11 @@ public partial class MainWindow : Window
     void Feed_Ack(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not FeedView f) return;
-        Send(new { cmd = "ack", id = f.Id });
+        // The merged feed carries rows from several stores, and their ids are only unique
+        // within one. Ack has to go back to the store the row came from, or it would clear
+        // an unrelated row that happens to share a number (§6: writes stay pipe-addressed).
+        if (f.IsConcierge) SendConcierge(new { cmd = "ack", id = f.Id });
+        else Send(new { cmd = "ack", id = f.Id });
     }
 
     void Pane_Close(object sender, RoutedEventArgs e)
@@ -373,14 +409,30 @@ public partial class MainWindow : Window
         // so — the UI does not get to invent a dialog for that, because deciding where
         // work goes is the system's job, not a form for the operator to fill in.
         InputBox.Clear();
-        Send(new { cmd = "input", text });
+
+        // Prompt-first, and the front door is one box (WORKSPACES-CONCIERGE.md §4). WHICH
+        // door it opens depends on whether there is a group-scope question to answer at all:
+        //
+        //   one workspace on screen → straight to its daemon. There is nothing to
+        //     disambiguate (the concierge's own rung 1b), so involving the concierge would
+        //     add a hop, a possible failure and a possible model call to buy nothing — and it
+        //     would mean the input box stopped working whenever the concierge would not start.
+        //
+        //   several, or none awake  → through the concierge, which resolves the workspace,
+        //     WAKES it if asleep, creates one if the sentence names somewhere new, and only
+        //     then hands the whole sentence to that workspace's own dispatcher. Boot-to-zero
+        //     is the case this exists for: typing is how you start when nothing is running.
+        if (_vm.Bands.Count == 0 && !_vm.BootToZero) Send(new { cmd = "input", text });
+        else SendConcierge(new { cmd = "route", text, from = _vm.FocusedWorkspace });
     }
 
     void StartLane(string? suggestedName = null, string? firstMessage = null)
     {
-        var dlg = new StartLaneWindow(_instanceId, suggestedName, firstMessage) { Owner = this };
+        // The lane starts in the workspace holding the GRID, not the one this window was
+        // opened for: an empty slot the operator just clicked is in front of them.
+        var dlg = new StartLaneWindow(GridWorkspace, suggestedName, firstMessage) { Owner = this };
         if (dlg.ShowDialog() != true || dlg.StartedLane < 0) return;
-        _poller.Invalidate();
+        _shell.Invalidate();
         if (firstMessage is { Length: > 0 })
             Send(new { cmd = "say", lane = dlg.StartedLane, text = firstMessage });
     }
@@ -412,12 +464,62 @@ public partial class MainWindow : Window
         if (e.OriginalSource == Root) try { DragMove(); } catch { }
     }
 
-    /// <summary>Fire a daemon command off the UI thread; the reply becomes the status line.</summary>
+    /// <summary>Which workspace a click acts on: the one holding the grid. Falls back to the
+    /// workspace this window was opened for, which is what boot-to-zero leaves us with.</summary>
+    string GridWorkspace => _vm.FocusedWorkspace.Length > 0 ? _vm.FocusedWorkspace : _instanceId;
+
+    /// <summary>Fire a daemon command off the UI thread; the reply becomes the status line.
+    /// Writes stay pipe-addressed (§6): one click, one daemon's control pipe, never a
+    /// broadcast -- the shell is a bigger view, not a new authority.</summary>
     void Send(object req) => Task.Run(() =>
     {
-        var reply = DaemonClient.Send(_instanceId, req);
+        var reply = DaemonClient.Send(GridWorkspace, req);
         Dispatcher.BeginInvoke(() => _vm.Status = reply);
     });
+
+    /// <summary>Talk to the CONCIERGE rather than a workspace daemon — group-scope rows and
+    /// the input box's front door (§2/§6). A different pipe, deliberately: the concierge
+    /// belongs to no workspace and its row ids come from its own tables.</summary>
+    void SendConcierge(object req) => Task.Run(() =>
+    {
+        // Start-on-demand, or boot-to-zero would be a dead end: with nothing awake there is
+        // no concierge either, and typing is the only way out of that state (§4).
+        var reason = DaemonClient.EnsureConcierge();
+        var reply = reason ?? DaemonClient.Send(Instance.ConciergeId, req);
+        Dispatcher.BeginInvoke(() => _vm.Status = reply);
+    });
+
+    /// <summary>Click a band: swap which workspace holds the grid. A VIEW choice and nothing
+    /// more -- no store is written, no lane is moved, nothing is evicted (§6, and
+    /// LANE-LIFECYCLE §2 stands). The concierge is told, fire-and-forget, so its optimistic
+    /// delivery agrees with what the operator is actually looking at.</summary>
+    void Band_Click(object sender, MouseButtonEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not BandView b) return;
+        FocusWorkspace(b.WorkspaceId);
+        e.Handled = true;
+    }
+
+    /// <summary>The one path from a band to the grid — a click and the `ui workspace` verb
+    /// both land here. Accepts an id or a name, because a test naming "personal" should not
+    /// have to know its slug.</summary>
+    public string FocusWorkspace(string nameOrId)
+    {
+        var band = _vm.Bands.FirstOrDefault(b =>
+            b.WorkspaceId.Equals(nameOrId, StringComparison.OrdinalIgnoreCase) ||
+            b.Name.Equals(nameOrId, StringComparison.OrdinalIgnoreCase));
+        var id = band?.WorkspaceId ?? nameOrId;
+        if (!_shell.Focus(id)) return $"error: workspace '{nameOrId}' is not on screen";
+        _shell.Invalidate();
+        var label = band?.Name ?? id;
+        _vm.Status = $"workspace {label}";
+        // The concierge is told, fire-and-forget: swapping the grid is a VIEW choice and the
+        // window does not wait on anything, but the ladder's optimistic delivery uses
+        // focused_workspace, and delivering to one the operator stopped looking at is exactly
+        // the wrong-workspace error the review-behind then has to catch (§2.3).
+        SendConcierge(new { cmd = "focus", workspace = id });
+        return $"workspace {label}";
+    }
 
     [DllImport("user32.dll")]
     static extern bool FlashWindow(IntPtr hwnd, bool invert);

@@ -3,6 +3,14 @@ using System.Linq;               // whose implicit usings are narrower than the 
 
 namespace Dodona;
 
+/// <summary>No workspace could be resolved, and the message says what to do about it. A
+/// distinct type so <c>Program</c> can turn it into a usage-style failure rather than a stack
+/// trace — and so it is never confused with a genuine invariant violation.</summary>
+sealed class WorkspaceUnavailable : Exception
+{
+    public WorkspaceUnavailable(string message) : base(message) { }
+}
+
 /// <summary>
 /// Turning what the operator said into a workspace (docs/WORKSPACES-CONCIERGE.md §1/§4).
 /// Two entry points, and the difference between them matters:
@@ -45,7 +53,7 @@ static class WorkspaceResolve
         // in the pipe namespace, a pre-workspace daemon owns that store right now and
         // moving it would be the corruption vector §12 is built to avoid.
         if (migrating && Instance.IsLive(Instance.LegacyId(canonical)))
-            throw new InvalidOperationException(
+            throw new WorkspaceUnavailable(
                 $"a pre-workspace daemon is still running for {canonical}.\n" +
                 "       Its store cannot be moved while it is open (a live WAL file is not a file you move).\n" +
                 $"       Stop it first:  dodona stop-daemon --root \"{canonical}\"");
@@ -57,7 +65,7 @@ static class WorkspaceResolve
             // a git repo already owned elsewhere. Roll the empty workspace back so a
             // refusal does not litter the registry, and re-raise the loud message.
             reg.Forget(ws.Id, out _);
-            throw new InvalidOperationException(attachErr);
+            throw new WorkspaceUnavailable(attachErr);
         }
 
         string note;

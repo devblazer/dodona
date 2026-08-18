@@ -57,6 +57,10 @@ function TypeInDispatcher([string]$text) {
 
 $daemon = $null
 $uiProc = $null
+# The multi-workspace shell section starts a SECOND workspace daemon and a second UI; both
+# are tracked so the scoped cleanup in `finally` can stop them by pid (CLAUDE.md §4).
+$daemon2 = $null
+$shellUi = $null
 try {
     # Where this workspace keeps its state. Not `<root>\.dodona` any more: a workspace
     # is named rather than located, so the suite asks the binary (see tests/_workspace.ps1).
@@ -199,20 +203,109 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
 
     Dodona @("ui", "screenshot", "--out", "$out\after-typing.png") | Out-Null
     Dodona @("ui", "close") | Out-Null
+    Start-Sleep -Milliseconds 600
+
+    # =====================================================================================
+    # THE ONE-WINDOW SHELL (docs/WORKSPACES-CONCIERGE.md §4 and §6)
+    #
+    # Driven the way a person drives it -- open the shell, look at what is on screen, click a
+    # band -- because that is the whole reason this suite exists: dumps and screenshots proved
+    # the UI could REPORT correctly while the first thing a person tried was a dead end.
+    # =====================================================================================
+
+    # ---- boot-to-zero: a window over nothing awake. A REAL state (§4), not an error --------
+    # Nothing is awake yet (the first daemon is still up, so stop it for this check to mean
+    # what it says).
     Dodona @("stop-daemon") | Out-Null
+    Start-Sleep -Seconds 1
+    $shellUi = Start-Process $ui -ArgumentList "--shell", "--test-window" -PassThru
+    Start-Sleep -Seconds 3
+    function ShellDump() { (& $dodona ui dump --shell) | Out-String | ConvertFrom-Json }
+    $z = ShellDump
+    Check 'shell_boots_to_zero_with_nothing_awake' ($z.bootToZero -eq $true) ($z | ConvertTo-Json -Compress -Depth 3)
+    Check 'boot_to_zero_shows_no_bands' ((@($z.bands).Count) -eq 0) ''
+    Check 'boot_to_zero_still_has_an_input_box' ($z.window.h -gt 0 -and $z.workspaceName -eq '') $z.workspaceName
+
+    # ---- a workspace waking up appears, without the operator doing anything ---------------
+    $daemon = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws.Id -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon-back.out" -RedirectStandardError "$out\daemon-back.err"
+    Start-Sleep -Seconds 2
+    $z = ShellDump
+    Check 'a_waking_workspace_takes_the_grid' ($z.bootToZero -eq $false -and $z.workspaceName -eq $ws.Name) `
+        "bootToZero=$($z.bootToZero) ws=$($z.workspaceName)"
+
+    # ---- a SECOND awake workspace becomes a band (§6, shape B) ---------------------------
+    $root2 = Join-Path $env:TEMP ("dodona-uiuse2-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force "$root2\src" | Out-Null
+    Set-Content "$root2\src\other.cs" "// other"
+    Set-Content "$root2\dodona.json" (@{ main = 'main'; agent = $fake } | ConvertTo-Json)
+    git -C $root2 init -b main -q
+    git -C $root2 add -A
+    git -C $root2 -c user.email=t@t -c user.name=t commit -q -m init
+    $ws2 = Get-WorkspacePaths $dodona $root2
+    $daemon2 = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws2.Id -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon2.out" -RedirectStandardError "$out\daemon2.err"
+    Start-Sleep -Seconds 2
+    # Typed input, not lane-start: it makes a lane (so the band has a chip) AND announces
+    # (so the merged feed has a row from this workspace to label). lane-start announces
+    # nothing, which left the union with only one workspace's rows in it.
+    (& $dodona input "say sort out the OTHER thing" --workspace $ws2.Id) | Out-Null
+    Start-Sleep -Seconds 3
+
+    $z = ShellDump
+    $band = @($z.bands) | Where-Object { $_.name -eq $ws2.Name }
+    Check 'second_awake_workspace_becomes_a_band' ($null -ne $band) ((@($z.bands).name) -join ',')
+    Check 'band_carries_its_lane_chips' ((@($band.lanes).title) -contains 'OTHER') (@($band.lanes) | ConvertTo-Json -Compress)
+    Check 'focused_workspace_still_holds_the_grid' ($z.workspaceName -eq $ws.Name) $z.workspaceName
+    # A band is a VIEW, never an eviction: the banded workspace's lane is still alive in its
+    # own store, holding its own slot (LANE-LIFECYCLE §2 stands).
+    $otherStatus = (& $dodona status --workspace $ws2.Id) | Out-String
+    Check 'band_does_not_evict_or_demote_a_lane' ($otherStatus -match 'OTHER' -and $otherStatus -match 'state=alive') $otherStatus
+
+    # ---- clicking a band swaps which workspace holds the grid -----------------------------
+    # `ui workspace` goes through EXACTLY the code path a click takes (FocusWorkspace), the
+    # same reasoning as `ui type` -- and without needing focus, which is what stole the
+    # operator's keyboard when this suite used SendKeys.
+    $swap = (& $dodona ui workspace $ws2.Name --shell) | Out-String
+    Start-Sleep -Milliseconds 800
+    $z = ShellDump
+    Check 'band_click_swaps_the_grid' ($z.workspaceName -eq $ws2.Name) "swap='$($swap.Trim())' now='$($z.workspaceName)'"
+    $backBand = @($z.bands) | Where-Object { $_.name -eq $ws.Name }
+    Check 'the_previous_workspace_becomes_a_band' ($null -ne $backBand) ((@($z.bands).name) -join ',')
+    Check 'the_grid_shows_the_new_workspaces_lanes' `
+        ((@($z.slots | Where-Object { -not $_.empty }).title) -contains 'OTHER') `
+        ((@($z.slots | Where-Object { -not $_.empty }).title) -join ',')
+
+    # ---- the feed is a UNION across workspaces, with a workspace chip per row (§6) --------
+    $wsLabels = @(@($z.feed) | ForEach-Object { $_.workspace } | Where-Object { $_ } | Select-Object -Unique)
+    Check 'merged_feed_spans_both_workspaces' ($wsLabels.Count -ge 2) ($wsLabels -join ',')
+    Check 'merged_feed_labels_rows_by_workspace' `
+        (($wsLabels -contains $ws.Name) -and ($wsLabels -contains $ws2.Name)) ($wsLabels -join ',')
+
+    # --shell, not the Dodona helper: that one appends --root and would address the
+    # single-workspace window's pipe, which is already closed.
+    (& $dodona ui screenshot --out "$out\shell-bands.png" --shell) | Out-Null
+    (& $dodona ui close --shell) | Out-Null
+    Start-Sleep -Milliseconds 600
+    Dodona @("stop-daemon") | Out-Null
+    (& $dodona stop-daemon --workspace $ws2.Id) | Out-Null
 }
 finally {
-    if ($uiProc -and -not $uiProc.HasExited) { try { Stop-Process -Id $uiProc.Id -Force } catch { } }
-    if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
+    foreach ($proc in $uiProc, $shellUi, $daemon, $daemon2) {
+        if ($proc -and -not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force } catch { } }
+    }
     # Scoped cleanup: only THIS test's processes, resolved from its own shim-info
     # files. Killing by process NAME once murdered the operator's live session's shim
     # and UI mid-dogfood (17: tests collide with nothing -- including the instance the
     # operator is using right now).
-    Get-ChildItem "$wsDir\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
-        $si = Get-Content $_.FullName | ConvertFrom-Json
-        foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
-    }
+    # Both workspaces' shims, each resolved from its OWN workspace directory.
+    Stop-WorkspaceShims $wsDir
+    if ($ws2) { Stop-WorkspaceShims $ws2.Dir }
     Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
+    # The shell's input box starts a concierge on demand (§4: boot-to-zero must not be a dead
+    # end), so this suite is responsible for stopping it -- a concierge is machine-global, and
+    # a leaked one used to answer the NEXT suite's questions from this suite's registry.
+    (& $dodona concierge-stop) 2>$null | Out-Null
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
 }

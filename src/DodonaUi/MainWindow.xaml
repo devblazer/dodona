@@ -72,8 +72,19 @@
                 <ColumnDefinition Width="380"/>
             </Grid.ColumnDefinitions>
 
-            <!-- ══ the lane grid: even 3x2, fixed positions, never reflows (§8) ══ -->
-            <ItemsControl x:Name="PaneGrid" Grid.Column="0" ItemsSource="{Binding Slots}">
+            <!-- ══ the focused workspace's grid, with a band strip beneath it (§6) ══
+                 Shape B: the focused workspace gets the whole 3x2 grid; every OTHER awake
+                 workspace is a compact band of lane chips. Both lives visible at once
+                 without halving every pane — which is what a merged grid and tabs-only each
+                 got wrong in opposite directions (§8). -->
+            <Grid Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+            <ItemsControl x:Name="PaneGrid" Grid.Row="0" ItemsSource="{Binding Slots}"
+                          Visibility="{Binding GridVisibility}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
                         <UniformGrid Columns="3" Rows="2"/>
@@ -147,6 +158,78 @@
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
 
+                <!-- boot-to-zero: no workspace awake at all. A REAL state, not an error
+                     (§4) — the input box below is still the front door, because typing is
+                     how you start and clicking is only for looking. -->
+                <StackPanel x:Name="ZeroState" Grid.Row="0" Visibility="{Binding ZeroVisibility}"
+                            HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock Text="nothing awake" FontSize="20" Foreground="#FF6B7079"
+                               HorizontalAlignment="Center"/>
+                    <TextBlock Text="Say what you want done, and where — Dodona will wake it or make it."
+                               FontSize="12" Foreground="#FF4A4F57" Margin="0,10,0,0"
+                               HorizontalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- ══ bands: one row per other awake workspace (§6) ══
+                     The tray idiom at workspace scale. Clicking one swaps which workspace
+                     holds the grid — a VIEW choice only: no lane is demoted, evicted or
+                     trayed by being in a band (LANE-LIFECYCLE §2 stands). -->
+                <ScrollViewer Grid.Row="1" MaxHeight="132" VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled" Margin="0,0,0,2"
+                              Visibility="{Binding BandsVisibility}">
+                <ItemsControl x:Name="BandStrip" ItemsSource="{Binding Bands}" Margin="5,2,5,0">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Margin="0,3,0,0" Padding="8,5" CornerRadius="6" Background="#FF1B1E23"
+                                    BorderBrush="{Binding WorkspaceBrush}" BorderThickness="2,0,0,0"
+                                    Cursor="Hand" MouseLeftButtonDown="Band_Click"
+                                    AutomationProperties.Name="workspace-band"
+                                    ToolTip="Click to give this workspace the grid">
+                                <DockPanel>
+                                    <Rectangle DockPanel.Dock="Left" Width="9" Height="9" RadiusX="2" RadiusY="2"
+                                               Fill="{Binding WorkspaceBrush}" Margin="0,0,7,0" VerticalAlignment="Center"/>
+                                    <TextBlock DockPanel.Dock="Left" Text="{Binding Name}" FontWeight="Bold" FontSize="12"
+                                               Foreground="#FFC6CCD4" VerticalAlignment="Center"/>
+                                    <Border DockPanel.Dock="Left" Background="#FFCB4B4B" CornerRadius="8" Padding="5,0"
+                                            Margin="7,0,0,0" Visibility="{Binding BadgeVisibility}" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding BadgeText, Mode=OneWay}" FontSize="10"
+                                                   Foreground="White" FontWeight="Bold"/>
+                                    </Border>
+                                    <TextBlock DockPanel.Dock="Right" Text="{Binding Summary}" FontSize="10"
+                                               Foreground="#FF6B7079" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                    <!-- lane chips: awareness, not panes -->
+                                    <ItemsControl ItemsSource="{Binding Lanes}" Margin="10,0,0,0" VerticalAlignment="Center">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Margin="0,0,5,0" Padding="5,1" CornerRadius="3" Background="#FF262A30"
+                                                        ToolTip="{Binding ToolTipText}">
+                                                    <DockPanel>
+                                                        <Rectangle DockPanel.Dock="Left" Width="6" Height="6" RadiusX="1" RadiusY="1"
+                                                                   Fill="{Binding ChipBrush}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                                        <TextBlock DockPanel.Dock="Left" Text="{Binding Title}" FontSize="10"
+                                                                   Foreground="#FF9BA3AD" VerticalAlignment="Center"/>
+                                                        <Border DockPanel.Dock="Right" Background="#FFCB4B4B" CornerRadius="6"
+                                                                Padding="4,0" Margin="4,0,0,0" VerticalAlignment="Center"
+                                                                Visibility="{Binding BadgeVisibility}">
+                                                            <TextBlock Text="{Binding BadgeText, Mode=OneWay}" FontSize="9"
+                                                                       Foreground="White" FontWeight="Bold"/>
+                                                        </Border>
+                                                    </DockPanel>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </DockPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                </ScrollViewer>
+            </Grid>
+
             <!-- ══ dispatcher column: fixed on the right, feed + tray + input (§8) ══ -->
             <Grid Grid.Column="1" Margin="5">
                 <Grid.RowDefinitions>
@@ -157,14 +240,16 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <!-- which project this grid is showing; click (or Ctrl+P) to open another -->
+                <!-- which WORKSPACE holds the grid; click (or Ctrl+P) to open another. The
+                     feed below is a union across workspaces (§6), so the header names the one
+                     the grid is showing rather than the one the window was opened for. -->
                 <DockPanel Grid.Row="0" Margin="4,0,0,6">
                     <TextBlock DockPanel.Dock="Left" Text="DISPATCHER" FontWeight="Bold" FontSize="14" Foreground="#FF9AA3AE"/>
                     <Button DockPanel.Dock="Right" Click="Project_Click" HorizontalAlignment="Right"
                             Background="Transparent" BorderThickness="0" Padding="4,0" Cursor="Hand"
                             ToolTip="{Binding ProjectPath}">
                         <TextBlock FontSize="11" Foreground="#FF6FA8DC">
-                            <Run Text="{Binding ProjectName, Mode=OneWay}"/><Run Text=" ▾"/>
+                            <Run Text="{Binding WorkspaceLabel, Mode=OneWay}"/><Run Text=" ▾"/>
                         </TextBlock>
                     </Button>
                 </DockPanel>
@@ -184,8 +269,17 @@
                                             <Button DockPanel.Dock="Right" Content="ack" FontSize="10" Padding="6,0" Margin="6,0,0,0"
                                                     VerticalAlignment="Top" Visibility="{Binding AckVisibility}"
                                                     Click="Feed_Ack" Background="#FF31363D" Foreground="#FFD8DCE0" BorderThickness="0"/>
+                                            <!-- Two axes, deliberately different palettes: the
+                                                 lane name in the LANE's colour, the workspace
+                                                 chip in the WORKSPACE's. Reusing the six lane
+                                                 hues for workspaces would say a workspace is a
+                                                 seventh lane. Collapsed entirely when only one
+                                                 workspace is on screen — the axis carries no
+                                                 information there (§6). -->
                                             <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="#FFC6CCD4">
-                                                <Run FontWeight="Bold" Text="{Binding LaneTitle, Mode=OneWay}"
+                                                <Run Text="{Binding Workspace, Mode=OneWay}" FontSize="9"
+                                                     Foreground="{Binding WorkspaceBrush}"/><Run
+                                                     Text=" " /><Run FontWeight="Bold" Text="{Binding LaneTitle, Mode=OneWay}"
                                                      Foreground="{Binding ChipBrush}"/><Run Text="  "/><Run Text="{Binding Body, Mode=OneWay}"/>
                                             </TextBlock>
                                         </DockPanel>

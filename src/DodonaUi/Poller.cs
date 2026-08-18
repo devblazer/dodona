@@ -17,30 +17,14 @@ sealed class Poller
 
     public Poller(StoreReader reader) => _reader = reader;
 
-    public async Task RunAsync(MainVm vm, Func<Snapshot, Task> apply, CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                if (vm.PoseName is null)
-                {
-                    var snap = Build();
-                    var json = JsonSerializer.Serialize(snap);
-                    if (json != _lastJson)
-                    {
-                        _lastJson = json;
-                        await apply(snap);
-                    }
-                }
-            }
-            catch { /* store mid-migration or daemon restarting: next tick */ }
-            try { await Task.Delay(250, ct); } catch (TaskCanceledException) { break; }
-        }
-    }
-
-    /// <summary>Force re-apply on the next tick (used when leaving a pose).</summary>
+    /// <summary>The 250ms loop moved up to <see cref="Shell"/> when the window became one
+    /// view over N workspaces (WORKSPACES-CONCIERGE.md §6): there is one window, so there is
+    /// one tick and one change-gate over the MERGED snapshot. A per-workspace loop would
+    /// re-render the whole window N times a tick, and two of them disagreeing about whether
+    /// anything changed is how a pose gets overwritten.</summary>
     public void Invalidate() => _lastJson = "";
+
+    internal string LastJson { get => _lastJson; set => _lastJson = value; }
 
     /// <summary>Presence, made honest about time (docs/LANE-LIFECYCLE.md §5). A static
     /// `working…` looks identical whether the agent is thinking hard or wedged; a clock

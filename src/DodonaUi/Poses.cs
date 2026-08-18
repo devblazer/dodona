@@ -8,7 +8,14 @@ namespace DodonaUi;
 /// </summary>
 static class Poses
 {
-    public static readonly string[] Names = { "full", "badges", "blocked", "feed", "empty-slot", "tray", "overlay", "long" };
+    public static readonly string[] Names =
+    {
+        "full", "badges", "blocked", "feed", "empty-slot", "tray", "overlay", "long",
+        // The multi-workspace shell (WORKSPACES-CONCIERGE.md §6). Every new affordance owes
+        // a deterministic pose (CLAUDE.md §3), and these are the three states a screenshot
+        // could not otherwise reach without two live daemons and a concierge.
+        "bands", "merged-feed", "boot-zero",
+    };
 
     static PaneSnap Pane(long id, string title, string presence, int badge = 0, bool blocked = false,
                          bool focused = false, params string[] lines) =>
@@ -116,10 +123,79 @@ static class Poses
                 };
                 return (new Snapshot(s, new(), Feed(3), ov), "WATER", null);
             }
+
+            // ---- the multi-workspace shell (§6) ------------------------------------------
+
+            // Shape B, posed: the focused workspace keeps the whole grid, two other awake
+            // workspaces are bands. This is the fixture that catches bands stealing the
+            // grid's height, or a band's chips wrapping into a second row unreadably.
+            case "bands":
+                return (new Snapshot(SixPanes(), new(), Feed(4), null)
+                {
+                    FocusedWorkspace = "dodona-dev-3f9a",
+                    FocusedWorkspaceName = "dodona-dev",
+                    Bands = Bands(),
+                }, null, null);
+
+            // The feed as a UNION: rows from three workspaces plus the concierge's own
+            // group-scope voice, which belongs to no workspace's column by definition.
+            case "merged-feed":
+                return (new Snapshot(SixPanes(), new(), MergedFeed(), null)
+                {
+                    FocusedWorkspace = "dodona-dev-3f9a",
+                    FocusedWorkspaceName = "dodona-dev",
+                    Bands = Bands(),
+                }, null, null);
+
+            // Boot-to-zero: no workspace awake. A REAL state (§4), not an error — the grid is
+            // an invitation and the input box is still the front door. Worth a pose precisely
+            // because it is the first thing a new operator sees and the easiest to get wrong.
+            case "boot-zero":
+                return (new Snapshot(new PaneSnap?[6], new(), new List<FeedSnap>
+                {
+                    new(1, "", "2026-08-18T09:00:00Z",
+                        "not sure which workspace “tidy up the shader warnings” is for. dodona-dev / personal, or new?",
+                        false, true) { Workspace = "[dodona]", IsConcierge = true },
+                }, null)
+                {
+                    FocusedWorkspace = "", FocusedWorkspaceName = "",
+                }, null, null);
+
             default:
                 return null;
         }
     }
+
+    /// <summary>Two other awake workspaces, as bands. `personal` carries an attention badge
+    /// so the fixture proves a band can say "you are needed over here" without the grid.</summary>
+    static List<BandSnap> Bands() => new()
+    {
+        new BandSnap("personal-71c4", "personal", true, new List<BandLaneSnap>
+        {
+            new(1, "GARDEN", "idle", 2, false),
+            new(2, "TAXES", "waiting on you: merge", 1, true),
+            new(3, "PHOTOS", "read: exif.py", 0, false),
+        }, Tray: 0, Badge: 3),
+        new BandSnap("work-5e07", "work", true, new List<BandLaneSnap>
+        {
+            new(4, "INVOICES", "bash: pytest", 0, false),
+            new(5, "ROSTER", "idle", 0, false),
+        }, Tray: 0, Badge: 0),
+    };
+
+    static List<FeedSnap> MergedFeed() => new()
+    {
+        new(810, "", "2026-08-18T12:06:00Z",
+            "“grease the winch” went to work, but it looks like personal. It was already delivered — resend if you meant personal.",
+            false, true) { Workspace = "[dodona]", IsConcierge = true },
+        new(809, "TAXES", "2026-08-18T12:05:00Z", "waiting on you: merge ticket 12 'Q3 return' — dodona approve 12", false, false) { Workspace = "personal" },
+        new(808, "WATER", "2026-08-18T12:04:00Z", "→ retargeted to WATER (classifier, high)", false, false) { Workspace = "dodona-dev" },
+        new(807, "INVOICES", "2026-08-18T12:03:00Z", "landed ticket 4 on main; verify green", true, false) { Workspace = "work" },
+        new(806, "", "2026-08-18T12:02:00Z",
+            "“the beacon gearbox” → personal; learned “gearbox”", true, true) { Workspace = "[dodona]", IsConcierge = true },
+        new(805, "GARDEN", "2026-08-18T12:01:00Z", "claim extended: path:beds/rotation.md", false, false) { Workspace = "personal" },
+        new(804, "SKYBOX", "2026-08-18T12:00:00Z", "started this lane on opus/high for “the sunset bands too hard”", true, false) { Workspace = "dodona-dev" },
+    };
 
     static List<LineSnap> LongTranscript() => new()
     {

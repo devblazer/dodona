@@ -62,6 +62,44 @@ static class DaemonClient
         return "started a daemon but it never answered its control pipe";
     }
 
+    /// <summary>
+    /// Make sure a concierge is running before talking to it — start-on-demand, exactly as for
+    /// a workspace daemon (§13: the store is always there, the process is summoned).
+    ///
+    /// It matters most in the state where nothing else is running at all: boot-to-zero
+    /// (§4) is a window with no workspace awake, and typing is how the operator gets out of
+    /// it. An input box that needed a concierge someone had remembered to start would make
+    /// that state a dead end — which is precisely the failure `ui-use` exists to catch.
+    /// </summary>
+    public static string? EnsureConcierge(int timeoutMs = 20000)
+    {
+        if (Probe(Instance.ConciergeId)) return null;
+        var exe = DodonaExe();
+        if (exe is null) return "cannot find dodona.exe (set DODONA_EXE, or run from a published folder)";
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(exe)
+            {
+                UseShellExecute = true,                 // detached: it must outlive this UI
+                WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
+                // Neutral cwd: the concierge is a manager and must load no project's
+                // CLAUDE.md or skills (commit 19dad3d). It has no project anyway.
+                WorkingDirectory = Paths.NeutralCwd(),
+            };
+            psi.ArgumentList.Add("concierge");
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch (Exception ex) { return $"could not start the concierge: {ex.Message}"; }
+
+        var deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (Probe(Instance.ConciergeId)) return null;
+            Thread.Sleep(200);
+        }
+        return "started a concierge but it never answered its control pipe";
+    }
+
     static bool Probe(string instanceId)
     {
         var pipe = new NamedPipeClientStream(".", Instance.CtlPipe(instanceId), PipeDirection.InOut);

@@ -64,6 +64,42 @@ static class Instance
     public static string LegacyId(string anyPath) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Canonical(anyPath).ToLowerInvariant())))[..8].ToLowerInvariant();
 
+    /// <summary>
+    /// The concierge's id (WORKSPACES-CONCIERGE.md §2). Not generated like a workspace slug:
+    /// there is exactly one per machine, and its pipe name must be discoverable by a client
+    /// that has read nothing. A workspace slug is always `&lt;name&gt;-&lt;4 hex&gt;`, so this
+    /// can never collide with one. It lives HERE rather than on Concierge so the UI can
+    /// address the concierge's pipe without compiling the daemon in.
+    ///
+    /// **DODONA_HOME suffixes it, and that is not cosmetic.** The concierge is machine-global
+    /// by design — one mutex, one pipe — but DODONA_HOME creates a separate logical machine
+    /// with its own registry and stores. Without this suffix a concierge started under a test
+    /// home kept serving clients that pointed at a DIFFERENT registry, because the mutex made
+    /// the second one refuse to start and the CLI happily talked to the first. Measured: a
+    /// leaked concierge from the ui-use suite answered the concierge suite's questions with
+    /// ui-use's workspaces, failing 21 checks that pass in isolation. Isolation has to be
+    /// total or it is not isolation.
+    /// </summary>
+    public static string ConciergeId { get; } = Scoped("concierge");
+
+    /// <summary>The SHELL's id — a window opened over no particular workspace
+    /// (WORKSPACES-CONCIERGE.md §4's boot-to-zero). It owns no store and no daemon; it exists
+    /// only so `dodona-shell-ui` is a nameable pipe, because a window that shows every
+    /// workspace cannot borrow the ui pipe of one of them. Scoped by DODONA_HOME for the same
+    /// reason the concierge is: two isolated shells must not share a pipe.</summary>
+    public static string ShellId { get; } = Scoped("shell");
+
+    /// <summary>Under the default home these are plain `concierge` / `shell`, so nothing about
+    /// an ordinary installation changes. Under a DODONA_HOME they gain 8 hex of that path.</summary>
+    static string Scoped(string name)
+    {
+        var home = Environment.GetEnvironmentVariable("DODONA_HOME");
+        if (home is null or "") return name;
+        var hash = Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes(Canonical(home).ToLowerInvariant())))[..8].ToLowerInvariant();
+        return $"{name}-{hash}";
+    }
+
     public static string CtlPipe(string id) => $"dodona-{id}-ctl";
     public static string UiPipe(string id) => $"dodona-{id}-ui";
     public static string HandoffPipe(string id) => $"dodona-{id}-handoff";

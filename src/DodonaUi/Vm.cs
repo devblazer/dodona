@@ -20,11 +20,55 @@ public record PaneSnap(long LaneId, string Title, string State, string Presence,
     /// <summary>Highest user_input row id — moves when a routed message lands here.</summary>
     public long LastInputId { get; init; }
 }
-public record FeedSnap(long Id, string LaneTitle, string Ts, string Body, bool Acked, bool IsSystem);
+public record FeedSnap(long Id, string LaneTitle, string Ts, string Body, bool Acked, bool IsSystem)
+{
+    /// <summary>Which workspace this row came from — the merged feed's own axis (§6). Empty
+    /// when only one workspace is open, so a single-workspace operator never sees a chip
+    /// answering a question they did not ask. `[dodona]` for the concierge's own rows: a
+    /// group-scope clarification belongs to no workspace's column by definition.</summary>
+    public string Workspace { get; init; } = "";
+
+    /// <summary>Set on concierge rows only. The feed's ack button routes to the concierge's
+    /// pipe rather than a workspace daemon's — writes stay pipe-addressed (§6), and the
+    /// concierge is not a seventh workspace any more than Dodona is a seventh lane.</summary>
+    public bool IsConcierge { get; init; }
+}
+
+/// <summary>One lane on a band: a chip, its attention badge, and nothing else. A band is
+/// "the tray idiom at workspace scale" (§6) — awareness, not a pane.</summary>
+public record BandLaneSnap(long LaneId, string Title, string Presence, int Badge, bool Blocked);
+
+/// <summary>
+/// One awake workspace that is NOT holding the grid (§6, shape B). A compact row of lane
+/// chips with attention badges, so both lives stay visible at once without halving every
+/// pane — which is what the rejected single-merged-grid and tabs-only shapes each got wrong
+/// in opposite directions (§8).
+///
+/// **A band is a VIEW, never an eviction.** No lane is demoted, trayed or stopped by being
+/// in one, and `LANE-LIFECYCLE.md` §2 (slot-pressure eviction rejected) stands untouched:
+/// the six-slot cap, `focused_lane` and the dispatcher lane all remain per-workspace
+/// concepts inside each store.
+/// </summary>
+public record BandSnap(string WorkspaceId, string Name, bool Live, List<BandLaneSnap> Lanes, int Tray, int Badge);
+
 public record Snapshot(PaneSnap?[] Slots, List<string> Tray, List<FeedSnap> Feed, PaneSnap? Overlay)
 {
     /// <summary>The 5-hour-window line, or null when no reading has ever arrived.</summary>
     public string? Quota { get; init; }
+
+    /// <summary>Every awake workspace that is not holding the grid (§6).</summary>
+    public List<BandSnap> Bands { get; init; } = new();
+
+    /// <summary>Which workspace holds the grid, and what it is called. Empty on boot-to-zero
+    /// — a window with no workspace awake, just feed and input, which §4 calls out as a real
+    /// state rather than an error to be avoided.</summary>
+    public string FocusedWorkspace { get; init; } = "";
+    public string FocusedWorkspaceName { get; init; } = "";
+
+    /// <summary>True when nothing is awake at all: the grid is replaced by an invitation, and
+    /// the input box is still the front door (§4 — clicking is for looking, typing is for
+    /// starting).</summary>
+    public bool BootToZero => FocusedWorkspace.Length == 0;
 }
 
 // ---------------------------------------------------------------- bindable views
@@ -171,6 +215,51 @@ public sealed class PaneView
     };
 }
 
+/// <summary>One lane chip on a band. Title plus a badge; deliberately not a pane.</summary>
+public sealed class BandLaneView
+{
+    public long LaneId { get; init; }
+    public string Title { get; init; } = "";
+    public int Badge { get; init; }
+    public bool Blocked { get; init; }
+    public string BadgeText => Badge > 9 ? "9+" : Badge.ToString();
+    public Visibility BadgeVisibility => Badge > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Brush ChipBrush => Blocked ? Brushes.White : new SolidColorBrush(Color.FromRgb(0x6B, 0x70, 0x79));
+    public string ToolTipText => $"{Title}{(Blocked ? " — waiting on you" : "")}";
+}
+
+/// <summary>
+/// One awake-but-not-focused workspace, as a compact row (§6). Clicking it swaps which
+/// workspace holds the grid — the only thing a band does, because it is a view choice and
+/// nothing more.
+/// </summary>
+public sealed class BandView
+{
+    /// <summary>Workspaces get their own palette, distinct from the six LANE colours. A
+    /// workspace is not a seventh lane, and reusing the lane palette would say it was —
+    /// the same reasoning that gives Dodona's own feed rows the trunk colour and a round
+    /// chip rather than a hue from the six.</summary>
+    public static readonly string[] Palette = { "#7EA6C9", "#C99E7E", "#9EC97E", "#C97EA6", "#A67EC9", "#7EC9C9" };
+
+    public string WorkspaceId { get; init; } = "";
+    public string Name { get; init; } = "";
+    public bool Live { get; init; }
+    public int Tray { get; init; }
+    public int Badge { get; init; }
+    public List<BandLaneView> Lanes { get; init; } = new();
+
+    public int Index { get; init; }
+    public string ColorHex => Palette[Index % Palette.Length];
+    public Brush WorkspaceBrush => new SolidColorBrush((Color)ColorConverter.ConvertFromString(ColorHex));
+    public Visibility BadgeVisibility => Badge > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public string BadgeText => Badge > 99 ? "99+" : Badge.ToString();
+    /// <summary>An awake workspace with no work lanes still gets a band — it is awake, and
+    /// hiding it would make "which of my lives are running" unanswerable.</summary>
+    public string Summary => Lanes.Count == 0
+        ? "no lanes"
+        : $"{Lanes.Count} lane{(Lanes.Count == 1 ? "" : "s")}" + (Tray > 0 ? $" · {Tray} in tray" : "");
+}
+
 public sealed class FeedView
 {
     public long Id { get; init; }
@@ -181,6 +270,16 @@ public sealed class FeedView
     public Brush ChipBrush { get; init; } = Brushes.Gray;
     public double RowOpacity => Acked ? 0.45 : 1.0;
     public Visibility AckVisibility => Acked ? Visibility.Collapsed : Visibility.Visible;
+
+    /// <summary>Which workspace this row came from (§6). Empty in a single-workspace window,
+    /// where the axis carries no information and a chip would be noise.</summary>
+    public string Workspace { get; init; } = "";
+    public Brush WorkspaceBrush { get; init; } = Brushes.Gray;
+    public Visibility WorkspaceVisibility => Workspace.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>A concierge row: acking it must reach the CONCIERGE's pipe, not a workspace
+    /// daemon's. Writes stay pipe-addressed (§6) and the ids come from different tables.</summary>
+    public bool IsConcierge { get; init; }
 
     // Every feed row is an announcement, so colouring by kind would say nothing here —
     // the axis that matters is WHICH LANE, and it was carried by an 8px chip alone. The
@@ -205,6 +304,29 @@ public sealed class MainVm : INotifyPropertyChanged
     public ObservableCollection<FeedView> Feed { get; } = new();
     public ObservableCollection<string> Tray { get; } = new();
     public ObservableCollection<ToastView> Toasts { get; } = new();
+
+    /// <summary>Every awake workspace not holding the grid (§6). Empty in the ordinary
+    /// single-workspace case, which is why the band strip collapses to nothing there.</summary>
+    public ObservableCollection<BandView> Bands { get; } = new();
+
+    public Visibility BandsVisibility => Bands.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    string _focusedWorkspace = "", _focusedWorkspaceName = "";
+    public string FocusedWorkspace { get => _focusedWorkspace; private set { _focusedWorkspace = value; Notify(nameof(FocusedWorkspace)); } }
+    public string FocusedWorkspaceName { get => _focusedWorkspaceName; private set { _focusedWorkspaceName = value; Notify(nameof(FocusedWorkspaceName)); Notify(nameof(WorkspaceLabel)); } }
+
+    /// <summary>What the header says. `FocusedWorkspaceName` is the honest value a dump
+    /// reports (empty on boot-to-zero); this is the same thing made readable, because a bare
+    /// "▾" in the corner looks like a bug rather than a state.</summary>
+    public string WorkspaceLabel => _focusedWorkspaceName.Length > 0 ? _focusedWorkspaceName : "no workspace";
+
+    bool _bootToZero;
+    /// <summary>No workspace awake at all — a real state, not an error (§4). The grid is
+    /// replaced by an invitation and the input box still works, because typing is the front
+    /// door whether anything is running or not.</summary>
+    public bool BootToZero { get => _bootToZero; private set { _bootToZero = value; Notify(nameof(BootToZero)); Notify(nameof(GridVisibility)); Notify(nameof(ZeroVisibility)); } }
+    public Visibility GridVisibility => _bootToZero ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility ZeroVisibility => _bootToZero ? Visibility.Visible : Visibility.Collapsed;
 
     PaneView? _overlayPane;
     public PaneView? OverlayPane { get => _overlayPane; set { _overlayPane = value; Notify(nameof(OverlayPane)); Notify(nameof(OverlayVisible)); } }
@@ -280,18 +402,51 @@ public sealed class MainVm : INotifyPropertyChanged
                 ? PaneView.From(p, i, pulsing: _pulseUntil.TryGetValue(p.LaneId, out var u) && u > now)
                 : new PaneView { Slot = i, IsEmpty = true });
 
+        // Bands first: the feed's workspace chips borrow their colours, so a row from
+        // "personal" is the same hue in the feed as the band it came from.
+        FocusedWorkspace = s.FocusedWorkspace;
+        FocusedWorkspaceName = s.FocusedWorkspaceName;
+        BootToZero = s.BootToZero;
+
+        Bands.Clear();
+        for (int i = 0; i < s.Bands.Count; i++)
+        {
+            var b = s.Bands[i];
+            Bands.Add(new BandView
+            {
+                WorkspaceId = b.WorkspaceId, Name = b.Name, Live = b.Live, Tray = b.Tray, Badge = b.Badge,
+                // +1 so the FOCUSED workspace owns palette slot 0 — its own colour stays
+                // stable as bands come and go, which matters because the operator's eye uses
+                // it to tell "which life am I looking at".
+                Index = i + 1,
+                Lanes = b.Lanes.Select(l => new BandLaneView
+                { LaneId = l.LaneId, Title = l.Title, Badge = l.Badge, Blocked = l.Blocked }).ToList(),
+            });
+        }
+        Notify(nameof(BandsVisibility));
+
+        var wsBrush = Bands.ToDictionary(b => b.Name, b => b.WorkspaceBrush, StringComparer.OrdinalIgnoreCase);
+        var focusedBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(BandView.Palette[0]));
+
         var titleToBrush = Slots.Where(x => !x.IsEmpty).ToDictionary(x => x.Title, x => x.LaneBrush, StringComparer.OrdinalIgnoreCase);
         Feed.Clear();
         foreach (var f in s.Feed)
             Feed.Add(new FeedView
             {
                 Id = f.Id, LaneTitle = f.LaneTitle, Body = f.Body, Acked = f.Acked, IsSystem = f.IsSystem,
+                Workspace = f.Workspace, IsConcierge = f.IsConcierge,
                 // The dispatcher lane holds no grid slot, so it has no slot colour to look
                 // up — before this it fell through to grey, which made the system's own
                 // voice the least identifiable thing in the feed.
-                ChipBrush = f.IsSystem ? Ink.System
+                ChipBrush = f.IsSystem || f.IsConcierge ? Ink.System
                           : titleToBrush.TryGetValue(f.LaneTitle, out var b) ? b
                           : Brushes.Gray,
+                // The workspace chip is a SECOND axis, and it has to be a different one:
+                // lane colour already means which lane, so which workspace gets its own
+                // palette rather than a second reading of the same six hues.
+                WorkspaceBrush = f.IsConcierge ? Ink.System
+                               : wsBrush.TryGetValue(f.Workspace, out var wb) ? wb
+                               : focusedBrush,
             });
 
         Tray.Clear();

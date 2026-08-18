@@ -82,10 +82,9 @@ sealed record Verdict(string Rung, string? WorkspaceId, string? WorkspaceName, s
 /// </summary>
 sealed class Concierge
 {
-    /// <summary>A fixed id, not a generated slug: there is exactly one per machine, and its
-    /// pipe name has to be discoverable by a client that has read nothing. A workspace slug
-    /// is always `&lt;name&gt;-&lt;4 hex&gt;`, so `concierge` can never collide with one.</summary>
-    public const string Id = "concierge";
+    /// <summary>Defined on <see cref="Instance"/> so the UI can address this pipe without
+    /// compiling the daemon in; see the comment there for why it is fixed, not generated.</summary>
+    public static string Id => Instance.ConciergeId;
 
     readonly ConciergeStore _store;
     readonly SemaphoreSlim _loLock = new(1, 1), _hiLock = new(1, 1);
@@ -189,6 +188,13 @@ sealed class Concierge
                 break;
             }
 
+            case "route":
+            {
+                foreach (var line in await RouteAsync(e.GetProperty("text").GetString()!, Opt(e, "from")))
+                    w.WriteLine(line);
+                break;
+            }
+
             case "questions":
                 foreach (var q in _store.OpenQuestions())
                     w.WriteLine($"{q.Id}\t{q.Input}\t{q.Candidates}");
@@ -212,6 +218,24 @@ sealed class Concierge
             case "ack":
                 w.WriteLine(_store.FeedAck(e.GetProperty("id").GetInt64()) ? "acked" : "error: no such feed row");
                 break;
+
+            case "focus":
+            {
+                // Which workspace the operator is LOOKING at, told by the shell when they
+                // click a band (§6). It is view state as far as the window is concerned — the
+                // shell swaps its grid immediately and does not wait for this — but the
+                // ladder needs it: rung 1b/optimistic focus delivers to the focused workspace,
+                // and delivering to one the operator stopped looking at ten minutes ago is
+                // exactly the wrong-workspace error the review-behind then has to catch.
+                var id = e.GetProperty("workspace").GetString() ?? "";
+                using var reg = new Registry();
+                var ws = reg.ById(id);
+                if (ws is null) { w.WriteLine($"error: no workspace {id}"); break; }
+                _store.KvSet("focused_workspace", ws.Id);
+                _store.Event("focused", null, $"{ws.Name} ({ws.Id})");
+                w.WriteLine($"focused {ws.Name}");
+                break;
+            }
 
             case "review":
                 // Fire-and-forget by contract (§2.3): the delivery already happened, and a
@@ -362,6 +386,104 @@ sealed class Concierge
         // feed carrying its best candidates; the answer becomes an alias, so rung 4 decays
         // toward rung 1 with use.
         return Done(Ask(text, all, candidateName is null ? null : $"it sounded like “{candidateName}”"));
+    }
+
+    /// <summary>
+    /// Prompt-first, end to end (§4): resolve which workspace, WAKE its daemon if it is
+    /// asleep, and hand the sentence to that daemon's own dispatcher.
+    ///
+    /// "Do X on blazing-trumpets" must work identically whether that workspace is focused,
+    /// open, asleep, or has never had a daemon woken. The per-workspace half already existed
+    /// — start-on-demand revives daemons, lane auto-create turns a sentence into a lane — so
+    /// all that was missing was name→workspace resolution when nothing is running, which is
+    /// the registry's real job.
+    ///
+    /// **The concierge stops at the workspace boundary.** It never picks the lane, never
+    /// names it, never decides whether it deserves a ticket: it hands the whole sentence to
+    /// `dodona input` on that workspace's pipe and the per-workspace brain takes it from
+    /// there. Two full ladders, one question each (§2/§8) — that separation is the design,
+    /// not an implementation detail, and this method is where it would be easiest to break.
+    /// </summary>
+    async Task<List<string>> RouteAsync(string text, string? from)
+    {
+        var lines = new List<string>();
+        var v = await ResolveAsync(text, from);
+
+        if (v.WorkspaceId is null)
+        {
+            // Rung 4 asked, and the sentence is HELD rather than guessed at. Nothing was
+            // delivered anywhere: a wrong workspace is not undoable (§5's asymmetry at group
+            // scope), so "ask" genuinely means wait.
+            lines.Add(v.QuestionId is long q
+                ? $"asked: which workspace? answer with `dodona concierge-answer {q} <name|new:NAME>` (nothing was delivered)"
+                : $"error: could not resolve a workspace{(v.Note is null ? "" : $": {v.Note}")}");
+            return lines;
+        }
+
+        if (!Instance.IsLive(v.WorkspaceId) && !await WakeAsync(v.WorkspaceId, v.WorkspaceName!))
+        {
+            lines.Add($"error: could not wake workspace {v.WorkspaceName} — the sentence was NOT delivered");
+            return lines;
+        }
+
+        var reply = Deliver(v.WorkspaceId, text);
+        _store.Event("routed", null, $"rung={v.Rung} ws={v.WorkspaceName} reply={Truncate(reply, 80)}");
+        lines.Add($"-> {v.WorkspaceName} (rung {v.Rung}){(v.Created ? ", workspace created" : "")}: {reply}");
+
+        // The review-behind only makes sense where the ladder GUESSED. A rung-1 name match or
+        // an explicit path was the operator telling us, and reviewing that would be spending
+        // a model call to second-guess a fact.
+        if (v.Rung is "focus" or "only") ReviewBehind(text, v.WorkspaceId);
+        return lines;
+    }
+
+    /// <summary>Wake a workspace's daemon (§4: "wake the daemon if asleep"). Start-on-demand
+    /// with the concierge as the caller — same detached spawn the CLI does, addressed by id so
+    /// the child cannot re-resolve to something else.</summary>
+    async Task<bool> WakeAsync(string wsId, string name)
+    {
+        try
+        {
+            var exe = Environment.ProcessPath ?? "dodona.exe";
+            var psi = new ProcessStartInfo(exe)
+            {
+                UseShellExecute = true,                        // detach: it must outlive us
+                WindowStyle = ProcessWindowStyle.Hidden,
+                WorkingDirectory = Paths.NeutralCwd(),
+            };
+            psi.ArgumentList.Add("daemon");
+            psi.ArgumentList.Add("--workspace");
+            psi.ArgumentList.Add(wsId);
+            Process.Start(psi);
+            _store.Event("woke_workspace", null, $"{name} ({wsId})");
+        }
+        catch (Exception ex) { _store.Event("wake_failed", null, $"{wsId}: {ex.Message}"); return false; }
+
+        for (int i = 0; i < 75 && !Instance.IsLive(wsId); i++) await Task.Delay(200);
+        if (!Instance.IsLive(wsId)) { _store.Event("wake_timeout", null, wsId); return false; }
+        Announce($"[dodona] woke workspace {name} — it was asleep");
+        return true;
+    }
+
+    /// <summary>Hand the sentence to one workspace daemon's own dispatcher. One pipe, one
+    /// exchange — the concierge is a router, and a router that kept the message would be the
+    /// coordinator §12 designed out.</summary>
+    static string Deliver(string wsId, string text)
+    {
+        try
+        {
+            using var pipe = new NamedPipeClientStream(".", Instance.CtlPipe(wsId), PipeDirection.InOut);
+            pipe.Connect(5000);
+            var w = new StreamWriter(pipe) { AutoFlush = true };
+            var r = new StreamReader(pipe);
+            w.WriteLine(JsonSerializer.Serialize(new { cmd = "input", text }));
+            var said = new List<string>();
+            string? line;
+            while ((line = r.ReadLine()) is not null && line != "##end")
+                if (!line.StartsWith("##")) said.Add(line);
+            return said.Count > 0 ? string.Join(" | ", said) : "delivered";
+        }
+        catch (Exception ex) { return $"error: {ex.Message}"; }
     }
 
     /// <summary>Does the text name this workspace? Word-bounded for plain names so "work"
