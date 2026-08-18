@@ -15,3 +15,4 @@ spikes/spike3/workspace/
 # failure); these are not, because they are unbounded.
 tests/*-output/daemon-*.out
 tests/*-output/daemon-*.err
+.claude/worktrees/
