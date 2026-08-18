@@ -41,6 +41,19 @@ public partial class MainWindow : Window
         _ = _poller.RunAsync(_vm, snap => Dispatcher.InvokeAsync(() => ApplySnapshot(snap)).Task, _cts.Token);
         UiPipe.Start(Instance.UiPipe(instanceId), this, successor);
         if (successor) _ = Task.Run(SignalReadyAsync);
+        // The poller only re-applies when the STORE changes, but a pulse must fade on its
+        // own clock — this tick re-renders the last snapshot while any pane still glows,
+        // and goes back to sleep the moment none do.
+        var pulseTick = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+        var pulseFading = false;                       // one FINAL repaint after the last pulse
+        pulseTick.Tick += (_, _) =>                    // expires, or the glow never turns off
+        {
+            if (_vm.PoseName is not null || _lastSnap is null) return;
+            if (_vm.AnyPulseActive) { pulseFading = true; _vm.Apply(_lastSnap); }
+            else if (pulseFading) { pulseFading = false; _vm.Apply(_lastSnap); }
+        };
+        pulseTick.Start();
+
         Closed += (_, _) => { _cts.Cancel(); _reader.Dispose(); };
     }
 
@@ -60,11 +73,14 @@ public partial class MainWindow : Window
         catch { /* nobody waiting: we were launched normally, not as a successor */ }
     }
 
+    Snapshot? _lastSnap;
+
     void ApplySnapshot(Snapshot snap)
     {
         // Re-checked HERE, on the UI thread: a poll snapshot already queued when a pose
         // lands must not overwrite the pose (the poller's own check races the dispatcher).
         if (_vm.PoseName is not null) return;
+        _lastSnap = snap;
         var newlyBlocked = _vm.Apply(snap);
         // Toast rule (§8): only when the app lacks focus AND a lane is blocked on you.
         // Never for progress — muted toasts help nobody.
@@ -106,6 +122,12 @@ public partial class MainWindow : Window
             }
             case "update":
                 return Update(e.GetProperty("exe").GetString()!);
+            case "type":
+            {
+                InputBox.Text = e.GetProperty("text").GetString() ?? "";
+                SubmitInput();
+                return "typed";
+            }
             case "close":
                 Dispatcher.BeginInvoke(() => Application.Current.Shutdown());
                 return "closing";
@@ -130,7 +152,7 @@ public partial class MainWindow : Window
                 {
                     slot = s.Slot, empty = false, lane = s.LaneId, title = s.Title, color = s.ColorHex,
                     state = s.State, presence = s.Presence, badge = s.Badge, blocked = s.Blocked,
-                    focused = s.Focused, repo = s.Repo, lines = s.Lines.Select(l => l.Text).ToList(),
+                    focused = s.Focused, repo = s.Repo, pulsing = s.Pulsing, lines = s.Lines.Select(l => l.Text).ToList(),
                 }).ToList(),
             quota = _vm.QuotaText,
             tray = _vm.Tray.ToList(),
@@ -322,6 +344,15 @@ public partial class MainWindow : Window
     void Input_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Enter) return;
+        SubmitInput();
+    }
+
+    /// <summary>The one path from the box to the daemon — Enter and the `ui type` verb
+    /// both land here, so a test drives byte-for-byte the same code a keystroke does
+    /// WITHOUT needing keyboard focus (SendKeys required focusing the window, which
+    /// stole the operator's keyboard mid-work — the reason the verb exists).</summary>
+    public void SubmitInput()
+    {
         var text = InputBox.Text.Trim();
         if (text.Length == 0) return;
 

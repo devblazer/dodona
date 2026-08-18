@@ -1,0 +1,13 @@
+﻿{
+    "brain_is_warm_and_off_grid":  "PASS",
+    "brain_reviewed_and_agreed":  "PASS",
+    "agreement_is_silent":  "PASS",
+    "rename_applied":  "PASS",
+    "rename_in_causal_chain":  "PASS",
+    "rename_receipt_carries_undo":  "PASS",
+    "ticket_is_suggested_not_created":  "PASS",
+    "operator_rename_wins":  "PASS",
+    "brain_runs_outside_the_project":  "PASS",
+    "pulse_on_arrival":  "PASS",
+    "pulse_fades":  "PASS"
+}

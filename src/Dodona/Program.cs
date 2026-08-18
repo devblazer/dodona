@@ -34,6 +34,8 @@ async Task<int> Dispatch() => cmd switch
     "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), model = One("model"), effort = One("effort"), childArgs = Many("child-arg") }),
     "lane-stop" => Client(new { cmd = "lane-stop", lane = long.Parse(pos[0]) }),
     "lane-respawn" => Client(new { cmd = "lane-respawn", lane = long.Parse(pos[0]) }),
+    "lane-rename" => Client(new { cmd = "lane-rename", lane = long.Parse(pos[0]), title = pos[1] }),
+    "brain-start" => Client(new { cmd = "brain-start", hi = opts.ContainsKey("hi") }),
     "say" => Client(new { cmd = "say", lane = long.Parse(pos[0]), text = pos[1] }),
     "tail" => Client(new { cmd = "tail", lane = long.Parse(pos[0]), n = pos.Count > 1 ? int.Parse(pos[1]) : 20 }),
     "status" => Client(new { cmd = "status" }),
@@ -220,6 +222,7 @@ int Ui()
         "dump" => Client(new { verb = "dump" }, uiPipe),
         "screenshot" => Client(new { verb = "screenshot", @out = Path.GetFullPath(One("out") ?? "dodona-ui.png"), pane = One("pane") }, uiPipe),
         "pose" => pos.Count > 1 ? Client(new { verb = "pose", name = pos[1] }, uiPipe) : Fail("ui pose <name|live>"),
+        "type" => pos.Count > 1 ? Client(new { verb = "type", text = string.Join(" ", pos.Skip(1)) }, uiPipe) : Fail("ui type <text>"),
         "overlay" => pos.Count > 1 ? Client(new { verb = "overlay", pane = pos[1] }, uiPipe) : Fail("ui overlay <PANE|off>"),
         "update" => pos.Count > 1 ? Client(new { verb = "update", exe = Path.GetFullPath(pos[1]) }, uiPipe) : Fail("ui update <DodonaUi.exe>"),
         "close" => Client(new { verb = "close" }, uiPipe),
@@ -299,7 +302,7 @@ static (string? cmd, string root, Dictionary<string, List<string>> opts, List<st
 {
     // Valueless flags must be declared: otherwise `--json` at the end of a line is
     // indistinguishable from a positional argument, and silently becomes one.
-    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut" };
+    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi" };
 
     string? cmd = null;
     string root = Environment.CurrentDirectory;
@@ -359,7 +362,12 @@ static void Help() => Console.WriteLine("""
               swaps live daemons, then refreshes live UIs (they are separate processes)
       dodona swap <new dodona.exe> [--mode now] | swap-answer <now|when-it-lands|hold>
       dodona swaps
+    lanes & the brain (§3):
+      dodona lane-rename <lane> <TITLE> | lane-respawn <lane> | lane-stop <lane>
+      dodona brain-start [--hi]             (warm the dispatcher brain; hi = expensive tier)
     ui (§8/§17 — talks to the DodonaUi process, not the daemon):
+      dodona ui type <text>                 (submit through the same path as Enter — no focus)
+      DodonaUi.exe --test-window            (off-screen, never activates: for tests/agents)
       dodona ui dump | ui screenshot [--pane <PANE>] --out <png> | ui pose <name|live>
       dodona ui overlay <PANE|off> | ui update <DodonaUi.exe> | ui close
       dodona ack <pane_event_id> | undo-route <routing_decision_id>

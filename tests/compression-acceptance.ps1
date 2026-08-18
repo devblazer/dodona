@@ -69,7 +69,7 @@ try {
     $uncompressed = Rows "SELECT compressed IS NULL, substr(body,1,40) FROM pane_events WHERE kind='result' ORDER BY id DESC LIMIT 1"
     Check 'no_pool_leaves_the_row_uncompressed' ($uncompressed -match '^1\|') $uncompressed
 
-    $uiProc = Start-Process $ui -ArgumentList "--root", $root -PassThru
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
     Start-Sleep -Milliseconds 1800
     $pane = (Dump).slots | Where-Object { -not $_.empty }
     Check 'no_pool_still_shows_the_agents_words' (($pane.lines -join '|') -match 'only breaking crests foam') ($pane.lines -join '|')

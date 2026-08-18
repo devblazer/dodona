@@ -36,6 +36,18 @@ public partial class App : Application
             // --successor: launched by the UI we are replacing (§13). It still holds the ui
             // pipe for a moment longer, and it is waiting to hear that we came up.
             var main = new MainWindow(canonical, id, e.Args.Contains("--successor"));
+            // --test-window: exists for suites and agent runs, and for one reason — the
+            // operator was interrupted by test windows stealing focus while they worked.
+            // Off-screen, never activated, not in the taskbar; screenshots, dumps and UIA
+            // all still work, and a human never sees it.
+            if (e.Args.Contains("--test-window"))
+            {
+                main.WindowStartupLocation = WindowStartupLocation.Manual;
+                main.ShowActivated = false;
+                main.ShowInTaskbar = false;
+                main.Left = -4200;
+                main.Top = 0;
+            }
             win = main;
             main.Show();
             if (pose is not null) main.ApplyPose(pose);

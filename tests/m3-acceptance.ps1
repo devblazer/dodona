@@ -56,7 +56,7 @@ try {
     Dodona @("say", "$skyLane", "say sky ready") | Out-Null
 
     # ---- the UI is a replay of rows: launch AFTER the messages exist ----
-    $uiProc = Start-Process $ui -ArgumentList "--root", $root -PassThru
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
     Start-Sleep -Milliseconds 1800
 
     $d = Dump

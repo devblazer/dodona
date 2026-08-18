@@ -16,6 +16,9 @@ public record PaneSnap(long LaneId, string Title, string State, string Presence,
     /// <summary>Which repository this lane's open ticket lands in — "" in a single-repo
     /// project, which must never see the word.</summary>
     public string Repo { get; init; } = "";
+
+    /// <summary>Highest user_input row id — moves when a routed message lands here.</summary>
+    public long LastInputId { get; init; }
 }
 public record FeedSnap(long Id, string LaneTitle, string Ts, string Body, bool Acked, bool IsSystem);
 public record Snapshot(PaneSnap?[] Slots, List<string> Tray, List<FeedSnap> Feed, PaneSnap? Overlay)
@@ -133,6 +136,11 @@ public sealed class PaneView
     public List<LineView> Lines { get; init; } = new();
 
     public string Repo { get; init; } = "";
+    /// <summary>True for ~1.5s after a routed message lands here — the eye follows the
+    /// routing without reading a receipt (operator: "a lane pulse so I can see where it
+    /// routed"). Rendered as a brief border in the LANE's own colour; blocked's white
+    /// border always wins.</summary>
+    public bool Pulsing { get; init; }
 
     public string ColorHex => Palette[Slot % Palette.Length];
     public Brush LaneBrush => new SolidColorBrush((Color)ColorConverter.ConvertFromString(ColorHex));
@@ -144,8 +152,10 @@ public sealed class PaneView
     public Visibility CloseVisibility => IsEmpty ? Visibility.Collapsed : Visibility.Visible;
     public Visibility WakeVisibility => !IsEmpty && State is "dormant" or "unreachable" ? Visibility.Visible : Visibility.Collapsed;
     // Blocked-on-you: border highlight + glyph — border, not fill; colour still means the lane (§8).
-    public Brush BorderBrushValue => Blocked ? Brushes.White : new SolidColorBrush(Color.FromRgb(0x3A, 0x3E, 0x44));
-    public Thickness BorderThicknessValue => Blocked ? new Thickness(2) : new Thickness(1);
+    public Brush BorderBrushValue => Blocked ? Brushes.White
+        : Pulsing ? LaneBrush
+        : new SolidColorBrush(Color.FromRgb(0x3A, 0x3E, 0x44));
+    public Thickness BorderThicknessValue => Blocked || Pulsing ? new Thickness(2) : new Thickness(1);
     public Visibility GlyphVisibility => Blocked ? Visibility.Visible : Visibility.Collapsed;
     public Visibility BadgeVisibility => Badge > 0 ? Visibility.Visible : Visibility.Collapsed;
     public string BadgeText => Badge > 99 ? "99+" : Badge.ToString();
@@ -153,10 +163,10 @@ public sealed class PaneView
     public Visibility EmptyVisibility => IsEmpty ? Visibility.Visible : Visibility.Collapsed;
     public double TitleOpacity => State == "alive" || IsEmpty ? 1.0 : 0.45;
 
-    public static PaneView From(PaneSnap s, int slot) => new()
+    public static PaneView From(PaneSnap s, int slot, bool pulsing = false) => new()
     {
         Slot = slot, LaneId = s.LaneId, Title = s.Title, State = s.State, Presence = s.Presence,
-        Badge = s.Badge, Blocked = s.Blocked, Focused = s.Focused, Repo = s.Repo,
+        Badge = s.Badge, Blocked = s.Blocked, Focused = s.Focused, Repo = s.Repo, Pulsing = pulsing,
         Lines = s.Lines.Select(LineView.From).ToList(),
     };
 }
@@ -226,6 +236,15 @@ public sealed class MainVm : INotifyPropertyChanged
 
     readonly HashSet<string> _blockedBefore = new();
 
+    // pulse bookkeeping: laneId -> (last user_input id seen, glowing until)
+    readonly Dictionary<long, long> _lastInputSeen = new();
+    readonly Dictionary<long, DateTime> _pulseUntil = new();
+    bool _firstApply = true;
+
+    /// <summary>Any pane still glowing? The window's tick uses this to know when a
+    /// re-render is owed to let a pulse fade out.</summary>
+    public bool AnyPulseActive => _pulseUntil.Values.Any(u => u > DateTime.UtcNow);
+
     public MainVm()
     {
         for (int i = 0; i < 6; i++) Slots.Add(new PaneView { Slot = i, IsEmpty = true });
@@ -235,9 +254,31 @@ public sealed class MainVm : INotifyPropertyChanged
     /// just transitioned to blocked — the caller decides whether that warrants a toast.</summary>
     public List<string> Apply(Snapshot s)
     {
+        // Pulse detection: a lane whose latest user_input id moved (or which just
+        // appeared) glows for 1.5s in its own colour, so the eye can follow where a
+        // routed message actually went. The very first apply is a replay of history,
+        // not an arrival — nothing pulses. Poses never pulse: they are deterministic
+        // fixtures, and a border that appears for 1.5s after `ui pose` is noise in
+        // screenshots that exist to be compared.
+        var now = DateTime.UtcNow;
+        if (PoseName is null)
+        {
+            foreach (var p in s.Slots.OfType<PaneSnap>())
+            {
+                var known = _lastInputSeen.TryGetValue(p.LaneId, out var prev);
+                if (!_firstApply && (!known || p.LastInputId > prev))
+                    _pulseUntil[p.LaneId] = now.AddSeconds(1.5);
+                _lastInputSeen[p.LaneId] = p.LastInputId;
+            }
+            _firstApply = false;
+        }
+        else _pulseUntil.Clear();
+
         Slots.Clear();
         for (int i = 0; i < 6; i++)
-            Slots.Add(s.Slots.Length > i && s.Slots[i] is PaneSnap p ? PaneView.From(p, i) : new PaneView { Slot = i, IsEmpty = true });
+            Slots.Add(s.Slots.Length > i && s.Slots[i] is PaneSnap p
+                ? PaneView.From(p, i, pulsing: _pulseUntil.TryGetValue(p.LaneId, out var u) && u > now)
+                : new PaneView { Slot = i, IsEmpty = true });
 
         var titleToBrush = Slots.Where(x => !x.IsEmpty).ToDictionary(x => x.Title, x => x.LaneBrush, StringComparer.OrdinalIgnoreCase);
         Feed.Clear();

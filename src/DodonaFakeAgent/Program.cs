@@ -16,6 +16,11 @@ using System.Text.RegularExpressions;
 
 var sessionId = $"fake-{Guid.NewGuid():N}";
 var asCompressor = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "compressor";
+// brain / brain-hi: deterministic management judgement, driven by directives embedded in
+// whatever text reaches it (the operator input is quoted inside the brain's question):
+//   brainname:X   — disagree, better_name X      brainticket:T — suggest ticket T
+//   brainlow      — answer with confidence low (forces the escalation path)
+var asBrain = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE")?.StartsWith("brain") == true;
 var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
 void Emit(object o) => stdout.WriteLine(JsonSerializer.Serialize(o));
 
@@ -31,6 +36,31 @@ while ((line = Console.ReadLine()) is not null)
         text = d.RootElement.GetProperty("message").GetProperty("content")[0].GetProperty("text").GetString() ?? "";
     }
     catch { continue; }
+
+    if (asBrain)
+    {
+        var isHi = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "brain-hi";
+        var name = Regex.Match(text, @"brainname:(\w+)");
+        var tick = Regex.Match(text, @"brainticket:(\w+)");
+        var low = text.Contains("brainlow") && !isHi;      // the hi tier is always sure
+        object? ticket = tick.Success ? new { title = tick.Groups[1].Value, claims = new[] { "subtree:src" } } : null;
+        Emit(new
+        {
+            type = "result",
+            subtype = "success",
+            session_id = sessionId,
+            result = JsonSerializer.Serialize(new
+            {
+                agree = !(name.Success || tick.Success),
+                confidence = low ? "low" : "high",
+                better_name = name.Success ? name.Groups[1].Value : null,
+                ticket,
+                target = Regex.Match(text, @"braintarget:(\w+)") is { Success: true } m2 ? m2.Groups[1].Value : null,
+                reason = "fake brain",
+            }),
+        });
+        continue;
+    }
 
     if (asCompressor)
     {

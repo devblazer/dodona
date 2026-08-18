@@ -1,5 +1,5 @@
-2026-08-18T06:58:08.5847473Z  system      init session=fake-6d5f3df56b1c4c0c965f3355f09a6089
-2026-08-18T06:58:08.5943951Z  user_input  sleep:6 then say SURVIVED-d9a5df
-2026-08-18T06:58:08.6188986Z  agent_line  working on: sleep:6 then say SURVIVED-d9a5df
-2026-08-18T06:58:17.4190404Z  result      SURVIVED-d9a5df
+2026-08-18T09:45:53.1445821Z  system      init session=fake-b147ea21b62849fd800a22ccb69f8cb3
+2026-08-18T09:45:53.2148527Z  user_input  sleep:6 then say SURVIVED-4656c0
+2026-08-18T09:45:53.2399917Z  agent_line  working on: sleep:6 then say SURVIVED-4656c0
+2026-08-18T09:46:01.9463642Z  result      SURVIVED-4656c0
 

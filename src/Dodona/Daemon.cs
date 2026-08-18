@@ -35,7 +35,13 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
                      // debounce waits for the tree to go quiet so half-saved edits are
                      // never built.
                      bool AutoPublish = false, string? AutoPublishProject = null,
-                     int AutoPublishDebounceSec = 45)
+                     int AutoPublishDebounceSec = 45,
+                     // The dispatcher brain (§3's middle rung): management decisions only —
+                     // naming, routing, is-this-ticket-worthy. Cheap model first; when it
+                     // says its own confidence is low, the SAME question goes to the
+                     // expensive tier (operator: "unless it's not very confident, then
+                     // route to a more expensive model"). Silent unless it disagrees.
+                     bool Brain = true, string BrainModel = "haiku", string BrainEffort = "low")
 {
     public PolicyRule[] Rules => Policy ?? Dodona.Policy.Default;
 
@@ -87,7 +93,9 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
             policy, allowed,
             Str("permissionMode", "bypassPermissions"),
             d.RootElement.TryGetProperty("autoPublish", out var ap) && ap.ValueKind == JsonValueKind.True,
-            Str("autoPublishProject", ""), Num("autoPublishDebounceSec", 45));
+            Str("autoPublishProject", ""), Num("autoPublishDebounceSec", 45),
+            !(d.RootElement.TryGetProperty("brain", out var br) && br.ValueKind == JsonValueKind.False),
+            Str("brainModel", "haiku"), Str("brainEffort", "low"));
     }
 }
 
@@ -97,6 +105,8 @@ sealed class Daemon
     readonly Store _store;
     readonly Dictionary<long, LaneRuntime> _lanes = new();
     readonly SemaphoreSlim _routerLock = new(1, 1);   // one classification at a time on the warm session
+    readonly SemaphoreSlim _brainLoLock = new(1, 1), _brainHiLock = new(1, 1);
+    long _brainLo = -1, _brainHi = -1;                // lane ids of the two brain tiers
     // One lock per compressor session, not one for the pool: the point of a pool is that
     // two lanes finishing at once compress concurrently. A single lock would rebuild the
     // serialization point §3 forbids the dispatcher to be (§5).
@@ -234,6 +244,15 @@ sealed class Daemon
                 catch (Exception ex) { _store.Event("compressor_pool_failed", null, ex.Message); }
             });
 
+        // Warm the brain's cheap tier the same way; the expensive tier is spawned lazily
+        // on the first escalation — most days it is never needed at all.
+        if (_config.Brain && Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") != "1")
+            _ = Task.Run(async () =>
+            {
+                try { _store.Event("brain_started", null, await EnsureBrainAsync(hi: false) >= 0 ? "cheap tier warm" : "failed to warm"); }
+                catch (Exception ex) { _store.Event("brain_failed", null, ex.Message); }
+            });
+
         // No `using` on pipe streams near a peer that may close first (spike 2's lesson).
         bool stopping = false;
         while (!stopping)
@@ -293,6 +312,19 @@ sealed class Daemon
                 if (!_lanes.TryGetValue(lane, out var rt)) { w.WriteLine($"error: lane {lane} not connected"); break; }
                 rt.Say(text);
                 w.WriteLine($"-> lane {lane}");
+                break;
+            }
+            case "lane-rename":
+            {
+                var lane = e.GetProperty("lane").GetInt64();
+                var title = e.GetProperty("title").GetString()!.Trim().ToUpperInvariant();
+                if (title.Length == 0 || title.Contains(' ')) { w.WriteLine("error: one word"); break; }
+                var old = _store.LanesAll().FirstOrDefault(l => l.Id == lane)?.Title;
+                if (old is null) { w.WriteLine($"error: no lane {lane}"); break; }
+                _store.LaneTitle(lane, title);
+                _store.Event("lane_renamed", lane, $"{old} → {title} (operator)");
+                _store.PaneEvent(lane, "announcement", $"renamed to {title} (was {old})", null, null, acked: true);
+                w.WriteLine($"renamed lane {lane}: {old} → {title}");
                 break;
             }
             case "lane-respawn":
@@ -386,13 +418,33 @@ sealed class Daemon
                 // where judgement compounds, and this is not where it compounds).
                 var model = Pick(e, "model", _config.RouterModel);
                 var effort = Pick(e, "effort", _config.RouterEffort);
+                // The operator's routing policy, verbatim intent (2026-08-18): a GENERIC
+                // remark ("don't do that", "stop", "try again") belongs to the focused
+                // lane, full stop — no cleverness. A remark CLEARLY AIMED by content
+                // ("make the skybox red") goes to the lane it names, cheap thought.
+                // Only text that is neither obviously generic nor obviously aimed earns
+                // expensive thought (the brain's high tier picks it up).
                 var sys = "You are Dodona's input router. You will be given a list of lanes (title and subject), " +
                           "the currently focused lane, and one user input. Reply with ONLY one line of JSON, no prose, no markdown: " +
-                          "{\"intent\":\"instruction|query|question\",\"target\":\"<LANE TITLE or none>\",\"confidence\":\"high|medium|low\",\"cleaned_text\":\"<the input, cleaned of dictation noise>\"} " +
-                          "target is the lane the input is meant for based on its content; say none when no lane fits. " +
-                          "Be willing to say confidence low — a confident wrong guess is worse than an honest unsure.";
-                var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: false) : new List<string>();
-                w.WriteLine((await SpawnLaneAsync("ROUTER", "router", _root, child, args)).Msg);
+                          "{\"kind\":\"generic|specific|unclear\",\"target\":\"<LANE TITLE or none>\",\"confidence\":\"high|medium|low\",\"cleaned_text\":\"<the input, cleaned of dictation noise>\"} " +
+                          "kind=generic means the remark could apply to any ongoing work (acknowledgements, stop, corrections " +
+                          "with no subject) — it belongs to the FOCUSED lane and target must be none. " +
+                          "kind=specific means the content plainly names its subject — target is that lane. " +
+                          "kind=unclear means you genuinely cannot tell; say so, someone smarter will look. " +
+                          "Be willing to say unclear or confidence low — a confident wrong guess is worse than an honest unsure.";
+                var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
+                w.WriteLine((await SpawnLaneAsync("ROUTER", "router", NeutralCwd(), child, args)).Msg);
+                break;
+            }
+            case "brain-start":
+            {
+                // For suites (NO_AUTOSTART skips the warm-at-start) and for restarting a
+                // brain by hand after changing its config.
+                var lo = await EnsureBrainAsync(hi: false);
+                var wantHi = e.TryGetProperty("hi", out var bh) && bh.ValueKind == JsonValueKind.True;
+                var hi2 = wantHi ? await EnsureBrainAsync(hi: true) : -2;
+                w.WriteLine($"brain: cheap tier lane {(lo > 0 ? lo.ToString() : "FAILED")}" +
+                            (wantHi ? $", expensive tier lane {(hi2 > 0 ? hi2.ToString() : "FAILED")}" : ""));
                 break;
             }
             case "compressor-start":
@@ -1215,11 +1267,28 @@ sealed class Daemon
     /// <summary>The argv every claude lane is started with — one place, so model and
     /// effort are policy rather than four scattered literals. `--effort` is omitted when
     /// blank so a project can opt out of setting it at all.</summary>
-    List<string> ClaudeArgs(string model, string effort, string systemPrompt, bool acceptEdits)
+    /// <summary>Where management-role agents live: a neutral directory OUTSIDE any
+    /// repository. Claude discovers project context by walking up from its cwd, so a
+    /// router/compressor/brain started inside the project would load the project's
+    /// CLAUDE.md and skills — files that order WORK agents to build, test and publish.
+    /// A manager reading a worker's orders is how a classifier ends up running /ship
+    /// (operator: "that could be disastrous"). Utility roles get no project context at
+    /// all: their whole job description is their system prompt.</summary>
+    static string NeutralCwd()
+    {
+        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Dodona", "neutral");
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    List<string> ClaudeArgs(string model, string effort, string systemPrompt, bool acceptEdits, bool utility = false)
     {
         var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                                       "--verbose", "--model", model };
         if (!string.IsNullOrWhiteSpace(effort)) { args.Add("--effort"); args.Add(effort); }
+        // Belt to the neutral-cwd braces: even if a future claude finds project context
+        // some other way, utility roles ask for user-level settings only.
+        if (utility) { args.Add("--setting-sources"); args.Add("user"); }
         // A lane has no way to ASK. The operator's own session carries a permission-prompt
         // tool wired to a dialog, so an unapproved command becomes a question; a headless
         // `-p` lane has no such channel, so the same command is denied outright and the
@@ -1379,14 +1448,14 @@ sealed class Daemon
                   "never mention 'the user', never restate the question. " +
                   "needs_you is true only when the work cannot continue without a human decision. " +
                   "options lists those choices, at most three, and is [] whenever needs_you is false.";
-        var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: false) : new List<string>();
+        var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
 
         var alive = _store.LanesAll().Count(l => l.Role == "compressor" && l.State == "alive" && _lanes.ContainsKey(l.Id));
         if (alive >= count) return $"compressor pool already warm ({alive})";
         var started = new List<long>();
         for (int i = alive; i < count; i++)
         {
-            var (id, msg) = await SpawnLaneAsync($"COMPRESS{i + 1}", "compressor", _root, child, args);
+            var (id, msg) = await SpawnLaneAsync($"COMPRESS{i + 1}", "compressor", NeutralCwd(), child, args);
             if (id < 0) return started.Count > 0
                 ? $"compressor pool partially up: {started.Count} warm, then: {msg}"
                 : $"error: {msg}";
@@ -1460,6 +1529,132 @@ sealed class Daemon
                     $"{sw.ElapsedMilliseconds}ms lane={laneId} row={paneEventId} {body.Length}->{text.Length} chars needs_you={needsYou}");
             }
             catch (Exception ex) { _store.Event("compressor_failed", pick.Id, ex.Message); }
+        });
+    }
+
+    // ------------------------------------------------------------- the dispatcher brain (§3)
+
+    /// <summary>The middle rung of the escalation ladder: management judgement between
+    /// code-that-checks-facts and the operator-who-decides-intent. Two warm sessions —
+    /// cheap for the everyday calls, expensive only when the cheap one says it is not
+    /// sure (operator's rule). It is deliberately kept AWAY from code: neutral cwd, no
+    /// project CLAUDE.md, no skills, no tools it could run — its whole world is the
+    /// management question in front of it.</summary>
+    async Task<long> EnsureBrainAsync(bool hi)
+    {
+        var current = hi ? _brainHi : _brainLo;
+        if (current > 0 && _lanes.TryGetValue(current, out var live) && live.Connected) return current;
+        if (!_config.Brain) return -1;
+
+        var sys = "You are Dodona's dispatcher brain. You make MANAGEMENT decisions for a multi-agent " +
+                  "orchestrator: what a piece of work should be called, which lane an input belongs to, whether work " +
+                  "deserves its own ticket and which paths that ticket should claim. You never read or write code, " +
+                  "never run tools, and never do the work yourself — you are the coordinator's judgement, not a worker. " +
+                  "Answer ONLY in the single-line JSON schema each request specifies: no prose, no markdown, no code fences. " +
+                  "State your confidence honestly — saying low is how hard questions reach someone with more budget than you.";
+        var model = hi ? _config.Model : _config.BrainModel;
+        var effort = hi ? _config.Effort : _config.BrainEffort;
+        var args = IsClaude(_config.Agent) ? ClaudeArgs(model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
+        var (id, msg) = await SpawnLaneAsync(hi ? "BRAIN-HI" : "BRAIN", hi ? "brain-hi" : "brain", NeutralCwd(), _config.Agent, args);
+        if (id < 0) { _store.Event("brain_failed", null, msg); return -1; }
+        if (hi) _brainHi = id; else _brainLo = id;
+        return id;
+    }
+
+    /// <summary>Ask the expensive tier (spawning it on first use). Null when the brain is
+    /// off, failed to start, or timed out — callers treat null as "the status quo stands",
+    /// because the brain is an improver, never a gate.</summary>
+    async Task<JsonElement?> AskBrainHiAsync(string question)
+    {
+        var id = await EnsureBrainAsync(hi: true);
+        if (id < 0) return null;
+        await _brainHiLock.WaitAsync();
+        string? reply;
+        try { reply = await _lanes[id].AskAsync(question, 30000); }
+        finally { _brainHiLock.Release(); }
+        if (reply is null) { _store.Event("brain_timeout", id, Truncate(question, 120)); return null; }
+        try
+        {
+            var doc = JsonDocument.Parse(reply[reply.IndexOf('{')..(reply.LastIndexOf('}') + 1)]);
+            return doc.RootElement.Clone();
+        }
+        catch { _store.Event("brain_failed", id, $"unparseable: {Truncate(reply, 120)}"); return null; }
+    }
+
+    /// <summary>Post-hoc review of an auto-created lane — the §4 pattern applied to
+    /// judgement: code already acted (lane exists, message delivered), the brain runs
+    /// BEHIND and corrects visibly. Silent unless it disagrees (operator's rule #3):
+    /// a rename is applied and announced as a receipt with its undo; a ticket is only
+    /// ever SUGGESTED, because a wrong claim strands an agent behind the gate.</summary>
+    void BrainReview(long laneId, string text, string chosenName, Choice choice)
+    {
+        if (!_config.Brain) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var loId = await EnsureBrainAsync(hi: false);
+                if (loId < 0) return;
+                var lanes = string.Join(", ", _store.LanesAll().Where(l => l.Role == "work" && l.State == "alive").Select(l => l.Title));
+                var repos = string.Join(", ", Repositories().Select(r => r.Name));
+                var q = $"A lane was just auto-created from operator input.\n" +
+                        $"Input: {text}\nChosen name: {chosenName} (derived by code)\nModel policy: {choice.Describe}\n" +
+                        $"Existing lanes: [{lanes}]\nRepositories in this workspace: [{repos}]\n" +
+                        "Reply ONLY one line of JSON: {\"agree\":true|false,\"confidence\":\"high|medium|low\"," +
+                        "\"better_name\":\"<ONE WORD, only if the chosen name is bad>\"," +
+                        "\"ticket\":{\"title\":\"<name>\",\"claims\":[\"subtree:<path>\"]} (only if this work should be isolated on a branch)," +
+                        "\"reason\":\"<=60 chars\"}";
+
+                await _brainLoLock.WaitAsync();
+                string? reply;
+                try { reply = await _lanes[loId].AskAsync(q, 25000); }
+                finally { _brainLoLock.Release(); }
+                if (reply is null) { _store.Event("brain_timeout", loId, $"review lane {laneId}"); return; }
+
+                JsonElement v;
+                try { v = JsonDocument.Parse(reply[reply.IndexOf('{')..(reply.LastIndexOf('}') + 1)]).RootElement.Clone(); }
+                catch { _store.Event("brain_failed", loId, $"unparseable: {Truncate(reply, 120)}"); return; }
+
+                // Cheap tier unsure → same question, expensive tier (operator's rule #1).
+                var conf = v.TryGetProperty("confidence", out var cf) ? cf.GetString() ?? "low" : "low";
+                if (conf == "low")
+                {
+                    _store.Event("brain_escalated", loId, $"review lane {laneId}");
+                    var hiV = await AskBrainHiAsync(q);
+                    if (hiV is not null) v = hiV.Value;
+                }
+
+                var agree = v.TryGetProperty("agree", out var ag) && ag.ValueKind == JsonValueKind.True;
+                var reason = v.TryGetProperty("reason", out var rs) ? rs.GetString() ?? "" : "";
+                _store.Event("brain_review", laneId, $"agree={agree} conf={conf} reason={reason}");
+                if (agree) return;                                     // silent unless disagreeing
+
+                if (v.TryGetProperty("better_name", out var bn) && bn.ValueKind == JsonValueKind.String &&
+                    bn.GetString() is { Length: > 0 } newName && !newName.Contains(' ') &&
+                    !newName.Equals(chosenName, StringComparison.OrdinalIgnoreCase))
+                {
+                    var clean = newName.ToUpperInvariant();
+                    _store.LaneTitle(laneId, clean);
+                    _store.Event("brain_renamed", laneId, $"{chosenName} → {clean}: {reason}");
+                    _store.PaneEvent(laneId, "announcement",
+                        $"renamed to {clean} by the dispatcher (was {chosenName}) — undo: dodona lane-rename {laneId} {chosenName}",
+                        null, null, acked: true);
+                }
+
+                if (v.TryGetProperty("ticket", out var tk) && tk.ValueKind == JsonValueKind.Object &&
+                    tk.TryGetProperty("title", out var tt) && tt.GetString() is { Length: > 0 } title)
+                {
+                    var claims = tk.TryGetProperty("claims", out var cl) && cl.ValueKind == JsonValueKind.Array
+                        ? cl.EnumerateArray().Select(x => x.GetString()).Where(x => x is { Length: > 0 }).ToList()
+                        : new List<string?>();
+                    var cmd = $"dodona ticket-create --title {title.ToUpperInvariant()}" +
+                              string.Concat(claims.Select(c => $" --claim {c}"));
+                    _store.Event("brain_suggested_ticket", laneId, cmd);
+                    _store.PaneEvent(laneId, "announcement",
+                        $"dispatcher: this looks ticket-worthy ({reason}) — {cmd}", null, null);
+                }
+            }
+            catch (Exception ex) { _store.Event("brain_failed", null, ex.Message); }
         });
     }
 
@@ -1544,6 +1739,7 @@ sealed class Daemon
                 $"started this lane on {choice.Describe} for “{Truncate(text, 45)}” — undo: dodona lane-stop {newId}",
                 null, null, acked: true);   // a receipt: it badged the lane the instant it was born, which was a lie
             autoStarted = name;
+            BrainReview(newId, text, name, choice);   // fire-and-forget: corrects behind, never gates
         }
         frt.Say(text);
         var rowId = _store.RoutingInsert(text, "focus", null, fid, null);
@@ -1569,18 +1765,46 @@ sealed class Daemon
                     using var d = JsonDocument.Parse(js);
                     var target = d.RootElement.TryGetProperty("target", out var tg) ? tg.GetString() : null;
                     var conf = d.RootElement.TryGetProperty("confidence", out var cf) ? cf.GetString() ?? "low" : "low";
-                    _store.Event("classified", router.Id, $"{sw.ElapsedMilliseconds}ms target={target} confidence={conf} input={text}");
+                    var kind = d.RootElement.TryGetProperty("kind", out var kd) ? kd.GetString() ?? "unclear" : "unclear";
+                    _store.Event("classified", router.Id, $"{sw.ElapsedMilliseconds}ms kind={kind} target={target} confidence={conf} input={text}");
+
+                    // The operator's three tiers (2026-08-18):
+                    // generic → it was for the focused lane; the cheap model never
+                    //           second-guesses a "stop" or a "try again". Done.
+                    if (kind == "generic") return;
 
                     var tLane = work.FirstOrDefault(l => l.Title.Equals(target ?? "", StringComparison.OrdinalIgnoreCase));
-                    if (tLane is null || tLane.Id == fid || conf == "low") return;   // agreement or unsure: done
 
-                    // Visible retarget (§4): receipt in the wrong pane, delivery to the right one.
-                    _store.PaneEvent(fid, "announcement", $"→ retargeted to {tLane.Title} (classifier, {conf})", null, null);
-                    if (_lanes.TryGetValue(tLane.Id, out var trt))
+                    // specific + confident → cheap thought was enough; retarget visibly.
+                    if (kind == "specific" && conf != "low" && tLane is not null)
                     {
-                        trt.Say(text);
-                        _store.RoutingRetarget(rowId, tLane.Id, conf);
-                        _store.Event("routed_retarget", tLane.Id, $"from lane {fid}: {text}");
+                        if (tLane.Id == fid) return;                    // agreement: silent
+                        _store.PaneEvent(fid, "announcement", $"→ retargeted to {tLane.Title} (classifier, {conf})", null, null);
+                        if (_lanes.TryGetValue(tLane.Id, out var trt))
+                        {
+                            trt.Say(text);
+                            _store.RoutingRetarget(rowId, tLane.Id, conf);
+                            _store.Event("routed_retarget", tLane.Id, $"from lane {fid}: {text}");
+                        }
+                        return;
+                    }
+
+                    // unclear (or a shaky guess) → the one case that earns expensive
+                    // thought: the brain's high tier makes the call.
+                    var verdict = await AskBrainHiAsync(
+                        $"Route this operator input to the right lane, or say none to leave it with the focused lane.\n" +
+                        $"Lanes:\n{laneList}\nFocused: {focusedTitle}\nInput: {text}\n" +
+                        "Reply ONLY one line of JSON: {\"target\":\"<LANE TITLE or none>\",\"confidence\":\"high|medium|low\",\"reason\":\"<=60 chars\"}");
+                    if (verdict is null) return;                        // no brain, or it timed out: focused stands
+                    var vTarget = verdict.Value.TryGetProperty("target", out var vt) ? vt.GetString() : null;
+                    var vLane = work.FirstOrDefault(l => l.Title.Equals(vTarget ?? "", StringComparison.OrdinalIgnoreCase));
+                    if (vLane is null || vLane.Id == fid) return;
+                    _store.PaneEvent(fid, "announcement", $"→ retargeted to {vLane.Title} (escalated)", null, null);
+                    if (_lanes.TryGetValue(vLane.Id, out var vrt))
+                    {
+                        vrt.Say(text);
+                        _store.RoutingRetarget(rowId, vLane.Id, "escalated");
+                        _store.Event("routed_retarget", vLane.Id, $"escalated, from lane {fid}: {text}");
                     }
                 }
                 catch (Exception ex) { _store.Event("classifier_failed", router.Id, ex.Message); }

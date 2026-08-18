@@ -139,6 +139,12 @@ For visual work, use the capture loop rather than describing pixels:
 .\src\DodonaUi\bin\Release\net8.0-windows\DodonaUi.exe --root <project> --pose long --shot out.png
 ```
 
+**Every UI you launch for a test or a check gets `--test-window`.** It renders off-screen,
+never activates, and never enters the taskbar — dumps, screenshots, poses and UIA all
+still work. Test windows popping up and stealing the operator's keyboard mid-work was a
+priority complaint; `SendKeys` is banned for the same reason (it needs focus) — drive
+input with `dodona ui type "<text>"`, which submits through the same code path as Enter.
+
 Poses are deterministic fixtures (`full`, `badges`, `blocked`, `feed`, `empty-slot`,
 `tray`, `overlay`, `long`). `--pose` needs a `--root`; without one you get the picker.
 

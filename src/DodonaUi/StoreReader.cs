@@ -111,6 +111,24 @@ sealed class StoreReader : IDisposable
         return map;
     }
 
+    /// <summary>Highest user_input row id per lane — the pulse trigger: when this moves,
+    /// something the operator said just LANDED in that lane, and the pane flashes so the
+    /// eye can follow the routing without reading a receipt.</summary>
+    public Dictionary<long, long> LastInput()
+    {
+        var map = new Dictionary<long, long>();
+        if (!Open()) return map;
+        try
+        {
+            using var c = _db!.CreateCommand();
+            c.CommandText = "SELECT lane_id, MAX(id) FROM pane_events WHERE kind = 'user_input' GROUP BY lane_id;";
+            using var r = c.ExecuteReader();
+            while (r.Read()) if (!r.IsDBNull(1)) map[r.GetInt64(0)] = r.GetInt64(1);
+        }
+        catch { }
+        return map;
+    }
+
     /// <summary>Open tickets' repo per lane — the pane subtitle in a multi-repo workspace.</summary>
     public Dictionary<long, string> TicketRepoByLane()
     {

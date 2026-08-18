@@ -41,39 +41,14 @@ function Dump() { Dodona @('ui', 'dump') | ConvertFrom-Json }
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms
 $AE = [System.Windows.Automation.AutomationElement]
 
-# Match THIS test's window by its project name — never a bare 'Dodona*' prefix, which
-# grabs whichever Dodona window enumerates first, including the operator's own live one.
-# (It did: the suite once seized the user's open session mid-dogfood.) The title's em
-# dash still can't appear literally here — PS 5.1 reads this file as ANSI — so wildcard
-# around the project leaf instead.
+# `ui type` fills the box and submits through EXACTLY the code path Enter takes
+# (MainWindow.SubmitInput) — without keyboard focus. The previous SendKeys version had to
+# focus the test window to press Enter, which stole the operator's keyboard every few
+# seconds while they worked; the whole suite now runs against an invisible, never-activated
+# window (--test-window) and the operator cannot tell it is running.
 function TypeInDispatcher([string]$text) {
-    $leaf = Split-Path $root -Leaf
-    $all = $AE::RootElement.FindAll('Children',
-        (New-Object System.Windows.Automation.PropertyCondition $AE::ControlTypeProperty, ([System.Windows.Automation.ControlType]::Window)))
-    $win = $null
-    foreach ($w in $all) { if ($w.Current.Name -like "Dodona*$leaf") { $win = $w; break } }
-    if (-not $win) { throw "no Dodona grid window titled for $leaf" }
-    $box = $win.FindFirst('Descendants',
-        (New-Object System.Windows.Automation.PropertyCondition $AE::ControlTypeProperty, ([System.Windows.Automation.ControlType]::Edit)))
-    if (-not $box) { throw "no input box in the window" }
-
-    # Set the text through UIA and send only the keypress. Typing the whole sentence with
-    # SendKeys drops characters (or the entire line) whenever the window loses activation
-    # between calls — the first message would land and later ones vanish. The box clearing
-    # is the proof that Enter was actually received.
-    $vp = $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-    foreach ($attempt in 1..5) {
-        $win.SetFocus()
-        Start-Sleep -Milliseconds 200
-        $box.SetFocus()
-        Start-Sleep -Milliseconds 200
-        $vp.SetValue($text)
-        Start-Sleep -Milliseconds 150
-        [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-        Start-Sleep -Milliseconds 500
-        if ($vp.Current.Value -eq '') { return }
-    }
-    throw "the dispatcher box never accepted Enter (still holds '$($vp.Current.Value)')"
+    $r = Dodona @('ui', 'type', $text)
+    if ($r -notmatch 'typed') { throw "ui type refused: $r" }
 }
 
 $daemon = $null
@@ -83,7 +58,7 @@ try {
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Start-Sleep -Milliseconds 800
 
-    $uiProc = Start-Process $ui -ArgumentList "--root", $root -PassThru
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
     Start-Sleep -Seconds 3
 
     # the state a person actually starts in: nothing running, nothing to click

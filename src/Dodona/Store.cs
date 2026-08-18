@@ -227,6 +227,7 @@ sealed class Store : IDisposable
     public void LaneSession(long id, string session) => Set("UPDATE lanes SET session_id = $v WHERE id = $id;", id, session);
     public void LanePresence(long id, string presence) => Set("UPDATE lanes SET presence = $v WHERE id = $id;", id, presence);
     public void LaneRole(long id, string role) => Set("UPDATE lanes SET role = $v WHERE id = $id;", id, role);
+    public void LaneTitle(long id, string title) => Set("UPDATE lanes SET title = $v WHERE id = $id;", id, title);
 
     public void KvSet(string key, string value)
     {

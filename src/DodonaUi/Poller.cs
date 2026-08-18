@@ -68,6 +68,7 @@ sealed class Poller
         var lanes = _reader.Lanes();
         var badges = _reader.Badges();
         var lastSeen = _reader.LastActivity();
+        var lastInput = _reader.LastInput();
         var ticketRepos = _reader.TicketRepoByLane();
         // Repo tags only say anything when the workspace has more than one repo in play —
         // a single-repo project must never see the word (same rule as everywhere else).
@@ -108,7 +109,10 @@ sealed class Poller
                 // carries real scrollback — bounded, because this whole snapshot is
                 // serialized and compared every 250ms.
                 _reader.Tail(l.Id, 40))
-            { Repo = multiRepo && ticketRepos.TryGetValue(l.Id, out var rp) && rp != "." ? rp : "" };
+            {
+                Repo = multiRepo && ticketRepos.TryGetValue(l.Id, out var rp) && rp != "." ? rp : "",
+                LastInputId = lastInput.GetValueOrDefault(l.Id),
+            };
         }
 
         var laneTitle = lanes.ToDictionary(l => l.Id, l => l.Title);
