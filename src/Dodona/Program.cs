@@ -368,12 +368,15 @@ int Ps()
     try { using var reg = new Registry(); all = reg.All(); }
     catch { all = new List<Workspace>(); }
 
+    var stale = 0;
     Console.WriteLine("WHAT  NAME                 DAEMON  WINDOW  LANES  WHERE");
     foreach (var w in all)
     {
         var isLive = live.Contains(Instance.CtlPipe(w.Id), StringComparer.OrdinalIgnoreCase);
         var hasUi = ui.Contains(Instance.UiPipe(w.Id), StringComparer.OrdinalIgnoreCase);
-        var shims = ShimPids(Paths.WorkspaceDir(w.Id)).Count;
+        var reaped = ReapShimInfo(Paths.WorkspaceDir(w.Id));
+        if (reaped > 0) stale += reaped;
+        var shims = LiveShimPids(Paths.WorkspaceDir(w.Id)).Count;
         if (!isLive && !hasUi && shims == 0) continue;      // asleep and idle: not "running"
         running++;
         Console.WriteLine($"ws    {Trim(w.Name, 20),-20} {(isLive ? "yes   " : "no    ")}  " +
@@ -408,7 +411,14 @@ int Ps()
 
     if (opts.ContainsKey("json")) { Console.WriteLine(JsonSerializer.Serialize(rows)); return 0; }
     if (running == 0) Console.WriteLine("(nothing running)");
-    else Console.WriteLine($"\n{running} running. `dodona stop-all` stops the daemons; add --lanes to take the agents down too.");
+    else
+    {
+        Console.WriteLine($"\n{running} running. `dodona stop-all` stops the daemons; add --lanes to take the agents down too.");
+        // LANES is live processes now, not files. Say when leftovers were cleared, so the
+        // number changing between two runs is never a mystery.
+        if (stale > 0)
+            Console.WriteLine($"cleared {stale} stale shim record(s) for agents that had already exited.");
+    }
     return 0;
 }
 
@@ -417,6 +427,50 @@ static string Trim(string s, int n) => s.Length <= n ? s : s[..(n - 1)] + "…";
 /// <summary>Shim pids recorded for a workspace, from its own `shim-lane<N>.json` files —
 /// never by process name (CLAUDE.md §4: killing by name once murdered the operator's live
 /// session mid-trial).</summary>
+/// <summary>Is this pid a LIVE process of the expected kind? The name check is not
+/// decoration: pids are reused, and a recycled pid would otherwise resurrect a lane that
+/// died days ago.</summary>
+static bool PidAlive(int pid, string expectNamePrefix)
+{
+    if (pid <= 0) return false;
+    try
+    {
+        using var p = System.Diagnostics.Process.GetProcessById(pid);
+        return !p.HasExited &&
+               p.ProcessName.StartsWith(expectNamePrefix, StringComparison.OrdinalIgnoreCase);
+    }
+    catch { return false; }          // no such process, or it exited between the two calls
+}
+
+/// <summary>The shims that are actually RUNNING — which is the only number `ps` was ever
+/// supposed to print.
+///
+/// Found 2026-08-18, by the operator: `dodona ps` said "24 lanes" and `stop-all` said "24
+/// lane agent(s) are still up" while exactly SIX processes existed, of which one was doing
+/// their work and five were Dodona's own machinery. The count came from
+/// <see cref="ShimPids"/>, which reads `shim-lane*.json` FILES and never asks whether the
+/// pid in them is alive; eighteen were leftovers from lanes that had already died. That is
+/// not a cosmetic bug: the number appears in the sentence offering `stop-all --lanes`, so it
+/// pushes someone toward killing real work to clean up files.</summary>
+static List<(long Lane, int Shim, int Child)> LiveShimPids(string dir) =>
+    ShimPids(dir).Where(t => PidAlive(t.Shim, "DodonaShim")).ToList();
+
+/// <summary>Delete shim-info files whose shim is gone. Dodona's own bookkeeping, never repo
+/// content (CLAUDE.md §5), so self-healing on read is right: the standing directive is that
+/// nothing is allowed to go quietly stale, and eighteen dead files had accumulated
+/// unnoticed. Announced by the caller, never silent.</summary>
+static int ReapShimInfo(string dir)
+{
+    var reaped = 0;
+    foreach (var (lane, shim, _) in ShimPids(dir))
+    {
+        if (PidAlive(shim, "DodonaShim")) continue;
+        try { File.Delete(Path.Combine(dir, $"shim-lane{lane}.json")); reaped++; }
+        catch { /* in use or already gone: a failed reap must never fail the listing */ }
+    }
+    return reaped;
+}
+
 static List<(long Lane, int Shim, int Child)> ShimPids(string dir)
 {
     var list = new List<(long, int, int)>();
@@ -481,7 +535,9 @@ int StopAll()
 
     if (!opts.ContainsKey("lanes"))
     {
-        var leftovers = all.Sum(w => ShimPids(Paths.WorkspaceDir(w.Id)).Count);
+        // LIVE shims, not shim FILES: this number is printed next to the offer of
+        // `--lanes`, so over-counting it argues for killing work that does not exist.
+        var leftovers = all.Sum(w => LiveShimPids(Paths.WorkspaceDir(w.Id)).Count);
         Console.WriteLine(stopped == 0 ? "nothing was running" : $"stopped {stopped} daemon(s); lanes keep running");
         if (leftovers > 0)
             Console.WriteLine($"{leftovers} lane agent(s) are still up — they survive their daemon on purpose. " +
@@ -491,7 +547,7 @@ int StopAll()
 
     int agents = 0;
     foreach (var w in all)
-        foreach (var (lane, shim, child) in ShimPids(Paths.WorkspaceDir(w.Id)))
+        foreach (var (lane, shim, child) in LiveShimPids(Paths.WorkspaceDir(w.Id)))
             foreach (var pid in new[] { shim, child })
             {
                 if (pid <= 0) continue;

@@ -67,26 +67,97 @@ re-learns the expensive way.
 - **`Microsoft.Data.Sqlite`**: `INSERT …; SELECT last_insert_rowid();` in one command
   returns nothing without `NextResult()` — use a separate command.
 
-## 1. Work is not done until it is built
+## 0.3 Problems are not allowed to exist (operator directive, 2026-08-18)
 
-**Never report a change as complete without compiling it.**
+**A snag is not something to work around. It is something to eliminate.** When you hit one,
+the task stops being the task — removing the snag becomes the task, and it ends in exactly
+one of three places, *in the session you hit it*:
+
+- **enforcement in code** (strongest — the claim gate, the merge backstop, `ps` counting live
+  pids instead of leftover files)
+- **a tool** that makes the wrong thing impossible or the right thing instant (`tools/dev.ps1`)
+- **a rule in this file**, but only when neither of the above can hold it
+
+What is forbidden, explicitly, because every one of these happened in a single afternoon and
+cost an hour on a fifteen-minute change:
+
+- **Nursing a broken environment instead of fixing it.** Four daemons held the compiler's
+  output file, so a whole second copy of the tree was built in a temp directory and every
+  build and every test ran twice. The copy was the workaround; the fix was one command that
+  clears the holder and a `ps` that stops lying about what is running.
+- **Working around the same snag twice.** Hitting it once is information. Hitting it twice
+  means you chose the workaround over the fix. Stop and fix it.
+- **Reporting a snag as if it were the work's fault.** "Build FAILED" that really means "an
+  invisible daemon holds a file" sends the next reader hunting through their own code. Name
+  the real cause, or the tool must name it for you.
+- **Believing a green check.** A new check is worth nothing until it has been *seen red*
+  against the code it is meant to catch. One passed against the unfixed binary and looked
+  like proof. `dev prove` exists so this is mechanical rather than remembered.
+- **Documenting instead of fixing.** §3.1 already recorded "a daemon outlives its window,
+  and the operator believed the machine was idle". It happened again anyway, to the same
+  person, from the same cause. **A written warning is not a fix.** If the honest answer is
+  "the next session will read this and be careful", the answer is wrong.
+
+The operator's phrasing, kept verbatim because it is the standard: *problems are not allowed
+to exist.*
+
+## 1. Everything mechanical goes through `tools/dev.ps1`
+
+**Do not call `dotnet build`, a suite, or `publish` directly. Use the wrapper.**
 
 ```powershell
-dotnet build Dodona.sln -c Release
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 ```
 
-An edit that has not been built is a claim, not a change. This has already been the single
-most expensive mistake in this project's history — twice:
+| verb | what it is for |
+|---|---|
+| `check` | Can this tree build? What is in the way? Seconds. **Run it before starting work, not after.** |
+| `build` | Clears what blocks a build, then builds. Only *real* compile errors reach you. |
+| `test <suite>...` | One or more named suites. |
+| `suites` | All eleven. A **gate before committing**, never a loop — it is twenty minutes. |
+| `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. |
+| `ship` | build + suites + publish. |
 
-- A lane rewrote the dispatcher input box, was denied permission to build, and reported
-  the change as in. The operator restarted the app and saw nothing, because nothing had
-  ever been compiled. Worse, the code contained a real bug (WPF's TextBox class handler
-  eats Enter before an instance `KeyDown` runs) that one build-and-test would have caught.
-- Twenty-eight minutes of UI work sat in the working tree unbuilt and unpublished while
-  the operator restarted the app repeatedly wondering why it looked the same.
+It is a **script, not a `dodona` subcommand**, and deliberately so: a tool whose job is to fix
+a blocked or broken build cannot itself require a build. It runs on a tree that will not
+compile.
 
-If you cannot build — permission denied, a lock, anything — **say so as the headline of
-your reply**, not as a footnote. An unbuilt change is not a deliverable.
+Why the wrapper is mandatory rather than convenient: the raw commands hand you the wrong
+diagnosis. `dotnet build` reports a locked output file as `Build FAILED` with ten screens of
+MSB3026 retries, which reads as "your code is broken" when it means "a daemon you cannot see
+is holding a file". The wrapper clears the holder, and when it cannot, it names the pid and
+the one command that will — on line one, not at minute forty. Every run logs to
+`.dodona\dev-logs`.
+
+**An edit that has not been built is a claim, not a change.** That has not softened; the
+wrapper is how you honour it. This was the single most expensive mistake in this project's
+history — twice:
+
+- A lane rewrote the dispatcher input box, was denied permission to build, and reported the
+  change as in. The operator restarted the app and saw nothing, because nothing had ever been
+  compiled. Worse, the code contained a real bug (WPF's TextBox class handler eats Enter
+  before an instance `KeyDown` runs) that one build-and-test would have caught.
+- Twenty-eight minutes of UI work sat in the working tree unbuilt and unpublished while the
+  operator restarted the app repeatedly wondering why it looked the same.
+
+If you cannot build — permission denied, a lock the wrapper could not clear, anything — **say
+so as the headline of your reply**, not as a footnote, and name the exact command.
+
+### Iterate fast, gate slow (operator directive, 2026-08-18)
+
+*"Ban any test that takes longer than a second or two. Twenty minutes of test is ridiculous."*
+
+The eleven suites take about twenty minutes because they start real daemons, real WPF windows
+and real builds — measured: only 3.6 minutes of that is fixed `Start-Sleep`, so the rest is
+inherent and cannot be optimised away. So they are **a gate, not a loop**:
+
+- **While iterating**: the narrowest thing that can fail. A single scenario against a fake
+  agent is ~10 seconds; pure-logic checks are instant. Anything that must start a daemon has
+  a ~5-10 second floor, and that is the honest target — 20 minutes down to 10 seconds, not to
+  1 second.
+- **Before committing**: `dev suites`, once.
+- **Three consecutive failed verification attempts**: stop and report. Do not grind. That one
+  rule would have saved most of 2026-08-18.
 
 ## 2. Completed work gets published — and the daemon now enforces this itself
 
