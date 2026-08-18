@@ -97,6 +97,8 @@ async Task<int> Dispatch() => cmd switch
     "workspace-alias" => WorkspaceEdit((r, id) => r.AddAlias(id, pos[0], out var e) ? null : e, "aliased"),
     "workspace-forget" => WorkspaceEdit((r, id) => r.Forget(id, out var e) ? null : e, "forgotten"),
     "where" => Where(),
+    "ps" => Ps(),
+    "stop-all" => StopAll(),
     // ---- the concierge (§2): one per machine, its own store, its own ctl pipe. It answers
     // exactly one question — which workspace — and holds no lanes, no claims, no tokens.
     "concierge" => await Concierge.RunAsync(),
@@ -304,6 +306,179 @@ int Where()
     Console.WriteLine($"  primary  {ws.Primary ?? "(no members)"}");
     Console.WriteLine($"  ctl pipe {Instance.CtlPipe(ws.Id)}");
     Console.WriteLine($"  registry {Paths.Registry}");
+    return 0;
+}
+
+/// <summary>
+/// Everything Dodona has running on this machine, in one place.
+///
+/// This exists because of a real surprise: the operator closed their window, believed
+/// nothing was running, and a daemon plus seventeen lane shims had been up for hours. That
+/// was not a bug — **a daemon deliberately outlives its UI window** (§13: the window is the
+/// disposable half, agents survive it, which is the whole point of the shim). But nothing
+/// anywhere would tell you so. "Is anything running?" had no answer short of Task Manager,
+/// and Task Manager cannot tell a test's processes from your own.
+///
+/// Reads liveness off the OS pipe namespace, the same way publish and the picker do (§14 —
+/// nothing global, no lock file, liveness is observed rather than stored), and crosses it
+/// with the registry so every live thing gets a name instead of a hex id.
+/// </summary>
+int Ps()
+{
+    var live = Instance.LiveCtlPipes();
+    var ui = Instance.LiveUiPipes();
+    var rows = new List<object>();
+    int running = 0;
+
+    List<Workspace> all;
+    try { using var reg = new Registry(); all = reg.All(); }
+    catch { all = new List<Workspace>(); }
+
+    Console.WriteLine("WHAT  NAME                 DAEMON  WINDOW  LANES  WHERE");
+    foreach (var w in all)
+    {
+        var isLive = live.Contains(Instance.CtlPipe(w.Id), StringComparer.OrdinalIgnoreCase);
+        var hasUi = ui.Contains(Instance.UiPipe(w.Id), StringComparer.OrdinalIgnoreCase);
+        var shims = ShimPids(Paths.WorkspaceDir(w.Id)).Count;
+        if (!isLive && !hasUi && shims == 0) continue;      // asleep and idle: not "running"
+        running++;
+        Console.WriteLine($"ws    {Trim(w.Name, 20),-20} {(isLive ? "yes   " : "no    ")}  " +
+                          $"{(hasUi ? "yes   " : "no    ")}  {shims,-5}  {w.Primary ?? "(no members)"}");
+        rows.Add(new { kind = "workspace", id = w.Id, name = w.Name, daemon = isLive, window = hasUi, lanes = shims });
+    }
+
+    if (live.Contains(Instance.CtlPipe(Instance.ConciergeId), StringComparer.OrdinalIgnoreCase))
+    {
+        running++;
+        Console.WriteLine($"cx    {Trim("concierge", 20),-20} yes     -       -      {Paths.ConciergeDir}");
+        rows.Add(new { kind = "concierge", id = Instance.ConciergeId, name = "concierge", daemon = true, window = false, lanes = 0 });
+    }
+    if (ui.Contains(Instance.UiPipe(Instance.ShellId), StringComparer.OrdinalIgnoreCase))
+    {
+        running++;
+        Console.WriteLine($"shell {Trim("(all workspaces)", 20),-20} -       yes     -      one window over N workspaces");
+        rows.Add(new { kind = "shell", id = Instance.ShellId, name = "shell", daemon = false, window = true, lanes = 0 });
+    }
+
+    // A live ctl pipe that matches no workspace in THIS registry: a pre-workspace instance,
+    // or one belonging to another DODONA_HOME. Named honestly rather than hidden — it is
+    // exactly the thing that was running unnoticed, and it is NOT a `--all` publish target.
+    var accounted = all.Select(w => Instance.CtlPipe(w.Id))
+        .Append(Instance.CtlPipe(Instance.ConciergeId)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    foreach (var orphan in live.Where(p => !accounted.Contains(p)))
+    {
+        running++;
+        Console.WriteLine($"?     {Trim(orphan, 20),-20} yes     ?       ?      unregistered — pre-workspace, or another DODONA_HOME");
+        rows.Add(new { kind = "unregistered", id = orphan, name = orphan, daemon = true, window = false, lanes = 0 });
+    }
+
+    if (opts.ContainsKey("json")) { Console.WriteLine(JsonSerializer.Serialize(rows)); return 0; }
+    if (running == 0) Console.WriteLine("(nothing running)");
+    else Console.WriteLine($"\n{running} running. `dodona stop-all` stops the daemons; add --lanes to take the agents down too.");
+    return 0;
+}
+
+static string Trim(string s, int n) => s.Length <= n ? s : s[..(n - 1)] + "…";
+
+/// <summary>Shim pids recorded for a workspace, from its own `shim-lane<N>.json` files —
+/// never by process name (CLAUDE.md §4: killing by name once murdered the operator's live
+/// session mid-trial).</summary>
+static List<(long Lane, int Shim, int Child)> ShimPids(string dir)
+{
+    var list = new List<(long, int, int)>();
+    try
+    {
+        foreach (var f in Directory.EnumerateFiles(dir, "shim-lane*.json"))
+        {
+            try
+            {
+                using var d = JsonDocument.Parse(File.ReadAllText(f));
+                var lane = long.TryParse(Path.GetFileNameWithoutExtension(f)["shim-lane".Length..], out var n) ? n : 0;
+                int Pid(string k) => d.RootElement.TryGetProperty(k, out var v) && v.TryGetInt32(out var i) ? i : 0;
+                list.Add((lane, Pid("shimPid"), Pid("childPid")));
+            }
+            catch { /* half-written or stale: skip it rather than fail the listing */ }
+        }
+    }
+    catch (DirectoryNotFoundException) { }
+    return list;
+}
+
+/// <summary>
+/// Stop everything Dodona is running, gracefully.
+///
+/// Daemons first, over their own control pipes, so each writes its own `daemon_stop` row —
+/// a shutdown with no reason in the causal chain is the thing DEBUGGING.md calls a bug.
+/// Lanes are left running by default, because that is what `stop-daemon` has always meant
+/// and what the shim exists for: agents survive their daemon and are re-adopted. `--lanes`
+/// takes them down too, resolved by recorded pid, which is the only safe way (§4).
+/// </summary>
+int StopAll()
+{
+    var live = Instance.LiveCtlPipes();
+    List<Workspace> all;
+    try { using var reg = new Registry(); all = reg.All(); }
+    catch { all = new List<Workspace>(); }
+
+    int stopped = 0;
+    foreach (var w in all.Where(w => live.Contains(Instance.CtlPipe(w.Id), StringComparer.OrdinalIgnoreCase)))
+    {
+        Console.WriteLine($"— stopping workspace {w.Name} ({w.Id})");
+        Client(new { cmd = "stop-daemon" }, Instance.CtlPipe(w.Id));
+        stopped++;
+    }
+    if (live.Contains(Instance.CtlPipe(Instance.ConciergeId), StringComparer.OrdinalIgnoreCase))
+    {
+        Console.WriteLine("— stopping the concierge");
+        Client(new { cmd = "stop" }, Instance.CtlPipe(Instance.ConciergeId));
+        stopped++;
+    }
+
+    var unregistered = live.Where(p => !all.Select(w => Instance.CtlPipe(w.Id))
+        .Append(Instance.CtlPipe(Instance.ConciergeId)).Contains(p, StringComparer.OrdinalIgnoreCase)).ToList();
+    foreach (var p in unregistered)
+    {
+        // Still stopped — it is running on this machine and the operator asked for quiet —
+        // but named, so "I stopped something I could not identify" is never silent.
+        Console.WriteLine($"— stopping unregistered instance on {p} (pre-workspace, or another DODONA_HOME)");
+        Client(new { cmd = "stop-daemon" }, p);
+        stopped++;
+    }
+
+    if (!opts.ContainsKey("lanes"))
+    {
+        var leftovers = all.Sum(w => ShimPids(Paths.WorkspaceDir(w.Id)).Count);
+        Console.WriteLine(stopped == 0 ? "nothing was running" : $"stopped {stopped} daemon(s); lanes keep running");
+        if (leftovers > 0)
+            Console.WriteLine($"{leftovers} lane agent(s) are still up — they survive their daemon on purpose. " +
+                              "`dodona stop-all --lanes` takes them down too.");
+        return 0;
+    }
+
+    int agents = 0;
+    foreach (var w in all)
+        foreach (var (lane, shim, child) in ShimPids(Paths.WorkspaceDir(w.Id)))
+            foreach (var pid in new[] { shim, child })
+            {
+                if (pid <= 0) continue;
+                try
+                {
+                    using var proc = System.Diagnostics.Process.GetProcessById(pid);
+                    // A recorded pid can be recycled by the OS onto something unrelated, and
+                    // killing that would be exactly the machine-wide damage resolving-by-pid
+                    // exists to avoid. Check what it actually is first.
+                    var name = proc.ProcessName;
+                    if (name is not ("DodonaShim" or "claude" or "node" or "DodonaFakeAgent"))
+                    {
+                        Console.WriteLine($"  skipped pid {pid} (lane {lane} of {w.Name}) — now '{name}', not ours");
+                        continue;
+                    }
+                    proc.Kill(entireProcessTree: true);
+                    agents++;
+                }
+                catch { /* already gone */ }
+            }
+    Console.WriteLine($"stopped {stopped} daemon(s) and {agents} agent process(es)");
     return 0;
 }
 
@@ -613,7 +788,7 @@ static (string? cmd, string root, Dictionary<string, List<string>> opts, List<st
 {
     // Valueless flags must be declared: otherwise `--json` at the end of a line is
     // indistinguishable from a positional argument, and silently becomes one.
-    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk", "shell", "concierge" };
+    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk", "shell", "concierge", "lanes" };
 
     string? cmd = null;
     string root = Environment.CurrentDirectory;
@@ -654,6 +829,10 @@ static void Help() => Console.WriteLine("""
               a REPO belongs to at most one workspace; move is how you reassign it
       dodona workspace-rename <NAME> | workspace-alias <name> | workspace-forget
       dodona where [--json]                 (store, dir, pipes — state left the project folder)
+      dodona ps [--json]                    (EVERYTHING running on this machine, named)
+      dodona stop-all [--lanes]             (stop the daemons; --lanes stops the agents too)
+              a daemon deliberately outlives its window, so "I closed the app" does NOT
+              mean nothing is running — `ps` is how you find out
     the concierge (one per machine; answers only "which workspace"):
       dodona concierge                      (run it; any concierge-* command starts one)
       dodona concierge-status               (tiers, the search fence, open questions)

@@ -242,12 +242,83 @@ sealed class Daemon
         {
             var rt = new LaneRuntime(l.Id, l.Pipe, _store);
             HookCompression(rt, l.Role);
-            if (await rt.ConnectAndPumpAsync(attempts: predecessorPid > 0 ? 20 : 3)) _lanes[l.Id] = rt;
-            else { _store.LaneState(l.Id, "unreachable"); _store.Event("lane_unreachable", l.Id, "reconcile: pipe did not answer"); }
+            // A WORK lane gets the patient retry: it may hold a real agent mid-turn, and a
+            // successor is adopting shims the predecessor only just let go of. A UTILITY lane
+            // gets one attempt — a brain, router or compressor whose pipe does not answer
+            // immediately is simply gone, and nothing about it is worth waiting for.
+            //
+            // This is not a micro-optimisation. Reconcile runs BEFORE the control pipe server,
+            // so every wasted attempt is time the daemon is not answerable at all. Measured on
+            // a copy of the operator's store, carrying 14 leaked brain lanes with dead pipes:
+            // ~2.4s each, about 35 seconds of a daemon that looked hung and refused
+            // `stop-daemon` because it had not started listening yet.
+            var patient = l.Role == "work";
+            var attempts = patient ? (predecessorPid > 0 ? 20 : 3) : 1;
+            if (await rt.ConnectAndPumpAsync(attempts)) _lanes[l.Id] = rt;
+            else { _store.LaneState(l.Id, "unreachable"); _store.Event("lane_unreachable", l.Id, $"reconcile: pipe did not answer in {attempts} attempt(s)"); }
             // An adopted pool member needs its lock back, or its turns would never gate.
             if (l.Role == "compressor" && _lanes.ContainsKey(l.Id)) _compressorLocks[l.Id] = new SemaphoreSlim(1, 1);
+
+            // ...and an adopted BRAIN needs its tier pointer back, for exactly the same
+            // reason. Without this, `_brainLo` was still -1 after reconcile, so the startup
+            // warm-up decided no brain existed and spawned a fresh lane — every single
+            // daemon start, while the previous brain sat connected, idle and unreachable.
+            //
+            // Measured on the operator's own instance: 14 BRAIN lanes (lane6…lane19), one per
+            // daemon start across a morning of auto-publish swaps, each an idle `claude -p`
+            // process nobody could reach. Compressors never leaked because the line above
+            // has always re-adopted them; the brain was simply missed when it was added.
+            //
+            // No quota was burned (LANE-LIFECYCLE §2: quota is consumed by turns, not by
+            // existing) — but it grows without bound and buries `dodona status`.
+            if (_lanes.ContainsKey(l.Id))
+            {
+                if (l.Role == "brain") _brainLo = l.Id;
+                else if (l.Role == "brain-hi") _brainHi = l.Id;
+            }
         }
-        _store.Event("reconcile_done", null, $"connected={_lanes.Count}");
+        // Retire UTILITY lanes whose shim is gone. A brain, router or compressor is fungible
+        // infrastructure with no thread: nothing resumes it, nobody reads its transcript, and
+        // leaving the row `alive` means every future start spends attempts reconnecting to a
+        // pipe that will never answer — 14 leaked brains cost about twelve seconds of dead
+        // reconnects at every startup.
+        //
+        // WORK lanes are deliberately untouched. An unreachable work lane stays visible
+        // because that one is a problem to notice, and `lane-respawn` can bring its session
+        // back (LANE-LIFECYCLE §1: agents are disposable, the lane is the thread).
+        foreach (var l in _store.LanesAll()
+                     .Where(l => l.State == "unreachable" && l.Role is "brain" or "brain-hi" or "router" or "compressor")
+                     .ToList())
+        {
+            _store.LaneState(l.Id, "dead");
+            _store.Event("utility_lane_reaped", l.Id, $"role={l.Role}: shim gone, nothing to resume");
+        }
+
+        // Retire brain lanes the old bug already leaked. Adopting one is what stops NEW ones
+        // appearing; this clears the ones a store has accumulated, so an existing instance
+        // heals itself on the next start instead of needing the operator to go and count
+        // processes. Utility roles only — a work lane is never retired behind the operator's
+        // back (LANE-LIFECYCLE §2: no eviction, and a parked lane is often deliberate).
+        foreach (var role in new[] { "brain", "brain-hi" })
+        {
+            var keep = role == "brain" ? _brainLo : _brainHi;
+            var surplus = _store.LanesAll()
+                .Where(l => l.Role == role && l.State == "alive" && l.Id != keep)
+                .ToList();
+            foreach (var l in surplus)
+            {
+                if (_lanes.TryGetValue(l.Id, out var rt)) { rt.Shutdown(); _lanes.Remove(l.Id); }
+                _store.LaneState(l.Id, "dead");
+                _store.Event("brain_surplus_retired", l.Id, $"role={role}; kept lane {keep}");
+            }
+            if (surplus.Count > 0)
+                Announce($"[dodona] retired {surplus.Count} duplicate {role.ToUpperInvariant()} lane(s) left by a fixed leak — one per daemon start; kept lane {keep}");
+        }
+
+        // A leak this quiet needs to be visible in the chain, not just absent.
+        _store.Event("reconcile_done", null,
+            $"connected={_lanes.Count} brain={(_brainLo > 0 ? _brainLo.ToString() : "-")} " +
+            $"brain-hi={(_brainHi > 0 ? _brainHi.ToString() : "-")} compressors={_compressorLocks.Count}");
         if (predecessorPid > 0)
         {
             Announce($"[dodona] swapped to build {Ver.Build} — {_lanes.Count} lane(s) adopted, nothing interrupted");
@@ -1204,6 +1275,24 @@ sealed class Daemon
             bool dirtyAnnounced = false;
             int tick = 0;
 
+            // Consecutive-failure backoff. Each edit-batch produces a new source timestamp,
+            // so `lastTried` alone only prevents retrying the SAME edit — it never notices
+            // that the last N attempts all failed for the same reason.
+            //
+            // Measured on the operator's instance: 16 attempts, 16 failures, in one afternoon.
+            // Every one ran a full three-project publish (minutes of CPU) and put another
+            // identical "auto-publish FAILED" row in the decision feed, until the failure that
+            // mattered was buried under fifteen copies of itself. The cause was legitimate and
+            // unfixable-by-retrying — a build whose successor could not hand off — which is
+            // exactly the shape where retrying forever is the wrong answer.
+            //
+            // So: give up after three in a row, say so ONCE, and stay quiet until something
+            // changes. A publish by hand clears it, because a successful swap ends this
+            // process entirely.
+            const int giveUpAfter = 3;
+            int consecutiveFailures = 0;
+            bool surrendered = false;
+
             while (true)
             {
                 await Task.Delay(15000);
@@ -1212,7 +1301,7 @@ sealed class Daemon
                     // ---- source drift: newer than the running image? ----
                     var maxSrc = NewestSource(project);
                     var image = File.GetLastWriteTimeUtc(Ver.ExePath);
-                    if (maxSrc > image && maxSrc != lastTried)
+                    if (maxSrc > image && maxSrc != lastTried && !surrendered)
                     {
                         if (maxSrc != lastMax) { lastMax = maxSrc; stableSince = DateTime.UtcNow; }
                         else if ((DateTime.UtcNow - stableSince).TotalSeconds >= _config.AutoPublishDebounceSec)
@@ -1225,9 +1314,21 @@ sealed class Daemon
                             {
                                 var reason = output.Split('\n').LastOrDefault(l => l.Contains("error", StringComparison.OrdinalIgnoreCase))
                                              ?? output.Split('\n').LastOrDefault(l => l.Trim().Length > 0) ?? "unknown";
-                                _store.Event("autopublish_failed", null, Truncate(output, 800));
-                                Announce($"[dodona] auto-publish FAILED — the live app is now BEHIND the sources: {Truncate(reason.Trim(), 160)}");
+                                consecutiveFailures++;
+                                _store.Event("autopublish_failed", null,
+                                    $"attempt {consecutiveFailures}/{giveUpAfter}: {Truncate(output, 800)}");
+                                if (consecutiveFailures >= giveUpAfter)
+                                {
+                                    surrendered = true;
+                                    _store.Event("autopublish_surrendered", null,
+                                        $"{consecutiveFailures} consecutive failures; watching stopped until a manual publish");
+                                    Announce($"[dodona] auto-publish has failed {consecutiveFailures} times running and has STOPPED trying — " +
+                                             $"the live app stays behind the sources until you publish by hand. Last reason: {Truncate(reason.Trim(), 140)}");
+                                }
+                                else
+                                    Announce($"[dodona] auto-publish FAILED — the live app is now BEHIND the sources: {Truncate(reason.Trim(), 160)}");
                             }
+                            else consecutiveFailures = 0;
                             // success: the swap arrives through our own control pipe and this
                             // daemon exits mid-handoff — nothing more to do here. A parked
                             // swap (mid-merge blocker) already announced its three answers.

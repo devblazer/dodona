@@ -170,6 +170,12 @@ and give a band the grid with `dodona ui workspace <name>` — the same code pat
 takes, without stealing focus. `DodonaUi.exe --shell` with nothing awake is **boot-to-zero**,
 a real state: just feed and input, and typing is how you leave it.
 
+**A daemon outlives its window.** Closing the app does not stop anything — that is the design
+(the window is disposable, agents survive behind their shims). `dodona ps` is how you find out
+what is actually running, and `dodona stop-all [--lanes]` is how you stop it. This cost the
+operator a surprise: they closed the window, believed the machine was idle, and a daemon plus
+seventeen shims had been up for hours.
+
 ## 4. Never kill processes by name
 
 ```powershell

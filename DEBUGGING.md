@@ -54,6 +54,42 @@ at most one workspace.** That index is what replaced path-hash identity as the s
 guarantee against two merge tokens over one main. If you ever see one repo path under two
 workspace ids, that is the incident — not a display bug.
 
+## "Is anything running?"
+
+```
+dodona ps [--json]        # every daemon, window and lane on this machine, named
+dodona stop-all [--lanes] # stop the daemons; --lanes takes the agents down too
+```
+
+**A daemon deliberately outlives its UI window.** That is the design, not a leak: the window
+is the disposable half (§13) and agents survive behind their shims, which is the whole reason
+a swap or a crash costs nothing. But it means **closing the app does NOT mean nothing is
+running**, and until `dodona ps` existed there was no way to find out short of Task Manager —
+which cannot tell a suite's processes from your own.
+
+`ps` names anything unregistered separately (a pre-workspace instance, or one belonging to
+another `DODONA_HOME`). Those are never `publish --all` targets, so seeing one here is the
+only way to know it is there.
+
+## Utility lanes are reaped; work lanes are not
+
+A brain, router or compressor whose shim is gone is marked `dead` at the next daemon start
+(`utility_lane_reaped`). They are fungible infrastructure with no thread — nothing resumes
+one and nobody reads its transcript. An unreachable **work** lane is deliberately left alone:
+that one is a problem to notice, and `lane-respawn` can bring its session back
+(`docs/LANE-LIFECYCLE.md` §1).
+
+This exists because of a real incident. `EnsureBrainAsync` spawns a brain when `_brainLo` is
+unset, `_brainLo` resets to -1 in every new process, and reconcile re-adopted *compressor*
+lanes but never the brain — so every daemon start spawned a fresh BRAIN lane while the
+previous one sat connected and unreachable. Found on the operator's own instance: **14 BRAIN
+lanes, one per start** across a morning of auto-publish swaps. No quota was burned (§2's
+"turns cost quota, existing does not"), but it grew without bound, and the dead pipes made
+reconcile — which runs BEFORE the control pipe server — take **35 seconds during which the
+daemon answered nothing and refused `stop-daemon` because it had not started listening**.
+Now: utility lanes get one connect attempt rather than three, and the reaper clears the rows.
+Measured on a copy of that store: 15.9s on the healing start, 1.2s every start after.
+
 ## Model and effort (§9)
 
 Every lane is its own `claude -p` process and inherits **nothing** from anyone's
@@ -287,7 +323,12 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   `lane_respawned` (a fresh agent resumed the recorded session).
   Auto-publish kinds: `autopublish_watching`, `autopublish_started`,
   `autopublish_failed` (the live app is now BEHIND the sources — fix the build),
+  `autopublish_surrendered` (three consecutive failures: it has STOPPED trying, and says so
+  once instead of announcing the same failure on every edit — measured at 16 identical
+  failures and 16 wasted three-project builds in one afternoon, until the reason that
+  mattered was buried under fifteen copies of itself),
   `autopublish_dirty_tree`, `autopublish_misconfigured`, `autopublish_error`.
+  Lifecycle: `utility_lane_reaped` (a brain/router/compressor whose shim is gone).
   Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
   `swap_forced`, `swap_refused`, `swap_failed`, `daemon_handoff`, `binary_gc`,
   `binary_gc_skipped`. **If a state change happened with no event row naming why, that

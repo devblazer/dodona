@@ -137,6 +137,37 @@ try {
     Check 'message_still_delivered_to_focused' ((Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$laneId AND kind='user_input' AND body LIKE '%entirely cryptic%'").Trim() -eq '1') ''
 
     Dodona @("ui", "close") | Out-Null
+    # ---- a daemon restart must ADOPT the brain, not spawn a second one ------------------
+    # The bug this guards: `_brainLo` resets to -1 in every new process, and reconcile
+    # re-adopted compressor lanes but never the brain -- so the startup warm-up concluded no
+    # brain existed and spawned a fresh lane. Every. Single. Start. Measured on the operator's
+    # own instance: 14 BRAIN lanes (lane6..lane19), one per daemon start across a morning of
+    # auto-publish swaps, each an idle `claude -p` nobody could reach. No quota burned
+    # (LANE-LIFECYCLE 2: turns cost quota, existing does not) but it grows without bound.
+    $brainBefore = (Rows "SELECT id FROM lanes WHERE role='brain' AND state='alive' ORDER BY id").Trim()
+
+    Dodona @("stop-daemon") | Out-Null
+    Start-Sleep -Seconds 1
+    $daemon = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws.Id -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon2.out" -RedirectStandardError "$out\daemon2.err"
+    Start-Sleep -Milliseconds 1200
+
+    $brainAfter = (Rows "SELECT id FROM lanes WHERE role='brain' AND state='alive' ORDER BY id").Trim()
+    Check 'restart_adopts_the_brain_it_already_had' ($brainAfter -eq $brainBefore) "before=[$brainBefore] after=[$brainAfter]"
+    Check 'restart_does_not_leak_a_second_brain' `
+        ((Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1') `
+        (Rows "SELECT id, title, role, state FROM lanes WHERE role LIKE 'brain%'")
+    # ...and asking for one again reuses it rather than making another.
+    Dodona @("brain-start") | Out-Null
+    Start-Sleep -Milliseconds 600
+    Check 'brain_start_after_restart_reuses_it' `
+        ((Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1') `
+        (Rows "SELECT id, role, state FROM lanes WHERE role LIKE 'brain%'")
+    # The adoption is in the causal chain, not just in memory.
+    Check 'reconcile_records_which_brain_it_adopted' `
+        ((Rows "SELECT detail FROM events WHERE kind='reconcile_done' ORDER BY id DESC LIMIT 1") -match 'brain=\d+') `
+        (Rows "SELECT detail FROM events WHERE kind='reconcile_done' ORDER BY id DESC LIMIT 1")
+
     Dodona @("stop-daemon") | Out-Null
 }
 finally {

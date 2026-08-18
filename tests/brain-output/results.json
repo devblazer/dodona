@@ -15,5 +15,9 @@
     "unclear_escalates_to_expensive":  "PASS",
     "double_uncertainty_asks_the_operator":  "PASS",
     "clarification_in_causal_chain":  "PASS",
-    "message_still_delivered_to_focused":  "PASS"
+    "message_still_delivered_to_focused":  "PASS",
+    "restart_adopts_the_brain_it_already_had":  "PASS",
+    "restart_does_not_leak_a_second_brain":  "PASS",
+    "brain_start_after_restart_reuses_it":  "PASS",
+    "reconcile_records_which_brain_it_adopted":  "PASS"
 }
