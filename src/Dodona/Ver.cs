@@ -1,5 +1,6 @@
 using System.IO;                 // explicit: this file also compiles into the WPF project,
                                  // whose implicit usings are narrower than the console one's
+using System.Reflection;         // AssemblyInformationalVersionAttribute -- the build's provenance
 
 namespace Dodona;
 
@@ -14,9 +15,14 @@ namespace Dodona;
 ///   ShimProtocol  — the wire the shims speak. Live shims were spawned by the OLD
 ///                   binary; a successor that speaks a different protocol would orphan
 ///                   every running agent. Also not hot-swappable.
-///   Build         — identity, not compatibility: assembly version + the build stamp of
-///                   the image on disk. This is what `dodona status` reports and what a
-///                   swap test asserts changed.
+///   Build         — IMAGE identity, not compatibility and not provenance: assembly version
+///                   plus the mtime stamp of the image on disk. It stays a stamp because its
+///                   job is to tell two publishes apart, and two publishes of the same commit
+///                   are genuinely different images. WHAT THE BUILD WAS MADE FROM is a
+///                   separate question with a separate answer -- `Commit`/`Provenance` below,
+///                   which is what `status` reports and what the drift watcher compares
+///                   (P2.6: "a timestamp mapping to nothing" was the complaint, and the fix
+///                   is to ADD the commit, not to lose image identity).
 /// </summary>
 static class Ver
 {
@@ -99,67 +105,124 @@ static class Ver
         "  ps, where and publish are unaffected.";
 
 
-    // ---------------------------------------------------------- what a build was built FROM
+    // ------------------------------------------------------- what commit a build was made FROM
 
-    /// <summary>The newest source timestamp in a Dodona tree — the thing auto-publish asks
-    /// "am I behind?" about. Lives here, not in the daemon, because BOTH sides of that
-    /// question need the identical definition: the watcher computes it, and publish stamps
-    /// it into the build so the comparison is like-for-like.</summary>
-    public static DateTime NewestSource(string project)
+    /// <summary>
+    /// The commit a published build was made from, carried INSIDE the binary.
+    ///
+    /// THIS REPLACED FOUR MTIME HELPERS AND FIVE GUARDS (RECOVERY-PHASES P2.3/P2.4). The drift
+    /// watcher used to ask "is any source file newer than the running image?" -- a question no
+    /// filesystem can answer exactly. It needed a debounce so a half-saved edit was not built,
+    /// a <c>.built-from</c> stamp because the newest source spans three projects while the
+    /// image is one of them, a persisted <c>kv.autopublish_last_tried</c> because an
+    /// in-process guard is reset by the swap it triggers, and a 30-minute dirty-tree nag. The
+    /// asymmetry still looped 64 times in one afternoon: 72 daemon restarts, a full
+    /// three-project build every ~65 seconds, four consecutive swaps reporting the
+    /// byte-identical <c>sources 15:56:19 &gt; image 15:55:55</c>.
+    ///
+    /// <c>git rev-parse main</c> against the SHA this build was made from is EXACT: no clock,
+    /// no partial-write window, no project asymmetry. A commit is atomic and already quiet, so
+    /// the debounce is unnecessary; the SHA is its own guard, so lastTried is unnecessary.
+    ///
+    /// IN THE ASSEMBLY, not in a file beside it, and that is deliberate. A side stamp can go
+    /// missing (and did: <c>publish --exe</c> never had one), and a missing stamp used to
+    /// DEGRADE to the loop-prone mtime compare -- a silent fallback into the exact bug. An
+    /// image that cannot say what it was built from now says so out loud instead, and the
+    /// watcher refuses to guess.
+    ///
+    /// Format, after the '+' of InformationalVersion. Written by <see cref="Stamp"/> and read
+    /// here, so the two can never drift apart:
+    /// <code>
+    ///   c=&lt;sha&gt;~d=&lt;0|1&gt;~m=&lt;mainSha&gt;~b=&lt;branch&gt;
+    /// </code>
+    /// TILDE, and not a comma, MEASURED THE HARD WAY: the dotnet CLI splits a <c>-p:k=v</c>
+    /// value on commas, so a comma-separated stamp arrived as <c>c=&lt;sha&gt;</c> with
+    /// everything after the first comma silently dropped -- trial detection and the main
+    /// baseline both gone, with no error anywhere. Git forbids <c>~</c> in a ref name
+    /// (git-check-ref-format), so it cannot collide with a branch either, which is what lets
+    /// <c>b=</c> sit LAST and run to the end of the string.
+    ///
+    /// A build with no <c>c=</c> has NO Dodona provenance, and every consumer must treat that
+    /// as "unknown", never as "behind". That check is deliberately for OUR marker rather than
+    /// merely for a non-empty suffix: the .NET SDK puts a bare commit SHA there by itself, and
+    /// mistaking it for provenance would look like an answer while saying nothing about which
+    /// branch, which baseline, or whether the tree was clean.
+    /// </summary>
+    public static string Provenance { get; } = ReadProvenance();
+
+    /// <summary>The commit this build was made from; empty when unknown.</summary>
+    public static string Commit => Field("c");
+
+    /// <summary>Where <c>main</c> stood when this build was made. For a main build that is the
+    /// same as <see cref="Commit"/>; for a TRIAL it is the baseline the trial was cut against,
+    /// which is what lets "the next commit to main replaces the trial" (P2.5) work without any
+    /// remembered state: the binary carries its own baseline, so nothing survives a handoff
+    /// wrongly and nothing has to be reset.</summary>
+    public static string MainBaseline => Field("m") is { Length: > 0 } m ? m : Commit;
+
+    /// <summary>The branch this build was made from; empty when unknown.</summary>
+    public static string Branch => Field("b");
+
+    /// <summary>Was the tree dirty when this was built? Then the SHA does not fully describe
+    /// the binary, and saying <c>build=&lt;sha&gt;</c> alone would be a small lie.</summary>
+    public static bool Dirty => Field("d") == "1";
+
+    /// <summary>A build whose commit is not <c>main</c> -- a deliberate trial (P2.5/D-1).</summary>
+    public static bool IsTrial => Commit.Length > 0 && Field("m") is { Length: > 0 } m && m != Commit;
+
+    /// <summary>True when this image cannot say what commit it came from.</summary>
+    public static bool NoProvenance => Commit.Length == 0;
+
+    /// <summary>One line for <c>status</c> and the swap feed. Bisectable: the SHA it prints is
+    /// a commit <c>git log</c> knows (RECOVERY-PHASES P2.6).</summary>
+    public static string ProvenanceLine
     {
-        var newest = DateTime.MinValue;
-        var src = Path.Combine(project, "src");
-        if (Directory.Exists(src))
-            foreach (var f in Directory.EnumerateFiles(src, "*", SearchOption.AllDirectories))
-            {
-                if (f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar) ||
-                    f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar)) continue;
-                if (!(f.EndsWith(".cs") || f.EndsWith(".xaml") || f.EndsWith(".csproj"))) continue;
-                var t = File.GetLastWriteTimeUtc(f);
-                if (t > newest) newest = t;
-            }
-        var dj = Path.Combine(project, "dodona.json");
-        if (File.Exists(dj) && File.GetLastWriteTimeUtc(dj) > newest) newest = File.GetLastWriteTimeUtc(dj);
-        return newest;
+        get
+        {
+            if (NoProvenance)
+                return "build=unknown (no commit provenance -- built by `dev build`, or published with --exe)";
+            var dirty = Dirty ? " +uncommitted-changes" : "";
+            return IsTrial
+                ? $"trial: {(Branch.Length > 0 ? Branch : "detached")}@{Short(Commit)}{dirty} (main was {Short(MainBaseline)})"
+                : $"build={Short(Commit)}{dirty}";
+        }
     }
 
-    /// <summary>The name of the stamp publish leaves beside the binaries.</summary>
-    public const string BuiltFromFile = ".built-from";
+    public static string Short(string sha) => sha.Length >= 12 ? sha.Substring(0, 12) : sha;
 
-    /// <summary>Record the source snapshot a published directory was built from.
-    ///
-    /// This exists because the obvious comparison — newest source vs. the mtime of the
-    /// running dodona.exe — is not like-for-like, and looped forever on 2026-08-18.
-    /// `NewestSource` spans ALL THREE projects, while the image is only ONE of them: edit
-    /// `src\DodonaUi\MainWindow.xaml.cs` and MSBuild correctly skips the up-to-date Dodona
-    /// project, the publish copy preserves LastWriteTime, and dodona.exe's mtime can never
-    /// catch up. The condition stays true forever. Measured: 64 auto-publishes and 72 daemon
-    /// restarts in one afternoon, one full three-project build every ~65 seconds, four
-    /// consecutive swaps reporting the byte-identical `sources 15:56:19 > image 15:55:55`.
-    ///
-    /// Stamp it BEFORE building, never after: an edit that lands mid-build is genuinely not
-    /// in this build, and claiming it is would swallow the operator's change silently. The
-    /// honest error is one extra publish, not a lost edit.</summary>
-    public static void WriteBuiltFrom(string outDir, DateTime builtFrom)
-    {
-        try { File.WriteAllText(Path.Combine(outDir, BuiltFromFile), builtFrom.ToString("o")); }
-        catch { /* a missing stamp degrades to the legacy mtime compare, never to a crash */ }
-    }
+    /// <summary>Build the provenance value publish stamps in. Lives beside the reader on
+    /// purpose: both sides of this question need the identical definition, which is the one
+    /// thing the old mtime comparison never had.</summary>
+    public static string Stamp(string commit, string mainSha, string branch, bool dirty) =>
+        $"c={commit}~d={(dirty ? "1" : "0")}~m={mainSha}~b={branch}";
 
-    /// <summary>What the source tree looked like when THIS running image was built. Falls
-    /// back to the image's own mtime for a build published before stamps existed (and for
-    /// `publish --exe <prebuilt>`, where nobody knows what it was built from) — the old,
-    /// loop-prone behaviour, but only for builds that predate the fix.</summary>
-    public static DateTime ImageBuiltFrom(string exePath)
+    static string ReadProvenance()
     {
         try
         {
-            var f = Path.Combine(Path.GetDirectoryName(exePath) ?? ".", BuiltFromFile);
-            if (File.Exists(f) && DateTime.TryParse(File.ReadAllText(f).Trim(), null,
-                    System.Globalization.DateTimeStyles.RoundtripKind, out var t)) return t.ToUniversalTime();
-            return File.GetLastWriteTimeUtc(exePath);
+            var iv = typeof(Ver).Assembly
+                .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (string.IsNullOrEmpty(iv)) return "";
+            var plus = iv.IndexOf('+');
+            var suffix = plus >= 0 && plus + 1 < iv.Length ? iv.Substring(plus + 1) : "";
+            // Only OUR stamp counts. The SDK writes a bare SHA here on its own.
+            return suffix.StartsWith("c=", StringComparison.Ordinal) ? suffix : "";
         }
-        catch { return DateTime.MinValue; }
+        catch { return ""; }      // an unreadable attribute is "unknown", never a crash
+    }
+
+    /// <summary>Pull one field out of the provenance string. <c>b</c> runs to the end.</summary>
+    static string Field(string key)
+    {
+        var prov = Provenance;
+        if (prov.Length == 0) return "";
+        var needle = key + "=";
+        var i = prov.StartsWith(needle, StringComparison.Ordinal) ? 0 : prov.IndexOf("~" + needle, StringComparison.Ordinal);
+        if (i < 0) return "";
+        var from = (i == 0 ? 0 : i + 1) + needle.Length;
+        if (key == "b") return prov.Substring(from);          // b= runs to the end: git forbids ~ in a ref
+        var sep = prov.IndexOf('~', from);
+        return sep < 0 ? prov.Substring(from) : prov.Substring(from, sep - from);
     }
 
     static string Compute()

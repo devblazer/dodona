@@ -201,17 +201,29 @@ inherent and cannot be optimised away. So they are **a gate, not a loop**:
 ## 2. Completed work gets published — and the daemon now enforces this itself
 
 **This rule is no longer only yours to remember.** With `"autoPublish": true` in
-`dodona.json` (on, for this repo), the daemon watches the source tree and publishes +
-swaps itself when the sources are newer than the image it runs. It waits for the tree to
-go quiet first, a failed build changes nothing and is announced loudly, and a 30-minute
-dirty tree gets one announcement — because edited-not-built, built-not-published and
-published-not-committed each blocked the operator once in a single day, and an instruction
-in this file is advisory while a watcher is not (the claim-gate reasoning, §6).
+`dodona.json` (on, for this repo), the daemon compares **`git rev-parse main` against the
+commit the running build was made from**, and when they differ it builds *that commit* — in a
+detached worktree of its own, never your tree — and swaps itself to it. A failed build changes
+nothing and is announced loudly. This exists because edited-not-built, built-not-published and
+published-not-committed each blocked the operator once in a single day, and an instruction in
+this file is advisory while a watcher is not (the claim-gate reasoning, §6).
+
+**Only `main` publishes itself** (decision D-1, Phase 2b). Uncommitted work cannot reach the
+app at all now — which is the point: any session's half-finished edit used to be able to. To
+trial something deliberately:
+
+```powershell
+dodona publish --from <ref|worktree>     # stamped as a TRIAL; status says so
+```
+
+A trial says what it is (`trial: <branch>@<sha>`) and **the next commit to `main` replaces
+it**, because the trial build carries the `main` SHA it was cut against. Nothing to remember,
+nothing to reset.
 
 What that leaves for YOU: still build before reporting (rule 1 — the watcher publishing
 your broken edit produces a loud failure with your name on it), still commit (the watcher
 nags, it does not commit for you), and still run publish yourself when the operator asks
-or when you want the swap *now* rather than a debounce later.
+or when you want the swap *now* rather than at the next 15-second poll.
 
 **Finishing a piece of work — or being asked to publish — means running publish.** Not
 "mention that it could be published", not leaving it built-but-installed-nowhere. The
@@ -267,24 +279,38 @@ whose daemon died on startup — the front door itself rotted, and every project
 against it (2026-08-18). The shortcut launches `DodonaUi.exe --shell` — the workspace
 shell. (The folder picker no longer exists at all, see §3.1.)
 
-**Auto-publish compares like with like, and its guard lives in the store.** It once looped
-64 times in an afternoon — 72 daemon restarts, a full three-project build every ~65 seconds,
-four consecutive swaps reporting the byte-identical `sources 15:56:19 > image 15:55:55`.
-Two independent halves, and each alone was enough:
+**Auto-publish asks an exact question now, and the five guards that made an inexact one
+behave are deleted.** It once looped 64 times in an afternoon — 72 daemon restarts, a full
+three-project build every ~65 seconds, four consecutive swaps reporting the byte-identical
+`sources 15:56:19 > image 15:55:55`. The cause was that "is any source newer than the running
+image?" is not answerable by a filesystem: the newest source spanned **all three** projects
+while the image was **one** of them, so editing `src\DodonaUi\MainWindow.xaml.cs` left a
+condition that could never be satisfied — and the guard that should have stopped it was an
+in-process local, reset by the very swap it triggered.
 
-- it compared the newest source across **all three projects** against the mtime of the **one**
-  binary the daemon runs. Edit `src\DodonaUi\MainWindow.xaml.cs`, MSBuild correctly skips the
-  up-to-date Dodona project, the publish copy preserves `LastWriteTime`, and `dodona.exe`'s
-  mtime can never catch up — the condition is true forever. Publish now stamps `.built-from`
-  (the source snapshot, taken **before** compiling, so an edit landing mid-build is never
-  falsely claimed as built) and the watcher compares against that.
-- the `lastTried` guard that would have stopped it was a local. A successful auto-publish
-  hands off and **that process exits**, so the guard was reset by the very swap it triggered.
-  It is `kv.autopublish_last_tried` now: in-process state cannot guard anything that survives
-  a handoff.
+It compares **two SHAs**. That is the whole mechanism, and it needs no guards:
 
-That is also the upstream cause of the 14 leaked BRAIN lanes below — a symptom of one restart
-per minute, not a bug of its own.
+- The commit is compiled **into the binary** (`InformationalVersion`, read by `Ver.Commit`), so
+  a build always knows what it came from and there is no stamp file to lose. `dodona status`
+  and `version --json` report it, so what is running is checkable against `git log` and
+  bisectable.
+- **A build with no provenance refuses to watch, out loud.** `dev build` images and
+  `publish --exe <prebuilt>` compiled nothing, so they know no commit — and the old code
+  *degraded to the mtime compare* in exactly that case, which is the bug wearing a fallback.
+  One announcement, then it stops; any `publish` from a git checkout arms it.
+- **Gone:** `Ver.NewestSource`, `Ver.WriteBuiltFrom`, `Ver.ImageBuiltFrom`, the `.built-from`
+  file, `autoPublishDebounceSec`, `kv.autopublish_last_tried`, and the 30-minute dirty-tree
+  nag. A commit is atomic and already quiet, so there is nothing to debounce; the SHA is its
+  own guard; and uncommitted work can no longer reach the app, so nagging about it answers a
+  question nobody can ask. **Kept:** surrender after three consecutive failures — a broken
+  `main` must not rebuild forever, and that was never about mtimes.
+
+Two traps this cost, both worth knowing before you touch the stamp: the **dotnet CLI splits a
+`-p:k=v` value on commas**, so a comma-separated stamp silently arrives truncated at the first
+comma (trial detection and the baseline both vanished, with no error anywhere) — the separator
+is `~`, which git forbids in a ref name. And the SDK appends its own `.<SourceRevisionId>`
+unless `IncludeSourceRevisionInInformationalVersion=false`; it also writes a bare SHA there by
+itself, so `Ver` accepts only its own `c=` marker.
 
 Blocked swaps **arm themselves** instead of asking (`swap-answer now` forces, `hold`
 parks — holding is opt-in, waiting never is), and a schema-migrating swap **backs up the

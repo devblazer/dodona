@@ -107,6 +107,28 @@ try {
     Check 'new_daemon_serves' ($newPid -gt 0 -and $newPid -ne $d1.Id) $status
     Check 'new_daemon_is_published_build' ($status -match [regex]::Escape($binRoot)) $status
 
+    # ---- provenance is a COMMIT (RECOVERY-PHASES P2.6) --------------------------------------
+    # This suite already pays for a REAL build, which is the only place the stamp can be
+    # observed end to end: publish resolves the commit, passes it to the compiler as
+    # InformationalVersion, and the binary reads it back out of its own assembly. Asserted here
+    # rather than in publish-acceptance because that suite deliberately publishes a PREBUILT
+    # binary and so can only ever assert the negative.
+    #
+    # `git cat-file -t` is the half that matters: it demands the SHA is a commit this repository
+    # actually has, which is what "bisectable" means. A stamp that merely looks like a hex
+    # string would pass an equality check against itself and prove nothing -- the build used to
+    # report a timestamp mapping to nothing, and the fix is only real if the value resolves.
+    $head = (& git -C $repo rev-parse HEAD 2>$null).Trim()
+    $pubDir = @(Get-ChildItem -Directory $binRoot | Where-Object { $_.Name -ne 'bogus' })[0].FullName
+    $vj = & "$pubDir\dodona.exe" version --json 2>$null | ConvertFrom-Json
+    Check 'published_build_carries_its_commit' ($vj.commit -eq $head -and $head.Length -eq 40) "commit=$($vj.commit) head=$head"
+    Check 'published_commit_is_a_real_commit' `
+        ($vj.commit.Length -eq 40 -and (& git -C $repo cat-file -t $vj.commit 2>$null) -eq 'commit') "commit=$($vj.commit)"
+    # The tree under test is whatever the session has checked out, so branch and dirtiness are
+    # not fixed -- but they must be REPORTED, and a dirty build must never claim to be clean.
+    $treeDirty = @(& git -C $repo status --porcelain).Count -gt 0
+    Check 'published_build_admits_uncommitted_changes' ($vj.dirty -eq $treeDirty) "dirty=$($vj.dirty) tree=$treeDirty"
+
     # the agent never noticed: shim and child are the SAME processes as before
     Check 'shim_survived_swap' ([bool](Get-Process -Id $shimInfo.shimPid -ErrorAction SilentlyContinue)) ''
     Check 'agent_survived_swap' ([bool](Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue)) ''

@@ -297,13 +297,9 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   the operator asked, because guessing between "new work" and "continues something" is the one
   routing mistake that cannot be undone. `undone` is reserved for the UI's undo keystroke —
   free labeled data for tuning the confidence threshold.
-- **`kv`** — small state: `focused_lane`, `dispatcher_lane`, `autopublish_last_tried` (the
-  source snapshot the drift watcher last acted on — in the store precisely because a
-  successful publish REPLACES the daemon process, so an in-process guard is reset by the
-  very swap it triggered), `rate_limit` (the latest
-  `rate_limit_event` off any lane's wire, with the timestamp it was observed — the
-  authoritative 5-hour-window number the dispatcher column shows, aged honestly because
-  it only updates when a lane takes a turn).
+- **`kv`** — small state: `focused_lane`, `dispatcher_lane` (`autopublish_last_tried` was
+  DELETED in Phase 2b — the drift watcher compares two SHAs now and needs no remembered
+  state. An old store may still carry the row; nothing reads it.)
 - **`lanes`** additionally carries `presence` (derived by code from tool_use wire
   events — never a model) and `role ∈ work | router | compressor | dispatcher`. Only
   `work` lanes take a grid slot, receive routed input, or have their turn-finals
@@ -336,18 +332,21 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   `compressor_timeout`, `compressor_failed`. Lifecycle kinds: `lane_stopped`,
   `lane_dormant` (its ticket landed — the agent was retired, the lane keeps the thread),
   `lane_respawned` (a fresh agent resumed the recorded session).
-  Auto-publish kinds: `autopublish_watching`, `autopublish_started`,
-  `autopublish_failed` (the live app is now BEHIND the sources — fix the build),
-  `autopublish_surrendered` (three consecutive failures: it has STOPPED trying, and says so
-  once instead of announcing the same failure on every edit — measured at 16 identical
-  failures and 16 wasted three-project builds in one afternoon, until the reason that
-  mattered was buried under fifteen copies of itself),
-  `autopublish_dirty_tree`, `autopublish_misconfigured`, `autopublish_error`.
-  `autopublish_started`'s detail now reads `sources <t> > built-from <t>`: the right-hand
-  side is the `.built-from` stamp publish leaves beside the binaries, **not** the exe's
-  mtime — comparing a three-project measure to a one-project artefact looped 64 times in an
-  afternoon. Identical timestamps in consecutive `autopublish_started` rows ARE that loop;
-  `kv.autopublish_last_tried` (which survives the handoff a swap performs) now stops it.
+  Auto-publish kinds: `autopublish_watching` (detail names the branch tracked, the commit
+  running, and the baseline), `autopublish_started`, `autopublish_failed` (the live app is now
+  BEHIND main — fix the build), `autopublish_surrendered` (three consecutive failures: it has
+  STOPPED trying, and says so once), `autopublish_misconfigured`, `autopublish_error`, and
+  **`autopublish_no_provenance`** — new in Phase 2b: this build cannot say what commit it came
+  from (a `dev build` image, or `publish --exe <prebuilt>`), so it is NOT watching rather than
+  guessing. That row plus an announcement is the whole symptom; publishing once from a git
+  checkout arms it.
+
+  `autopublish_started`'s detail reads `main at <sha>, this build baselined <sha>` — two
+  commits, not two timestamps. **`autopublish_dirty_tree` is GONE**, with the 30-minute nag
+  that raised it: uncommitted work can no longer reach the app, so there is nothing to warn
+  about. If you are reading an OLD store, `autopublish_started` rows detailed
+  `sources <t> > built-from <t>`, and identical timestamps in consecutive rows are the
+  64-iteration loop of 2026-08-18 — the failure the SHA comparison replaced.
   Lifecycle: `utility_lane_reaped` (a brain/router/compressor whose shim is gone).
   Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
   `swap_forced`, `swap_refused`, `swap_failed`, `daemon_handoff`, `binary_gc`,

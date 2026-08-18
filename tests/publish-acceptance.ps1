@@ -159,26 +159,67 @@ try {
 
     Dx @('concierge-stop') | Out-Null
     # ---- provenance: only a build we PERFORMED may claim what it was built from ----------
-    # Auto-publish asks "am I behind my sources?". It used to answer by comparing the newest
-    # .cs/.xaml/.csproj across ALL THREE projects against the mtime of the ONE binary the
-    # daemon runs. Edit src\DodonaUi\MainWindow.xaml.cs, MSBuild correctly skips the
-    # up-to-date Dodona project, the publish copy preserves LastWriteTime, and dodona.exe's
-    # mtime can NEVER catch up -- so the condition stayed true forever: 64 auto-publishes and
-    # 72 daemon restarts in one afternoon, a full three-project build every ~65 seconds, four
-    # consecutive swaps reporting the byte-identical `sources 15:56:19 > image 15:55:55`.
-    # Publish now stamps `.built-from` with the snapshot it compiled, taken BEFORE the build.
+    # Auto-publish asks "has main moved?", and answers by comparing `git rev-parse main` to the
+    # commit the running build was made from. It used to ask "am I newer than my sources?" and
+    # answer with mtimes: the newest .cs/.xaml/.csproj across ALL THREE projects against the
+    # mtime of the ONE binary the daemon runs. Edit src\DodonaUi\MainWindow.xaml.cs, MSBuild
+    # correctly skips the up-to-date Dodona project, the publish copy preserves LastWriteTime,
+    # and dodona.exe's mtime can NEVER catch up -- so the condition stayed true forever: 64
+    # auto-publishes and 72 daemon restarts in one afternoon, a full three-project build every
+    # ~65 seconds, four consecutive swaps reporting the byte-identical
+    # `sources 15:56:19 > image 15:55:55`.
     #
-    # What is asserted here is the half a hermetic suite CAN own: a `--exe` publish compiled
-    # nothing, so it must NOT leave a stamp -- an unknown-provenance binary has to fall back
-    # to the mtime compare rather than inherit a claim about sources it never saw. The other
-    # half (a real build stamps, and the drift it answers then reads false) cannot live in a
-    # suite: publishing the real tree means running `dotnet` against this repo's own `obj/`,
-    # which the operator's live auto-publish daemon is also building into. Two builds, one
-    # obj -- and 17's "tests collide with nothing" includes the instance they are using right
-    # now. It is covered by measurement and by Ver.WriteBuiltFrom's comment instead.
-    Check 'prebuilt_publish_claims_no_provenance' `
-        (-not (Test-Path (Join-Path (Split-Path -Parent $dodona) '.built-from'))) `
-        (Split-Path -Parent $dodona)
+    # THIS CHECK USED TO ASSERT THE ABSENCE OF A `.built-from` FILE. That file is gone (P2.4 is
+    # a deletion), so the old assertion became vacuously true -- it would have passed against
+    # any build forever, which is precisely the green check nobody has seen fail. What it was
+    # really protecting is asserted directly instead: a `--exe <prebuilt>` publish compiled
+    # nothing, so the binary must claim NOTHING about a commit.
+    #
+    # The binaries under test are a copy of a `dev build` image, which is exactly the
+    # unknown-provenance case. Note the .NET SDK writes a bare commit SHA into
+    # InformationalVersion by itself, so "the suffix is non-empty" would NOT be a valid test;
+    # Ver only accepts its own `c=` marker, and that distinction is what this asserts.
+    $vj = Dx @('version', '--json') | ConvertFrom-Json
+    Check 'prebuilt_publish_claims_no_provenance' ($vj.commit -eq '' -and -not $vj.trial) "commit=$($vj.commit)"
+
+    # ...and it SAYS SO rather than guessing. The old code degraded to the image's own mtime
+    # whenever the stamp was missing -- the loop-prone comparison wearing a fallback, reached
+    # every single time by `--exe`. A daemon that cannot tell whether main moved must announce
+    # that it is not watching, because a silent degrade is a bug (CLAUDE.md section 3: the
+    # routing ladder was green and dead in production for two days, and its only symptom was a
+    # status-line suffix nobody reads).
+    $apRoot = Join-Path $env:TEMP ("dodona-pub-ap-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    New-Item -ItemType Directory -Force $apRoot | Out-Null
+    New-Item -ItemType Directory -Force "$apRoot\src\Dodona" | Out-Null
+    # autoPublish on, and a src\Dodona\Dodona.csproj so the watcher gets PAST its
+    # "not a Dodona source tree" guard and reaches the provenance question this asserts.
+    Set-Content "$apRoot\src\Dodona\Dodona.csproj" '<Project />' -Encoding utf8
+    Set-Content "$apRoot\dodona.json" '{ "main": "main", "autoPublish": true }' -Encoding utf8
+    Dx @('workspace-create', 'apnoprov', '--root', $apRoot) | Out-Null
+    $apWs = (Dx @('where', '--workspace', 'apnoprov', '--json') | ConvertFrom-Json)
+    # DODONA_NO_AUTOSTART is set for this whole suite and the watcher declines under it, so this
+    # one daemon runs with it CLEARED -- the operator's own path (CLAUDE.md section 3: every
+    # suite must exercise at least one path the way the operator runs it). Cleared on the parent
+    # and restored in the finally, because Start-Process -Environment is PowerShell 7.4+ and
+    # this repo is 5.1 (section 0.2's family of traps).
+    Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
+    $apDaemon = Start-Process -FilePath $dodona -ArgumentList @('daemon', '--workspace', 'apnoprov') `
+        -PassThru -NoNewWindow -RedirectStandardOutput "$outp-noprov.out" -RedirectStandardError "$outp-noprov.err"
+    try {
+        $seen = ''
+        foreach ($i in 1..40) {
+            Start-Sleep -Milliseconds 250
+            $seen = Dx @('feed', '--workspace', 'apnoprov')
+            if ($seen -match 'no commit provenance') { break }
+        }
+        Check 'no_provenance_daemon_refuses_to_guess' ($seen -match 'no commit provenance' -and $seen -match 'NOT watching') $seen
+    }
+    finally {
+        $env:DODONA_NO_AUTOSTART = "1"          # the rest of the suite owns daemon lifetime again
+        Dx @('stop-daemon', '--workspace', 'apnoprov') | Out-Null
+        if ($apDaemon -and -not $apDaemon.HasExited) { try { Stop-Process -Id $apDaemon.Id -Force } catch { } }
+        Remove-Item $apRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
     foreach ($n in 'alpha', 'beta') { Dx @('stop-daemon', '--workspace', $wsIds[$n]) | Out-Null }
 }

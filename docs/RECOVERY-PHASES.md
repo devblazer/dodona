@@ -280,7 +280,7 @@ is believed — a check that has not been seen red is worth nothing, and that is
 | `dev suites` green while the live app runs, app untouched | I1, I2 | **earned 2a** — asserts the live app's pids survive the suites; prints `n/a` rather than a green line when no app is running |
 | `Measure-Command { dev suites }` under 60 s | I7 | 5 m 16 s |
 | repo lint clean | I8 | 2 corrupt lines |
-| `dodona status` build SHA is a commit `git log` knows | I2 | a timestamp mapping to nothing |
+| `dodona status` build SHA is a commit `git log` knows | I2 | **earned 2b** — asks the INSTALLED build and demands `git cat-file -t` resolves it to a commit; prints `n/a` when nothing is installed, or when the installed image carries no provenance (a `dev build` or `--exe` publish, which is a real state and not a failure) |
 
 ---
 

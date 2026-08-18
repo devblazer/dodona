@@ -577,14 +577,20 @@ int StopAll()
 
 int Version()
 {
+    // `commit` is the field that makes this bisectable (P2.6): it names a commit `git log`
+    // knows, where `build` is only an image stamp that maps to nothing outside this machine.
+    // Both are reported -- they answer different questions (see Ver's class comment).
     if (opts.ContainsKey("json"))
         Console.WriteLine(JsonSerializer.Serialize(new
         {
             build = Ver.Build, schema = Ver.Schema, shimProtocol = Ver.ShimProtocol, exe = Ver.ExePath,
+            commit = Ver.Commit, branch = Ver.Branch, mainBaseline = Ver.MainBaseline,
+            trial = Ver.IsTrial, dirty = Ver.Dirty, provenance = Ver.Provenance,
         }));
     else
     {
         Console.WriteLine($"dodona build {Ver.Build}");
+        Console.WriteLine($"  {Ver.ProvenanceLine}");
         Console.WriteLine($"  store schema   v{Ver.Schema}");
         Console.WriteLine($"  shim protocol  v{Ver.ShimProtocol}");
         Console.WriteLine($"  exe            {Ver.ExePath}");
@@ -603,16 +609,51 @@ int Version()
 /// </summary>
 int Publish()
 {
-    var project = Path.GetFullPath(One("project") ?? root);
+    var repo = Path.GetFullPath(One("project") ?? root);
     var stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
     string outDir;
 
     var prebuilt = One("exe");
-    // Snapshot what the tree looks like BEFORE the compiler runs. This is stamped into the
-    // published directory so auto-publish can ask "am I behind?" against the same measure it
-    // was built from, instead of against dodona.exe's mtime — which spans one project while
-    // the question spans three, and looped 64 times in an afternoon (Ver.WriteBuiltFrom).
-    var builtFrom = Ver.NewestSource(project);
+
+    // ---- WHAT gets built (RECOVERY-PHASES P2.5, decision D-1) --------------------------
+    // `--from <ref|worktree>` is the ONLY way to publish something that is not main, and it
+    // is deliberate: automatic publishing follows main only, so a session's uncommitted or
+    // half-finished edit can never reach the operator's app on its own. A trial is stamped
+    // with non-main provenance, `status` says so out loud, and the next commit to main
+    // replaces it.
+    //
+    // A ref gets a DETACHED WORKTREE of its own, never the live tree: publish must not care
+    // what an operator or another session has checked out, and building the live tree is how
+    // a publish picks up work that was never meant to ship.
+    var from = One("from");
+    var fromIsRef = from is not null && !Directory.Exists(from);
+    using var fromWt = fromIsRef ? Git.TempWorktree.For(repo, from!, stamp) : Git.TempWorktree.None(repo);
+    if (fromIsRef && fromWt.Path is null)
+        return Fail($"--from {from}: could not check it out ({fromWt.Error.Trim()}) -- is it a ref or a directory?");
+
+    var project = from is null ? repo : fromIsRef ? fromWt.Path! : Path.GetFullPath(from);
+
+    // ---- provenance: the COMMIT this build is made from -------------------------------
+    // Replaces the source-mtime snapshot that used to be taken here. A commit is exact and
+    // atomic, where "newest source file" needed a debounce, a stamp file and a persisted
+    // guard to behave, and looped 64 times in one afternoon anyway (Ver's class comment
+    // carries the numbers). Resolved from the tree being BUILT, so a --from trial reports the
+    // trial's commit and a main publish reports main's.
+    //
+    // "Is this main?" is answered by comparing HEAD to the main ref rather than by a flag --
+    // which is what makes the drift watcher's detached worktree of main's SHA come out as a
+    // MAIN build rather than a trial, with no special case anywhere: a linked worktree shares
+    // the ref store, so `rev-parse main` means the same thing inside it.
+    var mainBranch = Config.Load(project).Main;
+    var head = Git.Sha(project, "HEAD");
+    var mainSha = Git.Sha(project, mainBranch);
+    var (bc, bout) = Git.Run(project, "rev-parse", "--abbrev-ref", "HEAD");
+    var branch = bc == 0 ? bout.Trim() : "";
+    if (branch is "HEAD" or "") branch = head == mainSha && mainSha.Length > 0 ? mainBranch : "detached";
+    var (sc, sout) = Git.Run(project, "status", "--porcelain");
+    var dirty = sc == 0 && sout.Trim().Length > 0;
+    var provenance = head.Length > 0 ? Ver.Stamp(head, mainSha.Length > 0 ? mainSha : head, branch, dirty) : "";
+
     if (prebuilt is not null)
     {
         outDir = Path.GetDirectoryName(Path.GetFullPath(prebuilt))!;
@@ -645,6 +686,19 @@ int Publish()
             foreach (var a in new[] { "publish", proj, "-c", "Release", "-o", outDir, "--nologo", "-v", "q",
                                       $"-p:BaseOutputPath={scratchBin}\\" })
                 psi.ArgumentList.Add(a);
+            // The commit goes INTO the assembly, so the binary can always answer what it was
+            // built from -- no side file to lose, and no silent degrade to an mtime compare
+            // when it is missing. Deliberately not passed when git could not answer: an
+            // unknown provenance must stay unknown rather than become a plausible lie.
+            if (provenance.Length > 0)
+            {
+                psi.ArgumentList.Add($"-p:InformationalVersion=1.0.0+{provenance}");
+                // Or the SDK appends ".<SourceRevisionId>" to what we just set, which it does
+                // by default in a git checkout. Measured: the stamp came back as
+                // "c=<sha>.<sha>". Harmless to the parser, but it makes the field a lie about
+                // its own format, and the next reader deserves better than that.
+                psi.ArgumentList.Add("-p:IncludeSourceRevisionInInformationalVersion=false");
+            }
             using var p = System.Diagnostics.Process.Start(psi)!;
             p.WaitForExit();
             if (p.ExitCode != 0) return Fail($"build failed ({Path.GetFileName(proj)}) — nothing was published, nothing swapped");
@@ -654,10 +708,19 @@ int Publish()
     var newExe = Path.Combine(outDir, "dodona.exe");
     if (!File.Exists(newExe)) return Fail($"published, but {newExe} is missing");
 
-    // Only a build we performed gets a stamp. A `--exe <prebuilt>` publish did not compile
-    // anything and nobody knows what that binary was built from, so it keeps the legacy
-    // mtime comparison rather than being handed a snapshot that might be a lie.
-    if (prebuilt is null) Ver.WriteBuiltFrom(outDir, builtFrom);
+    if (prebuilt is null && provenance.Length > 0)
+        Console.WriteLine(head == mainSha
+            ? $"provenance: {mainBranch}@{Ver.Short(head)}{(dirty ? " +uncommitted-changes" : "")}"
+            : $"provenance: TRIAL {branch}@{Ver.Short(head)}{(dirty ? " +uncommitted-changes" : "")} " +
+              $"-- the next commit to {mainBranch} ({Ver.Short(mainSha)}) replaces it");
+    else if (prebuilt is null)
+        Console.WriteLine($"provenance: NONE -- {project} is not a git repository, so this build cannot say what it came from");
+
+    // NO STAMP FILE ANY MORE (P2.4 is a deletion). The provenance is compiled into the
+    // assembly above, so there is nothing to write beside the binaries and nothing that can
+    // go missing. `--exe <prebuilt>` compiled nothing, so it carries whatever the prebuilt
+    // binary already said -- which for a `dev build` image is nothing at all, reported as
+    // "build=unknown" rather than guessed at.
 
     // Verify the build actually RUNS before anything is promoted to it. The shortcut
     // used to be repointed right here, before any swap was attempted — so a build that

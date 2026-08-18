@@ -438,7 +438,7 @@ function Do-Prove {
 # on purpose: iterate with `dev test <suite>`, gate once before committing.
 #
 # IT HOLDS ONLY WHAT IS TRUE TODAY. The table in RECOVERY-PHASES section 2 has eight rows;
-# Phase 1 earned two and Phase 2a earns two more. The rest are printed as "not yet", named
+# Phase 1 earned two, Phase 2a two more, and Phase 2b the build-SHA row. The rest are printed as "not yet", named
 # with the phase that will earn them, because a gate that silently covered a third of its
 # table would be exactly the green check nobody has seen fail. When a phase earns a row it
 # MOVES from that list into an assertion above -- a gate whose table drifts out of date is
@@ -687,9 +687,55 @@ function Do-Gate {
         $bad++
     }
 
+    # I2: what the app reports it is running must be a COMMIT THIS REPO HAS. Before Phase 2b
+    # `status` printed a timestamp mapping to nothing, so "which code is live?" had no
+    # answer -- you could not bisect it, diff it, or check it against git log.
+    #
+    # `git cat-file -t` is the load-bearing half: it demands the SHA RESOLVES to a commit
+    # here. Comparing the value to itself, or matching it against a hex pattern, would pass
+    # for any 40 characters and prove nothing.
+    #
+    # The INSTALLED app is what is asked, resolved the way Ver.BinRoot does -- not this
+    # worktree's build output, which is exactly the distinction Phase 1 landed. With nothing
+    # installed there is nothing to assert and it says so instead of printing a green line.
+    $binRoot = Join-Path $env:LOCALAPPDATA 'Dodona\bin'
+    $installed = if (Test-Path $binRoot) {
+        @(Get-ChildItem $binRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+    }
+    else { @() }
+    if ($installed.Count -eq 0) {
+        Say "  n/a   I2  nothing is installed in $binRoot, so the live build's commit was NOT checked"
+        Say "            (run dev ship, then re-run gate to assert this row)"
+    }
+    else {
+        $exe = Join-Path $installed[-1].FullName 'dodona.exe'
+        $vjRaw = & $exe version --json 2>&1 | Out-String
+        # ConvertFrom-Json on a single OBJECT is one pipeline item, which is safe -- the
+        # CLAUDE.md 0.2 trap is arrays, and this is not one.
+        $vj = $null
+        try { $vj = $vjRaw | ConvertFrom-Json } catch { }
+        $sha = if ($vj) { [string]$vj.commit } else { '' }
+        if (-not $sha) {
+            # A build with no provenance is a REAL state, not a failure of this check: a
+            # dev-built or --exe-published image knows no commit and says so. It is reported
+            # as n/a rather than FAIL, because the row asks "is the reported SHA real", and
+            # there is no reported SHA to judge.
+            Say "  n/a   I2  the installed build carries no commit provenance, so there is no SHA to check"
+            Say "            ($exe -- publish from a git checkout to give it one)"
+        }
+        elseif ((& git -C $repo cat-file -t $sha 2>$null) -eq 'commit') {
+            $subject = (& git -C $repo log -1 --format='%h %s' $sha 2>$null)
+            Say "  PASS  I2  the installed build's commit is a commit git log knows: $subject"
+        }
+        else {
+            Say "  FAIL  I2  the installed build reports commit $sha, which this repo does not have"
+            Say "            ($exe)"
+            $bad++
+        }
+    }
+
     Say ""
     Say "-- not covered yet (RECOVERY-PHASES section 2), so this gate does NOT mean these hold --"
-    Say "  not yet -- phase 2b  dodona status build SHA is a commit that git log knows        (I2)"
     Say "  not yet -- phase 3   live lane pipes == the lane count dodona ps reports           (I3)"
     Say "  not yet -- phase 4   a full suite run finishes under 60 s                          (I7)"
     Say "  not yet -- phase 5   repo lint clean: no control bytes, every named test path real (I8)"
@@ -700,7 +746,7 @@ function Do-Gate {
               else { "GATE SELF-TEST FAILED -- $bad problem(s)" })
     }
     else {
-        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 6 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
+        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 7 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
     }
     Say "log: $log"
     if ($bad -gt 0) { exit 1 }

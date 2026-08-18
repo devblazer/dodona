@@ -27,15 +27,17 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
                      int Compressors = 0,
                      PolicyRule[]? Policy = null, string[]? AllowedTools = null,
                      string PermissionMode = "bypassPermissions",
-                     // Live updates are not sometimes (operator's standing order): when the
-                     // sources are newer than the running image, the daemon publishes and
-                     // swaps ITSELF. Every M4 guard applies — a build that fails, or a
-                     // successor that never answers, leaves the running system untouched
-                     // and announces why. autoPublishProject defaults to the root; the
-                     // debounce waits for the tree to go quiet so half-saved edits are
-                     // never built.
+                     // Live updates are not sometimes (operator's standing order): when
+                     // main moves, the daemon publishes that commit and swaps ITSELF. Every
+                     // M4 guard applies -- a build that fails, or a successor that never
+                     // answers, leaves the running system untouched and announces why.
+                     // autoPublishProject defaults to the root.
+                     //
+                     // There is no debounce any more, and its absence is the point (P2.4):
+                     // a commit is atomic and already quiet, so there is no half-saved
+                     // state to wait out. autoPublishDebounceSec is GONE, with the four
+                     // other guards that existed only to make an mtime comparison behave.
                      bool AutoPublish = false, string? AutoPublishProject = null,
-                     int AutoPublishDebounceSec = 45,
                      // The dispatcher brain (§3's middle rung): management decisions only —
                      // naming, routing, is-this-ticket-worthy. Cheap model first; when it
                      // says its own confidence is low, the SAME question goes to the
@@ -93,7 +95,7 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
             policy, allowed,
             Str("permissionMode", "bypassPermissions"),
             d.RootElement.TryGetProperty("autoPublish", out var ap) && ap.ValueKind == JsonValueKind.True,
-            Str("autoPublishProject", ""), Num("autoPublishDebounceSec", 45),
+            Str("autoPublishProject", ""),
             !(d.RootElement.TryGetProperty("brain", out var br) && br.ValueKind == JsonValueKind.False),
             Str("brainModel", "haiku"), Str("brainEffort", "low"));
     }
@@ -1091,6 +1093,9 @@ sealed class Daemon
             case "swaps":
                 foreach (var row in _store.SwapsAll()) w.WriteLine(row);
                 w.WriteLine($"running: build {Ver.Build} schema {Ver.Schema} shim-protocol {Ver.ShimProtocol} exe {Ver.ExePath}");
+                // The COMMIT, so what is running can be checked against `git log` and
+                // bisected (P2.6). The build stamp above maps to nothing off this machine.
+                w.WriteLine($"  {Ver.ProvenanceLine}");
                 break;
 
             case "stop-daemon":
@@ -1315,66 +1320,109 @@ sealed class Daemon
     });
 
     /// <summary>
-    /// Live updates are not sometimes. The daemon watches its own source tree, and when
-    /// the sources are newer than the image it is running, it publishes and swaps ITSELF —
-    /// no person and no agent has to remember to. This exists because "work done but not
-    /// live" blocked the operator three separate times in one day (edited-not-built,
-    /// built-not-published, published-not-committed), and instructions in CLAUDE.md are
-    /// advisory while a watcher is not — the same reasoning as the claim gate (§6).
+    /// Publish-on-drift: when <c>main</c> moves, this daemon builds that commit and swaps
+    /// itself to it, so "work is done but not live" cannot happen and no person and no agent
+    /// has to remember to publish. It exists because edited-not-built, built-not-published and
+    /// published-not-committed each blocked the operator once in a single day, and an
+    /// instruction in CLAUDE.md is advisory while a watcher is not -- the claim-gate reasoning
+    /// (design §6).
     ///
-    /// Safety is inherited, not added: the publish it runs goes through the ordinary M4
-    /// path, so a build that fails changes nothing and is announced; a successor that
-    /// never answers leaves this daemon running; a mid-merge lane blocks the swap with
-    /// the usual three answers. The debounce waits for the tree to go quiet so a
-    /// half-saved edit is never built.
+    /// THE QUESTION IS NOW EXACT (RECOVERY-PHASES P2.3). It used to be "is any source file
+    /// newer than the running image?", which needed five separate guards to behave and looped
+    /// 64 times in one afternoon regardless. It is now <c>git rev-parse main</c> against the
+    /// commit this build was made from: a comparison of two SHAs, with no clock, no filesystem,
+    /// no partial-write window and no three-projects-versus-one-binary asymmetry.
+    /// <see cref="Ver.Provenance"/> carries the numbers of the failure this replaced.
+    ///
+    /// WHAT WENT WITH IT, all of it deletion (P2.4): the debounce (a commit is already atomic
+    /// and quiet), the <c>.built-from</c> stamp (the commit is in the assembly),
+    /// <c>kv.autopublish_last_tried</c> (the SHA is its own guard -- if main has not moved there
+    /// is nothing to do, and if it has, doing it once is correct), and the 30-minute dirty-tree
+    /// nag (uncommitted work can no longer reach the app at all, so nagging about it answers a
+    /// question nobody can now ask).
+    ///
+    /// WHAT STAYED, because it was never about mtimes: consecutive-failure surrender. Measured
+    /// on the operator's instance at 16 attempts and 16 failures in one afternoon, each a full
+    /// three-project build, until the failure that mattered was buried under fifteen copies of
+    /// itself. A broken main must not rebuild forever.
+    ///
+    /// Safety is inherited, not added: the publish it runs goes through the ordinary M4 path, so
+    /// a failed build changes nothing and is announced, the new binary must answer
+    /// <c>version --json</c> before anything is promoted, the desktop shortcut moves only onto a
+    /// build a daemon accepted, and a mid-merge lane blocks the swap with the usual three
+    /// answers. None of those guards are about mtimes, so none of them were touched.
     /// </summary>
     void StartDriftWatcher()
     {
         if (!_config.AutoPublish) return;
         if (Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1") return;   // suites own their lifetime
-        var project = string.IsNullOrEmpty(_config.AutoPublishProject) ? _primary : Path.GetFullPath(_config.AutoPublishProject);
+
+        // A build that cannot say what commit it came from cannot ask the exact question, and it
+        // must NOT fall back to guessing. The old code degraded to the image's own mtime in
+        // exactly this case -- the loop-prone comparison wearing a fallback -- and
+        // `publish --exe <prebuilt>` hit it every single time. So: say it once, out loud, and
+        // stop. That is a silent degrade made loud (CLAUDE.md §3), not a new way to be stuck:
+        // any publish from a git checkout arms it, and the announcement names the command.
+        //
+        // ASKED FIRST, before any project guard. This is a property of the RUNNING IMAGE and
+        // depends on no directory, so gating it behind "is the project a git repo?" made it
+        // unreachable in most of the ways you actually meet it (found by a suite check that
+        // could never have gone green).
+        if (Ver.NoProvenance)
+        {
+            _store.Event("autopublish_no_provenance", null, $"build {Ver.Build} exe {Ver.ExePath}");
+            Announce("[dodona] auto-publish is ON but this build carries no commit provenance, so it cannot tell " +
+                     "whether main has moved — it is NOT watching. Publish once from a git checkout to arm it: " +
+                     "dodona publish --project <dir>");
+            return;
+        }
+
+        var project = string.IsNullOrEmpty(_config.AutoPublishProject) ? _primary : _config.AutoPublishProject;
+
+        // AN ABSOLUTE PATH OR NOTHING, and this is not defensive dressing -- it is the bug this
+        // guard was found by. A workspace with no attached member has an EMPTY _primary, so
+        // `Path.Combine("", "src", ...)` is a RELATIVE path, resolved against whatever directory
+        // this daemon happened to be started from. Measured: a test workspace with no members
+        // watched the OPERATOR'S live repo, found its main, and published it -- because the
+        // daemon's cwd was that repo. An actor silently building a tree it does not own is the
+        // whole failure class Phase 2 exists to close (RECOVERY-PHASES section 0), so the answer
+        // is to refuse and say which, never to resolve it against a convenient default.
+        if (string.IsNullOrWhiteSpace(project) || !Path.IsPathRooted(project))
+        {
+            _store.Event("autopublish_misconfigured", null,
+                $"no absolute project to watch (primary='{_primary}', autoPublishProject='{_config.AutoPublishProject}')");
+            Announce("[dodona] autoPublish is on, but this workspace has no absolute source tree to watch " +
+                     "(no member attached, and no autoPublishProject set) — nothing is being watched");
+            return;
+        }
+        project = Path.GetFullPath(project);
         if (!File.Exists(Path.Combine(project, "src", "Dodona", "Dodona.csproj")))
         {
             _store.Event("autopublish_misconfigured", null, $"{project} is not a Dodona source tree");
             Announce($"[dodona] autoPublish is on, but {project} has no src/Dodona — nothing is being watched");
             return;
         }
-        _store.Event("autopublish_watching", null, $"{project} (debounce {_config.AutoPublishDebounceSec}s)");
+        if (!Git.IsRepo(project))
+        {
+            // The question is `git rev-parse main`. Without a repo there is no question, and
+            // guessing from mtimes is what this phase deleted.
+            _store.Event("autopublish_misconfigured", null, $"{project} is not a git repository");
+            Announce($"[dodona] autoPublish is on, but {project} is not a git repository — nothing is being watched");
+            return;
+        }
+
+        var mainBranch = ConfigFor(".").Main;
+        _store.Event("autopublish_watching", null,
+            $"{project} tracking {mainBranch}; running {Ver.Short(Ver.Commit)}, baseline {Ver.Short(Ver.MainBaseline)}");
+        if (Ver.IsTrial)
+            Announce($"[dodona] running a TRIAL of {Ver.Branch}@{Ver.Short(Ver.Commit)} — the next commit to " +
+                     $"{mainBranch} replaces it (it was cut at {Ver.Short(Ver.MainBaseline)})");
 
         _ = Task.Run(async () =>
         {
-            DateTime lastMax = DateTime.MinValue, stableSince = DateTime.MinValue;
-            DateTime dirtySince = DateTime.MinValue;
-
-            // `lastTried` is deliberately in the STORE, not a local. A successful auto-publish
-            // hands off and this process EXITS -- so an in-process guard is reset by the very
-            // swap it just triggered, and the successor happily republishes the same snapshot.
-            // That is the second half of the 2026-08-18 loop: 72 daemon starts, four of them
-            // reporting the byte-identical `sources ... > image ...`. Persisting it means the
-            // guard survives the handoff, which is the only place it has ever needed to work.
-            DateTime LastTried()
-            {
-                var v = _store.KvGet("autopublish_last_tried");
-                return !string.IsNullOrEmpty(v) && DateTime.TryParse(v, null, System.Globalization.DateTimeStyles.RoundtripKind, out var t)
-                    ? t.ToUniversalTime() : DateTime.MinValue;
-            }
-            bool dirtyAnnounced = false;
-            int tick = 0;
-
-            // Consecutive-failure backoff. Each edit-batch produces a new source timestamp,
-            // so `lastTried` alone only prevents retrying the SAME edit — it never notices
-            // that the last N attempts all failed for the same reason.
-            //
-            // Measured on the operator's instance: 16 attempts, 16 failures, in one afternoon.
-            // Every one ran a full three-project publish (minutes of CPU) and put another
-            // identical "auto-publish FAILED" row in the decision feed, until the failure that
-            // mattered was buried under fifteen copies of itself. The cause was legitimate and
-            // unfixable-by-retrying — a build whose successor could not hand off — which is
-            // exactly the shape where retrying forever is the wrong answer.
-            //
-            // So: give up after three in a row, say so ONCE, and stay quiet until something
-            // changes. A publish by hand clears it, because a successful swap ends this
-            // process entirely.
+            // Give up after three consecutive failures, say so ONCE, and stay quiet until
+            // something changes. A publish by hand clears it, because a successful swap ends
+            // this process entirely.
             const int giveUpAfter = 3;
             int consecutiveFailures = 0;
             bool surrendered = false;
@@ -1382,79 +1430,74 @@ sealed class Daemon
             while (true)
             {
                 await Task.Delay(15000);
+                if (surrendered) continue;
                 try
                 {
-                    // ---- source drift: newer than what the running image was BUILT FROM? ----
-                    // Not the image's own mtime. `maxSrc` spans all three projects; dodona.exe
-                    // is one of them, so a UI-only edit could never be caught up with and the
-                    // condition stayed true forever (Ver.WriteBuiltFrom carries the numbers).
-                    var maxSrc = Ver.NewestSource(project);
-                    var image = Ver.ImageBuiltFrom(Ver.ExePath);
-                    if (maxSrc > image && maxSrc != LastTried() && !surrendered)
-                    {
-                        if (maxSrc != lastMax) { lastMax = maxSrc; stableSince = DateTime.UtcNow; }
-                        else if ((DateTime.UtcNow - stableSince).TotalSeconds >= _config.AutoPublishDebounceSec)
-                        {
-                            _store.KvSet("autopublish_last_tried", maxSrc.ToString("o"));
-                            _store.Event("autopublish_started", null, $"sources {maxSrc:o} > built-from {image:o}");
-                            Announce("[dodona] sources changed — building and swapping to stay live");
-                            var (code, output) = RunPublish(project);
-                            if (code != 0)
-                            {
-                                var reason = output.Split('\n').LastOrDefault(l => l.Contains("error", StringComparison.OrdinalIgnoreCase))
-                                             ?? output.Split('\n').LastOrDefault(l => l.Trim().Length > 0) ?? "unknown";
-                                consecutiveFailures++;
-                                _store.Event("autopublish_failed", null,
-                                    $"attempt {consecutiveFailures}/{giveUpAfter}: {Truncate(output, 800)}");
-                                if (consecutiveFailures >= giveUpAfter)
-                                {
-                                    surrendered = true;
-                                    _store.Event("autopublish_surrendered", null,
-                                        $"{consecutiveFailures} consecutive failures; watching stopped until a manual publish");
-                                    Announce($"[dodona] auto-publish has failed {consecutiveFailures} times running and has STOPPED trying — " +
-                                             $"the live app stays behind the sources until you publish by hand. Last reason: {Truncate(reason.Trim(), 140)}");
-                                }
-                                else
-                                    Announce($"[dodona] auto-publish FAILED — the live app is now BEHIND the sources: {Truncate(reason.Trim(), 160)}");
-                            }
-                            else consecutiveFailures = 0;
-                            // success: the swap arrives through our own control pipe and this
-                            // daemon exits mid-handoff — nothing more to do here. A parked
-                            // swap (mid-merge blocker) already announced its three answers.
-                        }
-                    }
-                    // Caught up: forget both guards, so the NEXT edit is judged on its own
-                    // merits rather than against a snapshot that is now history.
-                    else if (maxSrc <= image) { lastMax = DateTime.MinValue; _store.KvSet("autopublish_last_tried", ""); }
+                    // TWO SHAs. That is the whole comparison.
+                    //
+                    // The baseline is Ver.MainBaseline and not Ver.Commit, which is what makes a
+                    // trial behave as P2.5 promises: a trial carries the main SHA it was cut
+                    // against, so it sits still until main moves PAST that point and is then
+                    // replaced. For an ordinary main build the two are the same value, so this
+                    // costs no special case.
+                    // Git.Run and not Git.Sha: Sha THROWS when the ref does not resolve, so a
+                    // `target.Length == 0` guard after it is dead code that reads like a check.
+                    // A missing main is a normal transient state (a fresh repo, a fetch in
+                    // flight), not an error worth an event every 15 seconds.
+                    var (rc, rout) = Git.Run(project, "rev-parse", mainBranch);
+                    if (rc != 0) continue;                          // no such ref yet; nothing to compare
+                    var target = rout.Trim();
+                    if (target.Length != 40) continue;              // not a resolved sha
+                    if (target == Ver.MainBaseline) continue;       // up to date, exactly
 
-                    // ---- git drift: published-but-uncommitted was nearly lost work once ----
-                    if (++tick % 20 == 0)   // every ~5 minutes
+                    _store.Event("autopublish_started", null,
+                        $"{mainBranch} at {Ver.Short(target)}, this build baselined {Ver.Short(Ver.MainBaseline)}");
+                    Announce($"[dodona] {mainBranch} moved to {Ver.Short(target)} — building that commit and swapping to stay live");
+
+                    var (code, output) = RunPublish(project, target);
+                    if (code != 0)
                     {
-                        var (gc, gout) = Git.Run(project, "status", "--porcelain");
-                        var dirty = gc == 0 && gout.Trim().Length > 0;
-                        if (!dirty) { dirtySince = DateTime.MinValue; dirtyAnnounced = false; }
-                        else if (dirtySince == DateTime.MinValue) dirtySince = DateTime.UtcNow;
-                        else if (!dirtyAnnounced && (DateTime.UtcNow - dirtySince).TotalMinutes >= 30)
+                        var reason = output.Split('\n').LastOrDefault(l => l.Contains("error", StringComparison.OrdinalIgnoreCase))
+                                     ?? output.Split('\n').LastOrDefault(l => l.Trim().Length > 0) ?? "unknown";
+                        consecutiveFailures++;
+                        _store.Event("autopublish_failed", null,
+                            $"attempt {consecutiveFailures}/{giveUpAfter} for {Ver.Short(target)}: {Truncate(output, 800)}");
+                        if (consecutiveFailures >= giveUpAfter)
                         {
-                            dirtyAnnounced = true;
-                            _store.Event("autopublish_dirty_tree", null, Truncate(gout, 400));
-                            Announce("[dodona] the working tree has been dirty for 30m — the live app runs work git does not have; commit it");
+                            surrendered = true;
+                            _store.Event("autopublish_surrendered", null,
+                                $"{consecutiveFailures} consecutive failures; watching stopped until a manual publish");
+                            Announce($"[dodona] auto-publish has failed {consecutiveFailures} times running and has STOPPED trying — " +
+                                     $"the live app stays behind {mainBranch} until you publish by hand. Last reason: {Truncate(reason.Trim(), 140)}");
                         }
+                        else
+                            Announce($"[dodona] auto-publish FAILED — the live app is now BEHIND {mainBranch}: {Truncate(reason.Trim(), 160)}");
                     }
+                    else consecutiveFailures = 0;
+                    // success: the swap arrives through our own control pipe and this daemon
+                    // exits mid-handoff — nothing more to do here. A parked swap (mid-merge
+                    // blocker) already announced its three answers.
                 }
                 catch (Exception ex) { _store.Event("autopublish_error", null, ex.Message); }
             }
         });
     }
 
-    (int Code, string Output) RunPublish(string project)
+    /// <summary>Publish <paramref name="commit"/> out of <paramref name="project"/>.
+    ///
+    /// <c>--from &lt;sha&gt;</c> is what keeps the publisher out of everybody's way (P2.3): it
+    /// makes publish check that commit out into a detached worktree of its OWN and build there,
+    /// so the tree an operator or another session is working in is never touched and its
+    /// <c>obj/</c> is never contended for. Publish then sees HEAD == main inside that worktree
+    /// and stamps main provenance, with no flag to pass and no special case.</summary>
+    (int Code, string Output) RunPublish(string project, string commit)
     {
         var psi = new ProcessStartInfo(Ver.ExePath)
         { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = _primary };
         // Scoped to THIS workspace, never --all: an auto-publish is one workspace noticing
         // its own sources moved, and broadcasting a swap to every daemon on the machine
         // because one repo was edited is exactly what §7 set out to stop.
-        foreach (var a in new[] { "publish", "--project", project, "--workspace", _instanceId }) psi.ArgumentList.Add(a);
+        foreach (var a in new[] { "publish", "--project", project, "--from", commit, "--workspace", _instanceId }) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
         var errT = Task.Run(() => p.StandardError.ReadToEnd());
         var so = p.StandardOutput.ReadToEnd();

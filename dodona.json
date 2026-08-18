@@ -6,12 +6,20 @@
 
   "autoPublish": true,
   "//autoPublish": [
-    "The daemon watches this source tree and publishes + swaps ITSELF when the sources",
-    "are newer than the image it is running (debounced until the tree goes quiet).",
-    "Operator's standing order: live updates are not sometimes. A failed build changes",
-    "nothing and announces loudly; a parked swap offers the usual three answers; a",
-    "30-minute dirty tree gets one announcement, because published-but-uncommitted",
-    "nearly lost a feature once."
+    "The daemon compares `git rev-parse main` against the commit the running build was",
+    "made from, and when they differ it builds THAT COMMIT -- in a detached worktree of",
+    "its own, never anybody's live tree -- and swaps itself to it. Operator's standing",
+    "order: live updates are not sometimes. A failed build changes nothing and announces",
+    "loudly; a parked swap offers the usual three answers; three consecutive failures",
+    "and it surrenders, once, out loud.",
+    "",
+    "ONLY main publishes itself (RECOVERY-PHASES D-1). Uncommitted work cannot reach the",
+    "app at all -- trial it deliberately with `dodona publish --from <ref|worktree>`,",
+    "which stamps non-main provenance, and the next commit to main replaces it.",
+    "",
+    "There is no debounce: a commit is atomic and already quiet. autoPublishDebounceSec",
+    "was deleted with the four other guards that existed only to make an mtime",
+    "comparison behave -- that comparison looped 64 times in one afternoon."
   ],
 
   "compressors": 2,

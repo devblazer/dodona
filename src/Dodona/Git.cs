@@ -74,4 +74,59 @@ static class Git
         Walk(root, 1);
         return found;
     }
+
+    /// <summary>
+    /// A detached worktree that removes itself. Publish uses it for <c>--from &lt;ref&gt;</c>
+    /// and the drift watcher for the commit it is catching up to (RECOVERY-PHASES P2.3): both
+    /// must build a specific commit in a tree of their OWN, never the live one an operator or
+    /// another session is working in.
+    ///
+    /// It is <c>IDisposable</c> and used with <c>using</c> on purpose. Publish has a dozen
+    /// early <c>return Fail(...)</c> paths, and a cleanup that has to be repeated at each of
+    /// them is a leak waiting for the one that gets forgotten -- which in this codebase means
+    /// a worktree nobody removes, quietly holding a checkout of an old commit.
+    /// </summary>
+    public sealed class TempWorktree : IDisposable
+    {
+        readonly string _repo;
+
+        /// <summary>The checkout, or null when there is none -- either nothing was asked for,
+        /// or the checkout failed and <see cref="Error"/> says why.</summary>
+        public string? Path { get; }
+
+        /// <summary>Git's complaint when <see cref="For"/> could not check the ref out.</summary>
+        public string Error { get; }
+
+        TempWorktree(string repo, string? path, string error) { _repo = repo; Path = path; Error = error; }
+
+        /// <summary>Nothing to do (returns a no-op) when <paramref name="spec"/> is null or is
+        /// already a directory -- <c>--from &lt;worktree&gt;</c> is a tree the caller owns and
+        /// must NOT be deleted by us.</summary>
+        public static TempWorktree None(string repo) => new(repo, null, "");
+
+        /// <summary>Check <paramref name="sha"/> out detached, under the temp directory. On
+        /// failure it returns an instance whose <see cref="Path"/> is null and whose
+        /// <see cref="Error"/> holds git's complaint -- never null, and never an `out`
+        /// parameter, so the caller can keep this in a `using` inside a conditional
+        /// expression (which is what an `out` here made impossible: CS0165).</summary>
+        public static TempWorktree For(string repo, string sha, string stamp)
+        {
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dodona-from", stamp);
+            var (code, output) = Run(repo, "worktree", "add", "--detach", dir, sha);
+            return code == 0 ? new TempWorktree(repo, dir, "") : new TempWorktree(repo, null, output);
+        }
+
+        public void Dispose()
+        {
+            if (Path is null) return;
+            // Best effort: a failure here must never turn a good publish into a bad exit code.
+            // `prune` mops up the administrative record even if the directory itself is stuck.
+            try
+            {
+                Run(_repo, "worktree", "remove", "--force", Path);
+                Run(_repo, "worktree", "prune");
+            }
+            catch { }
+        }
+    }
 }
