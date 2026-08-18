@@ -1,7 +1,8 @@
 # Dodona Workspaces & the Concierge
 
-Status: **agreed design, pre-implementation** — the outcome of the 2026-08-18 planning
-session with the operator. Decisions here were taken deliberately; §8 records the ideas
+Status: **agreed design, pre-implementation — HIGH PRIORITY** (operator, 2026-08-18:
+everything in this document is high priority; it is the next body of work, not a
+someday list). The outcome of the 2026-08-18 planning session with the operator. Decisions here were taken deliberately; §8 records the ideas
 already rejected *with their reasons*, in the LANE-LIFECYCLE §2 style, so they are never
 re-proposed. This document is authored in-repo (no `..\MassWorks\` master exists for it).
 
