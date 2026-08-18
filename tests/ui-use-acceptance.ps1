@@ -62,6 +62,7 @@ $uiProc = $null
 $daemon2 = $null
 $shellUi = $null
 $bareUi = $null
+$uiCopy = $null
 try {
     # Where this workspace keeps its state. Not `<root>\.dodona` any more: a workspace
     # is named rather than located, so the suite asks the binary (see tests/_workspace.ps1).
@@ -400,6 +401,32 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     Check 'merged_feed_labels_rows_by_workspace' `
         (($wsLabels -contains $ws.Name) -and ($wsLabels -contains $ws2.Name)) ($wsLabels -join ',')
 
+    # ---- a live SHELL window hot-swaps on `ui update` ---------------------------------------
+    # This path had ZERO coverage and shipped broken: the incumbent respawned its successor
+    # as `--workspace <shell-sentinel>`, which no registry resolves, so the successor died
+    # at startup, never signalled ready, and the incumbent silently kept the old build. From
+    # where the operator sits that is indistinguishable from "publish never built anything"
+    # (2026-08-18). The successor must respawn as what it is: --shell.
+    $uiCopy = Join-Path $env:TEMP ("dodona-uiswap-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    Copy-Item (Split-Path $ui) $uiCopy -Recurse
+    $upd = (& $dodona ui update "$uiCopy\DodonaUi.exe" --shell) | Out-String
+    Check 'shell_ui_update_hands_off' ($upd -match 'updated:') $upd.Trim()
+    $successor = $null
+    $z = $null
+    $deadline = [Environment]::TickCount + 12000
+    while ([Environment]::TickCount -lt $deadline) {
+        Start-Sleep -Milliseconds 600
+        if ($null -eq $successor) {
+            $successor = Get-CimInstance Win32_Process -Filter "Name='DodonaUi.exe'" |
+                Where-Object { $_.ExecutablePath -like "$uiCopy*" } | Select-Object -First 1
+        }
+        try { $z = (& $dodona ui dump --shell) | Out-String | ConvertFrom-Json } catch { $z = $null }
+        if ($successor -and $z) { break }
+    }
+    Check 'shell_successor_is_the_new_binary' ($null -ne $successor) 'no DodonaUi.exe running from the copied build'
+    Check 'shell_survives_the_swap' ($null -ne $z -and (@($ws.Name, $ws2.Name) -contains $z.workspaceName)) `
+        ($(if ($null -eq $z) { 'shell pipe did not answer after the swap' } else { $z.workspaceName }))
+
     # --shell, not the Dodona helper: that one appends --root and would address the
     # single-workspace window's pipe, which is already closed.
     (& $dodona ui screenshot --out "$out\shell-bands.png" --shell) | Out-Null
@@ -411,6 +438,14 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
 finally {
     foreach ($proc in $uiProc, $shellUi, $bareUi, $daemon, $daemon2) {
         if ($proc -and -not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force } catch { } }
+    }
+    # The swap successor is a NEW pid the variables above never saw — resolve it by the
+    # exe path unique to this run's copied build, never by bare process name (CLAUDE.md §4).
+    if ($uiCopy) {
+        Get-CimInstance Win32_Process -Filter "Name='DodonaUi.exe'" |
+            Where-Object { $_.ExecutablePath -like "$uiCopy*" } |
+            ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch { } }
+        Remove-Item $uiCopy -Recurse -Force -ErrorAction SilentlyContinue
     }
     # Scoped cleanup: only THIS test's processes, resolved from its own shim-info
     # files. Killing by process NAME once murdered the operator's live session's shim

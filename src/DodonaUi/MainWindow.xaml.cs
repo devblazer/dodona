@@ -255,9 +255,16 @@ public partial class MainWindow : Window
                                                          PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
             // Addressed by workspace id: the successor must come up over the same store,
             // and re-resolving a path in the child is a second chance to disagree.
+            // EXCEPT the shell, whose id is a sentinel and not a registry row: respawning
+            // it as `--workspace <sentinel>` made the successor die at the registry lookup
+            // ("No workspace"), never signal ready, and the incumbent kept the pipe — so
+            // every publish while the shell window was open silently left the operator
+            // looking at the old UI, which reads as "nothing was ever built" (2026-08-18).
             var psi = new System.Diagnostics.ProcessStartInfo(exe)
             { UseShellExecute = false, WorkingDirectory = Directory.Exists(_root) ? _root : Path.GetTempPath() };
-            foreach (var a in new[] { "--workspace", _instanceId, "--successor" }) psi.ArgumentList.Add(a);
+            if (_instanceId == Instance.ShellId) psi.ArgumentList.Add("--shell");
+            else { psi.ArgumentList.Add("--workspace"); psi.ArgumentList.Add(_instanceId); }
+            psi.ArgumentList.Add("--successor");
             if (TestWindow) psi.ArgumentList.Add("--test-window");
             using var p = System.Diagnostics.Process.Start(psi);
 

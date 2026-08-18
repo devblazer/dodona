@@ -52,5 +52,8 @@
     "the_previous_workspace_becomes_a_band":  "PASS",
     "the_grid_shows_the_new_workspaces_lanes":  "PASS",
     "merged_feed_spans_both_workspaces":  "PASS",
-    "merged_feed_labels_rows_by_workspace":  "PASS"
+    "merged_feed_labels_rows_by_workspace":  "PASS",
+    "shell_ui_update_hands_off":  "PASS",
+    "shell_successor_is_the_new_binary":  "PASS",
+    "shell_survives_the_swap":  "PASS"
 }
