@@ -27,12 +27,14 @@ static class DaemonClient
         return File.Exists(dev) ? dev : null;
     }
 
-    /// <summary>Make sure a daemon owns this root, starting one if not (§13:
-    /// start-on-demand — the store is always there, the daemon is summoned). Returns null
-    /// on success or a reason to show the user.</summary>
-    public static string? Ensure(string root, string instanceId, int timeoutMs = 20000)
+    /// <summary>Make sure a daemon owns this workspace, starting one if not (§13:
+    /// start-on-demand — the store is always there, the daemon is summoned). Addressed by
+    /// workspace id: the UI has already resolved who this is, and letting the child
+    /// re-resolve from a path is a second chance to disagree. Returns null on success or a
+    /// reason to show the user.</summary>
+    public static string? Ensure(string primary, string wsId, int timeoutMs = 20000)
     {
-        if (Probe(instanceId)) return null;
+        if (Probe(wsId)) return null;
 
         var exe = DodonaExe();
         if (exe is null) return "cannot find dodona.exe (set DODONA_EXE, or run from a published folder)";
@@ -42,11 +44,11 @@ static class DaemonClient
             {
                 UseShellExecute = true,                 // detached: the daemon must outlive this UI
                 WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
-                WorkingDirectory = root,
+                WorkingDirectory = Directory.Exists(primary) ? primary : Path.GetTempPath(),
             };
             psi.ArgumentList.Add("daemon");
-            psi.ArgumentList.Add("--root");
-            psi.ArgumentList.Add(root);
+            psi.ArgumentList.Add("--workspace");
+            psi.ArgumentList.Add(wsId);
             System.Diagnostics.Process.Start(psi);
         }
         catch (Exception ex) { return $"could not start the daemon: {ex.Message}"; }
@@ -54,7 +56,7 @@ static class DaemonClient
         var deadline = Environment.TickCount64 + timeoutMs;
         while (Environment.TickCount64 < deadline)
         {
-            if (Probe(instanceId)) return null;
+            if (Probe(wsId)) return null;
             Thread.Sleep(200);
         }
         return "started a daemon but it never answered its control pipe";

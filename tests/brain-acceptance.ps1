@@ -5,6 +5,10 @@
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot\_workspace.ps1"
+# Isolated workspace registry + store tree for this suite: never touch the
+# operator's own workspaces (§17, and CLAUDE.md §4's reasoning one level up).
+$dodonaHome = Use-IsolatedDodonaHome 'brain'
 $dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
 $ui = "$repo\src\DodonaUi\bin\Release\net8.0-windows\DodonaUi.exe"
 $fake = "$repo\src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.exe"
@@ -31,7 +35,7 @@ function Rows([string]$sql) {
     $env:DODONA_TEST_SQL = $sql
     $o = (python -c "
 import sqlite3, os
-db = sqlite3.connect(r'$root\.dodona\store.db')
+db = sqlite3.connect(r'$storeDb')
 for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is None else str(x) for x in r))
 ") | Out-String
     Remove-Item env:DODONA_TEST_SQL -ErrorAction SilentlyContinue
@@ -41,6 +45,12 @@ for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is No
 $daemon = $null
 $uiProc = $null
 try {
+    # Where this workspace keeps its state. Not `<root>\.dodona` any more: a workspace
+    # is named rather than located, so the suite asks the binary (see tests/_workspace.ps1).
+    $ws = Get-WorkspacePaths $dodona $root
+    $storeDb = $ws.Store
+    $wsDir = $ws.Dir
+
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Start-Sleep -Milliseconds 800
@@ -133,12 +143,13 @@ finally {
     if ($uiProc -and -not $uiProc.HasExited) { try { Stop-Process -Id $uiProc.Id -Force } catch { } }
     if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
     # Only this test's processes, resolved from its own shim-info files (CLAUDE.md §4).
-    Get-ChildItem "$root\.dodona\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem "$wsDir\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
         $si = Get-Content $_.FullName | ConvertFrom-Json
         foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
     }
-    Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
+    Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
+    Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
 }
 
 $results | ConvertTo-Json | Set-Content "$out\results.json" -Encoding utf8

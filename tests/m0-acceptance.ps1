@@ -9,6 +9,10 @@
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot\_workspace.ps1"
+# Isolated workspace registry + store tree for this suite: never touch the
+# operator's own workspaces (§17, and CLAUDE.md §4's reasoning one level up).
+$dodonaHome = Use-IsolatedDodonaHome 'm0'
 $dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
 $fake   = "$repo\src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.exe"
 $env:DODONA_SHIM = "$repo\src\DodonaShim\bin\Release\net8.0\DodonaShim.exe"
@@ -21,6 +25,9 @@ New-Item -ItemType Directory -Force $out | Out-Null
 Remove-Item "$out\*" -Force -ErrorAction SilentlyContinue
 
 $results = [ordered]@{}
+$ws = Get-WorkspacePaths $dodona $root
+$storeDb = $ws.Store
+$wsDir = $ws.Dir
 $token = "SURVIVED-" + [guid]::NewGuid().ToString('N').Substring(0, 6)
 function Dodona([string[]]$a) { (& $dodona ($a + @('--root', $root))) | Out-String }
 
@@ -42,7 +49,7 @@ try {
     Stop-Process -Id $d1.Id -Force
     $results['daemon1_killed_mid_turn'] = "pid $($d1.Id), ~1s into a 6s turn"
 
-    $shimInfo = Get-Content "$root\.dodona\shim-lane$lane.json" | ConvertFrom-Json
+    $shimInfo = Get-Content "$wsDir\shim-lane$lane.json" | ConvertFrom-Json
     Start-Sleep -Milliseconds 500
     $results['shim_alive_no_daemon']  = if (Get-Process -Id $shimInfo.shimPid  -ErrorAction SilentlyContinue) { 'PASS' } else { 'FAIL' }
     $results['agent_alive_no_daemon'] = if (Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue) { 'PASS' } else { 'FAIL' }
@@ -74,13 +81,14 @@ try {
     Dodona @("stop-daemon") | Out-Null
 }
 finally {
+    Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     if ($shimInfo) {
         foreach ($p in @($shimInfo.shimPid, $shimInfo.childPid)) {
             try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { }
         }
     }
     if ($d2 -and -not $d2.HasExited) { try { Stop-Process -Id $d2.Id -Force } catch { } }
-    Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
+    Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
 }
 
 $results | ConvertTo-Json | Set-Content "$out\results.json" -Encoding utf8

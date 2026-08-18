@@ -14,6 +14,10 @@
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot\_workspace.ps1"
+# Isolated workspace registry + store tree for this suite: never touch the
+# operator's own workspaces (§17, and CLAUDE.md §4's reasoning one level up).
+$dodonaHome = Use-IsolatedDodonaHome 'm4'
 $dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
 $fake = "$repo\src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.exe"
 $env:DODONA_SHIM = "$repo\src\DodonaShim\bin\Release\net8.0\DodonaShim.exe"
@@ -35,6 +39,9 @@ git -C $root add -A
 git -C $root -c user.email=t@t -c user.name=t commit -q -m init
 
 $results = [ordered]@{}
+$ws = Get-WorkspacePaths $dodona $root
+$storeDb = $ws.Store
+$wsDir = $ws.Dir
 # Capturing a native command's stderr in PS 5.1 needs BOTH a file redirect and a relaxed
 # ErrorActionPreference in this scope: any stderr line makes 5.1 raise NativeCommandError
 # (even on exit code 0), which under `Stop` aborts the whole run. Several checks below
@@ -55,7 +62,7 @@ function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$nam
 function Sql([string]$q) {
     (python -c "
 import sqlite3
-db = sqlite3.connect(r'$root\.dodona\store.db')
+db = sqlite3.connect(r'$storeDb')
 for r in db.execute('''$q'''): print('|'.join(str(x) for x in r))
 ") | Out-String
 }
@@ -72,7 +79,7 @@ try {
     $ls = Dodona @("lane-start", "--title", "SKY", "--child", $fake)
     if ($ls -notmatch 'lane (\d+)') { throw "lane-start failed: $ls" }
     $lane = $Matches[1]
-    $shimInfo = Get-Content "$root\.dodona\shim-lane$lane.json" | ConvertFrom-Json
+    $shimInfo = Get-Content "$wsDir\shim-lane$lane.json" | ConvertFrom-Json
     # Read THIS lane's session, not the last one printed: the dispatcher lane the swap
     # creates has no session, and a greedy match would happily take its dash.
     function LaneSession { ((Dodona @("status")) -split "`r?`n" | Where-Object { $_ -match "^lane $lane\b" }) -replace '.*session=(\S+).*', '$1' }
@@ -191,6 +198,7 @@ try {
 }
 finally {
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
+    Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     if ($shimInfo) { foreach ($p in @($shimInfo.shimPid, $shimInfo.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } } }
     Get-CimInstance Win32_Process -Filter "Name='dodona.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -like "*$root*" } |
@@ -200,11 +208,11 @@ finally {
     # files. Killing by process NAME once murdered the operator's live session's shim
     # and UI mid-dogfood (17: tests collide with nothing -- including the instance the
     # operator is using right now).
-    Get-ChildItem "$root\.dodona\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem "$wsDir\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
         $si = Get-Content $_.FullName | ConvertFrom-Json
         foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
     }
-    Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
+    Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
     Remove-Item $binRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_BIN_ROOT -ErrorAction SilentlyContinue
 }

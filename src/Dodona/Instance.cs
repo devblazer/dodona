@@ -7,17 +7,26 @@ using System.Text;
 namespace Dodona;
 
 /// <summary>
-/// Who an instance is (design §14). Everything is scoped to the *canonical* project
-/// root, and this file is the single definition of what that means — compiled into both
-/// the daemon/CLI binary and the UI (as a linked source file, not an assembly reference:
-/// the UI must stay runtime-decoupled and disposable, §13).
+/// Who an instance is (design §14, as revised by docs/WORKSPACES-CONCIERGE.md §1/§3).
+/// Compiled into both the daemon/CLI binary and the UI (as a linked source file, not an
+/// assembly reference: the UI must stay runtime-decoupled and disposable, §13).
 ///
-/// Canonicalization is load-bearing, not tidiness. One path has many spellings on
-/// Windows — case, 8.3 short names, junctions, subst drives, trailing slashes, UNC — and
-/// two spellings of one repo would derive two instance ids, which means two registries
-/// and therefore two merge tokens over one main: exactly the race this system exists to
-/// prevent, reintroduced by a string comparison. GetFinalPathNameByHandle is what the OS
-/// itself considers the final path, so it collapses every spelling into one.
+/// **Identity is now the workspace id**, not a hash of a project root. A workspace is
+/// named, not located, so there is no path to hash — the pipe names and the OS mutex key
+/// off the registry's generated slug (see <see cref="Registry.NewId"/>). Every helper
+/// below that takes an `id` takes that slug; nothing about the pipe namespace changed
+/// shape, only where the id comes from.
+///
+/// Canonicalization did NOT go away with the hash, and that is the important part.
+/// One path has many spellings on Windows — case, 8.3 short names, junctions, subst
+/// drives, trailing slashes, UNC — and two spellings of one repo used to derive two
+/// instance ids, which meant two registries and therefore two merge tokens over one main:
+/// exactly the race this system exists to prevent, reintroduced by a string comparison.
+/// The hash is gone, so that structural guarantee is gone with it, and it has been
+/// replaced deliberately: <see cref="Canonical"/> is what the registry dedupes MEMBERS by,
+/// and repo-exclusivity (Registry's three enforcement layers) is what now carries the
+/// "one merge token per main" invariant. GetFinalPathNameByHandle is still the OS's own
+/// answer to "what is the final path", which is why it collapses every spelling into one.
 /// </summary>
 static class Instance
 {
@@ -45,9 +54,14 @@ static class Instance
         return full.TrimEnd('\\', '/');
     }
 
-    /// <summary>The instance id: first 8 hex of SHA256 over the lowercased canonical
-    /// root. Short enough to read in a pipe name, wide enough not to collide.</summary>
-    public static string Id(string anyPath) =>
+    /// <summary>
+    /// The PRE-WORKSPACE instance id: first 8 hex of SHA256 over the lowercased canonical
+    /// root. Kept for exactly one job — migration needs to know whether a daemon of the
+    /// old shape is still running over a store it is about to move, and the only way to
+    /// ask is to recompute the pipe name that daemon would be holding. Nothing else may
+    /// call this: deriving identity from a path is the thing workspaces replaced.
+    /// </summary>
+    public static string LegacyId(string anyPath) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Canonical(anyPath).ToLowerInvariant())))[..8].ToLowerInvariant();
 
     public static string CtlPipe(string id) => $"dodona-{id}-ctl";

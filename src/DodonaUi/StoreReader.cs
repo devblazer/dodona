@@ -14,7 +14,11 @@ sealed class StoreReader : IDisposable
     readonly string _path;
     SqliteConnection? _db;
 
-    public StoreReader(string root) => _path = Path.Combine(root, ".dodona", "store.db");
+    /// <summary>Takes the store PATH, not a project root. A workspace is named rather than
+    /// located (WORKSPACES-CONCIERGE.md §1), so its store lives under
+    /// %LOCALAPPDATA%\Dodona\workspaces\&lt;id&gt;\ and there is no root to append
+    /// `.dodona\store.db` to any more. `--attach` still points at a copied file.</summary>
+    public StoreReader(string storePath) => _path = storePath;
 
     bool? _hasCompressed;
 

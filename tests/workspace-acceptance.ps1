@@ -10,6 +10,10 @@
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot\_workspace.ps1"
+# Isolated workspace registry + store tree for this suite: never touch the
+# operator's own workspaces (§17, and CLAUDE.md §4's reasoning one level up).
+$dodonaHome = Use-IsolatedDodonaHome 'ws'
 $dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
 $fake = "$repo\src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.exe"
 $env:DODONA_SHIM = "$repo\src\DodonaShim\bin\Release\net8.0\DodonaShim.exe"
@@ -50,6 +54,12 @@ function Commit([string]$wt, [string]$msg) {
 
 $daemon = $null
 try {
+    # Where this workspace keeps its state. Not `<root>\.dodona` any more: a workspace
+    # is named rather than located, so the suite asks the binary (see tests/_workspace.ps1).
+    $ws = Get-WorkspacePaths $dodona $root
+    $storeDb = $ws.Store
+    $wsDir = $ws.Dir
+
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Start-Sleep -Milliseconds 800
@@ -138,25 +148,219 @@ try {
     # ---- one store, one causal chain for the whole workspace ----
     $ev = (python -c "
 import sqlite3
-db = sqlite3.connect(r'$root\.dodona\store.db')
+db = sqlite3.connect(r'$storeDb')
 for r in db.execute('''SELECT detail FROM events WHERE kind='ticket_created' ORDER BY id'''): print(r[0])
 ") | Out-String
     Check 'one_causal_chain_names_repos' ($ev -match 'repo engine' -and $ev -match 'repo tools') $ev
+
+    # =====================================================================================
+    # WORKSPACE IDENTITY AND REPO EXCLUSIVITY (docs/WORKSPACES-CONCIERGE.md §1/§3)
+    #
+    # Everything above still passes because a one-member workspace is indistinguishable
+    # from the old root-anchored instance — that is the degenerate case the design promises.
+    # What follows tests the parts that are NEW, and one of them is load-bearing:
+    #
+    # Path-derived identity used to make "two merge tokens over one main" structurally
+    # impossible: two spellings of a repo hashed to one id, one mutex, one token. Named
+    # workspaces delete that, so the invariant moved up a level and became registry law.
+    # If these checks ever go red, the guarantee this whole system exists to provide is
+    # gone — treat a failure here as a correctness incident, not a test problem.
+    # =====================================================================================
+
+    # ---- identity is a generated slug, and the store left the project folder ----
+    Check 'identity_is_a_slug_not_a_path_hash' `
+        ($ws.Id -match '^[a-z0-9-]+-[0-9a-f]{4}$' -and $ws.Id -match 'dodona-ws') "id=$($ws.Id)"
+    Check 'store_lives_in_workspace_territory' `
+        ($storeDb.StartsWith($dodonaHome) -and (Test-Path $storeDb)) $storeDb
+    Check 'store_is_not_under_the_project_root' (-not (Test-Path "$root\.dodona\store.db")) ''
+    # ...but worktrees deliberately DID stay beside their repo (§1's stated exception)
+    Check 'worktrees_stayed_beside_the_repo' (Test-Path "$root\.dodona\wt\t4") 
+
+    # ---- THE INVARIANT: a repo belongs to at most one workspace ----
+    # Fresh fixtures, so the live workspace above is never disturbed.
+    $solo = Join-Path $env:TEMP ("dodona-solo-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force $solo | Out-Null
+    Set-Content "$solo\a.txt" "solo"
+    git -C $solo init -b main -q
+    git -C $solo add -A
+    git -C $solo -c user.email=t@t -c user.name=t commit -q -m init
+    $shared = Join-Path $env:TEMP ("dodona-notes-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force $shared | Out-Null
+
+    # Extra daemons for the extra workspaces these checks address. This suite owns daemon
+    # lifetime (DODONA_NO_AUTOSTART=1 - start-on-demand must not join in), so they are
+    # started explicitly and tracked for the scoped cleanup in `finally`.
+    $extraDaemons = New-Object System.Collections.ArrayList
+    function StartDaemonFor([string]$wsId) {
+        $p = Start-Process $dodona -ArgumentList "daemon", "--workspace", $wsId -PassThru -NoNewWindow `
+            -RedirectStandardOutput "$out\daemon-$wsId.out" -RedirectStandardError "$out\daemon-$wsId.err"
+        [void]$extraDaemons.Add($p)
+        Start-Sleep -Milliseconds 800
+        $p
+    }
+
+    function DodonaBare([string[]]$a) {
+        $ErrorActionPreference = 'Continue'
+        Remove-Item $errFile -ErrorAction SilentlyContinue
+        $o = (& $dodona $a 2> $errFile) | Out-String
+        $global:DODONA_EXIT = $LASTEXITCODE
+        $e = if (Test-Path $errFile) { (Get-Content $errFile -Raw) } else { '' }
+        ("$o`n$e").Trim()
+    }
+
+    # $solo resolves into a workspace of its own (named after the folder, sole member)
+    $soloWs = Get-WorkspacePaths $dodona $solo
+    DodonaBare @("workspace-create", "--name", "rival") | Out-Null
+    $steal = DodonaBare @("workspace-attach", "--member", $solo, "--workspace", "rival")
+    Check 'repo_in_two_workspaces_refused' ($DODONA_EXIT -ne 0 -and $steal -match 'already belongs to workspace') $steal
+    Check 'refusal_says_why_two_tokens_is_the_problem' ($steal -match 'two merge tokens over one main') $steal
+    Check 'refusal_offers_the_move_affordance' ($steal -match 'dodona workspace-move --member') $steal
+
+    # A BARE FOLDER is exempt and must stay exempt: there is no merge token to split, and
+    # a shared notes folder in two workspaces harms nobody.
+    $b1 = DodonaBare @("workspace-attach", "--member", $shared, "--workspace", "rival")
+    $b2 = DodonaBare @("workspace-attach", "--member", $shared, "--workspace", $soloWs.Id)
+    Check 'bare_folder_may_be_shared' ($b1 -notmatch 'error' -and $b2 -notmatch 'error') "$b1 | $b2"
+
+    # Reassignment is legitimate — that is what the refusal points at — and it is atomic:
+    # the repo is never in two workspaces and never in none.
+    $moved = DodonaBare @("workspace-move", "--member", $solo, "--workspace", "rival")
+    $wsList = DodonaBare @("workspaces", "--json") | ConvertFrom-Json
+    $ownersOfSolo = @($wsList | Where-Object { $_.members.path -contains (Resolve-Path $solo).Path })
+    Check 'move_reassigns_the_repo' ($moved -match 'moved' -and $ownersOfSolo.Count -eq 1 -and $ownersOfSolo[0].name -eq 'rival') `
+        "owners=$($ownersOfSolo.Count) $($ownersOfSolo.name -join ',')"
+
+    $rival = ($wsList | Where-Object { $_.name -eq 'rival' }).id
+
+    # ---- layer 3: the check where a merge token is actually at stake ----
+    # The one hole attach-time enforcement cannot cover, BY DESIGN: a bare folder is exempt
+    # and may legitimately live in two workspaces — until someone runs `git init` in it.
+    # The row was valid when it was written; only a check at the point of use notices the
+    # ground moved. Same shape as the diff backstop behind the claim gate (§6).
+    #
+    # Its own fixture and its own two workspaces: the pair above are now doing other jobs,
+    # and a check this load-bearing should not depend on their state.
+    $drift = Join-Path $env:TEMP ("dodona-drift-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force $drift | Out-Null
+    DodonaBare @("workspace-create", "--name", "drift-a", "--member", $drift) | Out-Null
+    DodonaBare @("workspace-create", "--name", "drift-b", "--member", $drift) | Out-Null
+    $driftA = ((DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.name -eq 'drift-a' }).id
+    $driftB = ((DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.name -eq 'drift-b' }).id
+    Check 'bare_folder_in_two_workspaces_is_allowed' ($null -ne $driftA -and $null -ne $driftB) "a=$driftA b=$driftB"
+
+    # ...and NOW it becomes a repo, behind the registry's back.
+    git -C $drift init -b main -q
+    Set-Content "$drift\note.md" "# now a repo"
+    git -C $drift add -A
+    git -C $drift -c user.email=t@t -c user.name=t commit -q -m init
+
+    StartDaemonFor $driftA | Out-Null
+    $sneakTicket = DodonaBare @("ticket-create", "--title", "SNEAK2", "--claim", "path:note.md", "--workspace", $driftA)
+    Check 'ticket_refused_when_repo_is_not_exclusive' `
+        ($DODONA_EXIT -ne 0 -and $sneakTicket -match 'also belongs to workspace') $sneakTicket
+    Check 'exclusivity_backstop_offers_the_move' ($sneakTicket -match 'workspace-move --member') $sneakTicket
+    # And it is recorded: a refusal with no event row naming why would be a bug (DEBUGGING.md).
+    $driftStore = (DodonaBare @("where", "--workspace", $driftA, "--json") | ConvertFrom-Json).store
+    $driftEv = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$driftStore')
+for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclusive' '''): print(r[0])
+") | Out-String
+    Check 'exclusivity_refusal_is_in_the_causal_chain' ($driftEv -match 'ticket_repo_not_exclusive') $driftEv
+    DodonaBare @("stop-daemon", "--workspace", $driftA) | Out-Null
+
+    # ---- renaming re-derives nothing: name is display, id is identity (§1) ----
+    $before = Get-WorkspacePaths $dodona $solo
+    DodonaBare @("workspace-rename", "renamed-rival", "--workspace", $rival) | Out-Null
+    $after = DodonaBare @("where", "--workspace", $rival, "--json") | ConvertFrom-Json
+    Check 'rename_keeps_the_id' ($after.id -eq $rival) "$($after.id) vs $rival"
+    Check 'rename_keeps_the_store_path' ($after.store -eq $before.Store) "$($after.store)"
+    Check 'rename_keeps_the_ctl_pipe' ($after.ctlPipe -eq $before.CtlPipe) "$($after.ctlPipe)"
+    Check 'new_name_resolves' ((DodonaBare @("where", "--workspace", "renamed-rival", "--json") | ConvertFrom-Json).id -eq $rival) ''
+
+    # ---- an alias is how rung 4 decays toward rung 1 (§4) ----
+    DodonaBare @("workspace-alias", "the-rival", "--workspace", $rival) | Out-Null
+    Check 'alias_resolves_to_the_workspace' `
+        ((DodonaBare @("where", "--workspace", "the-rival", "--json") | ConvertFrom-Json).id -eq $rival) ''
+
+    # ---- naming a workspace that does not exist is a typo, not an invitation ----
+    $typo = DodonaBare @("status", "--workspace", "no-such-workspace")
+    Check 'unknown_workspace_name_is_refused' ($DODONA_EXIT -ne 0 -and $typo -match 'no workspace') $typo
+
+    # ---- migration: a pre-workspace instance becomes a workspace named after its root ----
+    $legacy = Join-Path $env:TEMP ("dodona-legacy-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force "$legacy\.dodona" | Out-Null
+    # A store shaped like the real thing, so the assertion is "this exact file moved".
+    $marker = "legacy-store-" + [guid]::NewGuid().ToString('N')
+    Set-Content "$legacy\.dodona\store.db" $marker
+    Set-Content "$legacy\.dodona\shim-lane7.json" '{"shimPid":0,"childPid":0,"pipeName":"x"}'
+    $mig = Get-WorkspacePaths $dodona $legacy
+    Check 'migrated_workspace_named_after_its_root' ($mig.Name -eq (Split-Path -Leaf $legacy)) $mig.Name
+    Check 'migration_moved_the_store' `
+        ((Test-Path $mig.Store) -and (Get-Content $mig.Store -Raw).Trim() -eq $marker -and -not (Test-Path "$legacy\.dodona\store.db")) $mig.Store
+    Check 'migration_moved_the_shim_info' `
+        ((Test-Path "$($mig.Dir)\shim-lane7.json") -and -not (Test-Path "$legacy\.dodona\shim-lane7.json")) ''
+    $migRow = (DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.id -eq $mig.Id }
+    Check 'migrated_root_is_the_sole_member' (@($migRow.members).Count -eq 1) "members=$(@($migRow.members).Count)"
+
+    # ---- creating a workspace cannot quietly take an owned repo with it ----
+    DodonaBare @("workspace-create", "--name", "twin", "--member", $solo) | Out-Null
+    # the workspace IS created; the attach inside it is what gets refused
+    Check 'creating_a_workspace_cannot_steal_an_owned_repo' ($DODONA_EXIT -ne 0) ''
+    $twin = ((DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.name -eq 'twin' }).id
+
+    # ---- multi-member: repo names gain a member prefix only when they must ----
+    # Two members, so `.` is no longer an unambiguous name and a member prefix appears.
+    # A ONE-member workspace must keep the old names byte-for-byte, which is what every
+    # check above this line has already been asserting.
+    $twoA = Join-Path $env:TEMP ("dodona-mA-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $twoB = Join-Path $env:TEMP ("dodona-mB-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    foreach ($r in $twoA, $twoB) {
+        New-Item -ItemType Directory -Force "$r\src" | Out-Null
+        Set-Content "$r\src\main.cs" "// $r"
+        git -C $r init -b main -q
+        git -C $r add -A
+        git -C $r -c user.email=t@t -c user.name=t commit -q -m init
+    }
+    DodonaBare @("workspace-create", "--name", "pair", "--member", $twoA, "--member", $twoB) | Out-Null
+    $pair = ((DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.name -eq 'pair' }).id
+    StartDaemonFor $pair | Out-Null
+    $pairRepos = DodonaBare @("repos", "--workspace", $pair)
+    Check 'multi_member_repo_names_are_member_prefixed' `
+        ($pairRepos -match [regex]::Escape((Split-Path -Leaf $twoA)) -and
+         $pairRepos -match [regex]::Escape((Split-Path -Leaf $twoB)) -and
+         $pairRepos -notmatch '(?m)^\s*\.\s') $pairRepos
+    # A ticket in a multi-member workspace still lands in exactly one repo, and its
+    # worktree still sits beside THAT member — not beside the other one, and not in
+    # workspace territory (§1's exception).
+    $pt = DodonaBare @("ticket-create", "--title", "PAIRED", "--claim", "subtree:$(Split-Path -Leaf $twoA)/src", "--workspace", $pair)
+    Check 'multi_member_ticket_names_its_repo' ($pt -match [regex]::Escape((Split-Path -Leaf $twoA))) $pt
+    Check 'multi_member_worktree_sits_beside_its_own_member' `
+        ((Test-Path "$twoA\.dodona\wt\t1") -and -not (Test-Path "$twoB\.dodona\wt\t1")) $pt
+    DodonaBare @("stop-daemon", "--workspace", $pair) | Out-Null
+
+    # ---- forget removes the registry rows and keeps every transcript (§12) ----
+    $forgotten = DodonaBare @("workspace-forget", "--workspace", $twin)
+    Check 'forget_removes_the_registry_row' `
+        ($forgotten -match 'forgotten' -and -not (@(DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.id -eq $twin })) $forgotten
+    Check 'forget_keeps_the_store_directory' (Test-Path (Join-Path $dodonaHome "workspaces\$twin")) ''
 
     Dodona @("stop-daemon") | Out-Null
 }
 finally {
     if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
+    foreach ($p in @($extraDaemons)) { if ($p -and -not $p.HasExited) { try { Stop-Process -Id $p.Id -Force } catch { } } }
     # Scoped cleanup: only THIS test's processes, resolved from its own shim-info
     # files. Killing by process NAME once murdered the operator's live session's shim
     # and UI mid-dogfood (17: tests collide with nothing -- including the instance the
     # operator is using right now).
-    Get-ChildItem "$root\.dodona\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem "$wsDir\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
         $si = Get-Content $_.FullName | ConvertFrom-Json
         foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
     }
-    Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
+    Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
+    Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
 }
 
 $results | ConvertTo-Json | Set-Content "$out\results.json" -Encoding utf8

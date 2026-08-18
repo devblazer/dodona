@@ -26,6 +26,14 @@
          would mean two merge tokens), while the UI stays runtime-decoupled and
          disposable (§13). -->
     <Compile Include="..\Dodona\Instance.cs" Link="Instance.cs" />
+    <!-- Workspace identity, for the same reason and with the same force: the UI has to
+         resolve "which workspace owns this folder" to the SAME answer the daemon does, or
+         it would read one store and write to another's pipe. Paths.cs comes with it
+         because a store's location is now derived from a workspace id, not from a root. -->
+    <Compile Include="..\Dodona\Paths.cs" Link="Paths.cs" />
+    <Compile Include="..\Dodona\Workspaces.cs" Link="Workspaces.cs" />
+    <Compile Include="..\Dodona\WorkspaceResolve.cs" Link="WorkspaceResolve.cs" />
+    <Compile Include="..\Dodona\Repos.cs" Link="Repos.cs" />
     <!-- Ver too, and for the same reason: the UI is its own build with its own hot swap
          (§13), so it has to be able to say which build it is. Ver.Build reads
          typeof(Ver).Assembly, so compiled in here it reports the UI's identity, not the

@@ -8,7 +8,7 @@ namespace DodonaUi;
 /// The recent-projects list — the ONE piece of state that is per-user rather than
 /// per-project. That is allowed precisely because it is not system state: it holds no
 /// lanes, no claims, no queue, and nothing reads it for authority (§14's "no shared
-/// mutable state" is about the registry, and the registry is still one store per root).
+/// mutable state" is about a workspace's store, and that is still one store per workspace).
 /// If this file is deleted the only loss is convenience: you browse for the folder again.
 /// </summary>
 public sealed record ProjectEntry(string Path, string LastOpened)
@@ -16,9 +16,17 @@ public sealed record ProjectEntry(string Path, string LastOpened)
     public string Name => System.IO.Path.GetFileName(Path.TrimEnd('\\', '/')) is { Length: > 0 } n ? n : Path;
     public bool Exists => Directory.Exists(Path);
     public bool IsGitRepo => RepoScan.IsRepoRoot(Path);
-    public bool IsWorkspace => !IsGitRepo && RepoScan.FindNested(Path).Count > 0;
-    public bool HasStore => File.Exists(System.IO.Path.Combine(Path, ".dodona", "store.db"));
-    public bool IsLive => Instance.IsLive(Instance.Id(Path));
+    public bool HoldsRepos => !IsGitRepo && RepoScan.FindNested(Path).Count > 0;
+
+    /// <summary>Which workspace owns this folder, if any — filled in by
+    /// <see cref="ProjectStore.Load"/> from ONE registry read. Deliberately not a property
+    /// that resolves on access: the picker binds several of these per row and would
+    /// otherwise open a SQLite connection per row per refresh.</summary>
+    public string? WorkspaceId { get; set; }
+    public string? WorkspaceName { get; set; }
+
+    public bool HasStore => WorkspaceId is { } id && File.Exists(Paths.Store(id));
+    public bool IsLive => WorkspaceId is { } id && Instance.IsLive(id);
 }
 
 static class ProjectStore
@@ -29,12 +37,30 @@ static class ProjectStore
 
     public static List<ProjectEntry> Load()
     {
+        List<ProjectEntry> list;
         try
         {
             if (!File.Exists(File_)) return new List<ProjectEntry>();
-            return JsonSerializer.Deserialize<List<ProjectEntry>>(File.ReadAllText(File_)) ?? new List<ProjectEntry>();
+            list = JsonSerializer.Deserialize<List<ProjectEntry>>(File.ReadAllText(File_)) ?? new List<ProjectEntry>();
         }
         catch { return new List<ProjectEntry>(); }
+
+        // One registry read for the whole list: a recent folder's store, liveness and
+        // status now all hang off which WORKSPACE owns it, and that answer is not on disk
+        // beside the folder any more. A registry that will not open leaves every row
+        // workspace-less, which renders as "new" — honest, and never an empty picker.
+        try
+        {
+            using var reg = new Registry();
+            foreach (var e in list)
+                if (reg.Owner(e.Path) is { } owner)
+                {
+                    e.WorkspaceId = owner.Ws.Id;
+                    e.WorkspaceName = owner.Ws.Name;
+                }
+        }
+        catch { }
+        return list;
     }
 
     static void Save(List<ProjectEntry> list)

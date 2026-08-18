@@ -20,23 +20,32 @@ public partial class MainWindow : Window
     readonly Poller _poller;
     readonly CancellationTokenSource _cts = new();
 
-    /// <summary>Which project this window is showing — the picker uses it to raise an
-    /// already-open project instead of opening it twice.</summary>
+    /// <summary>Which workspace this window is showing — the picker uses it to raise an
+    /// already-open workspace instead of opening it twice.</summary>
     public string InstanceId => _instanceId;
 
-    public MainWindow(string root, string instanceId, bool successor = false)
+    /// <summary>This process was started with --test-window. Carried across a UI hot swap
+    /// (§13) because losing it would turn an invisible test window into a visible one that
+    /// activates — test windows stealing the operator's keyboard mid-work is the complaint
+    /// --test-window exists to answer, and a swap is no reason to reintroduce it.</summary>
+    public static bool TestWindow;
+
+    public MainWindow(string primary, string instanceId, string workspaceName, bool successor = false)
     {
-        _root = root;
+        _root = primary;
         _instanceId = instanceId;
         InitializeComponent();
         DataContext = _vm;
-        // The shortest suffix unique among the projects the picker knows: `dodona` stays
-        // `dodona`, but two folders both named `src` become `client/src` and `proj/src`.
-        _vm.ProjectName = Labels.For(root, ProjectStore.Load().Select(p => p.Path).Append(root));
-        _vm.ProjectPath = root;
-        Title = $"Dodona — {_vm.ProjectName}";
+        // The workspace's NAME, not a folder label. A workspace is named rather than
+        // located (WORKSPACES-CONCIERGE.md §1), so the shortest-unique-path trick that used
+        // to title this window is now answering a question nobody asked — the operator
+        // named this thing "work", and that is what the window should say. The primary
+        // member is still the tooltip, because "which folder is this" stays a fair question.
+        _vm.ProjectName = workspaceName;
+        _vm.ProjectPath = primary;
+        Title = $"Dodona — {workspaceName}";
 
-        _reader = new StoreReader(root);
+        _reader = new StoreReader(Paths.Store(instanceId));
         _poller = new Poller(_reader);
         _ = _poller.RunAsync(_vm, snap => Dispatcher.InvokeAsync(() => ApplySnapshot(snap)).Task, _cts.Token);
         UiPipe.Start(Instance.UiPipe(instanceId), this, successor);
@@ -204,8 +213,12 @@ public partial class MainWindow : Window
         {
             using var server = new NamedPipeServerStream(Instance.UiHandoffPipe(_instanceId), PipeDirection.InOut, 1,
                                                          PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
-            var psi = new System.Diagnostics.ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = _root };
-            foreach (var a in new[] { "--root", _root, "--successor" }) psi.ArgumentList.Add(a);
+            // Addressed by workspace id: the successor must come up over the same store,
+            // and re-resolving a path in the child is a second chance to disagree.
+            var psi = new System.Diagnostics.ProcessStartInfo(exe)
+            { UseShellExecute = false, WorkingDirectory = Directory.Exists(_root) ? _root : Path.GetTempPath() };
+            foreach (var a in new[] { "--workspace", _instanceId, "--successor" }) psi.ArgumentList.Add(a);
+            if (TestWindow) psi.ArgumentList.Add("--test-window");
             using var p = System.Diagnostics.Process.Start(psi);
 
             // Blocking the UI thread here is deliberate: nothing this window could usefully

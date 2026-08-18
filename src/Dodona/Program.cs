@@ -9,7 +9,52 @@ using Dodona;
 var (cmd, root, opts, pos) = ParseArgs(args);
 if (cmd is null) { Help(); return 1; }
 
-string instanceId = Instance.Id(root);
+// ---------------------------------------------------------------- who am I talking to
+// Identity is the WORKSPACE (docs/WORKSPACES-CONCIERGE.md §1), not a hash of --root.
+// Two ways in, and they are deliberately different:
+//   --workspace <name|id|alias>  addresses a workspace directly; never creates one,
+//                                because naming one that does not exist is a typo.
+//   --root <path>  (the default)  asks the registry who owns that path — and if nobody
+//                                does, migrates or creates a workspace for it, which is
+//                                what makes every pre-workspace project and every
+//                                existing acceptance suite keep working untouched.
+// Registry-free commands (`version`, and the workspace verbs that manage the registry
+// themselves) are resolved lazily so a broken registry never stops you inspecting a binary.
+string instanceId = "", wsName = "", primary = Path.GetFullPath(root);
+if (cmd is not ("version" or "workspaces" or "workspace-create"))
+{
+    try
+    {
+        using var reg0 = new Registry();
+        Workspace? ws;
+        if (One("workspace") is { Length: > 0 } named)
+        {
+            ws = WorkspaceResolve.ByNameOrId(reg0, named);
+            if (ws is null)
+            {
+                var have = reg0.All();
+                Console.Error.WriteLine($"no workspace \"{named}\"" +
+                    (have.Count > 0 ? $" — have: {string.Join(", ", have.Select(x => x.Name))}" : " — none exist yet"));
+                Console.Error.WriteLine("       make one:  dodona workspace-create --name <NAME> --member <path>");
+                return 2;
+            }
+        }
+        else
+        {
+            var resolved = WorkspaceResolve.ForPath(reg0, root);
+            ws = resolved.Ws;
+            // Announced, not silent (§11): a workspace appearing, or a store moving out of
+            // a project folder, is exactly the kind of thing an operator must be able to
+            // see in the scrollback afterwards.
+            if (resolved.Note is not null) Console.Error.WriteLine($"dodona: {resolved.Note}");
+        }
+        instanceId = ws.Id;
+        wsName = ws.Name;
+        primary = ws.Primary ?? primary;
+    }
+    catch (Exception ex) { return Fail($"workspace registry: {ex.Message}"); }
+}
+
 string ctlPipe = Instance.CtlPipe(instanceId);
 string uiPipe = Instance.UiPipe(instanceId);
 
@@ -30,7 +75,20 @@ int Usage() => Fail($"{cmd}: missing an argument — see `dodona` with no argume
 async Task<int> Dispatch() => cmd switch
 {
     "version" => Version(),
-    "daemon" => await Daemon.RunAsync(Path.GetFullPath(root), instanceId, ctlPipe, opts.ContainsKey("successor")),
+    "daemon" => await Daemon.RunAsync(primary, instanceId, wsName, ctlPipe, opts.ContainsKey("successor")),
+    // ---- workspaces (WORKSPACES-CONCIERGE.md §1). Registry operations, answered in this
+    // process: there is no daemon to ask, and in M2 there is no concierge yet either. M3
+    // moves the WRITES behind the concierge's ctl pipe; reads stay direct, for the same
+    // reason the UI reads stores directly — a dead manager must never blind you.
+    "workspaces" => WorkspaceList(),
+    "workspace-create" => WorkspaceCreate(),
+    "workspace-attach" => WorkspaceAttach(),
+    "workspace-detach" => WorkspaceEdit((r, id) => r.Detach(id, RequireMember(), out var e) ? null : e, "detached"),
+    "workspace-move" => WorkspaceEdit((r, id) => r.Move(id, RequireMember(), out var e) ? null : e, "moved"),
+    "workspace-rename" => WorkspaceEdit((r, id) => r.Rename(id, pos[0], out var e) ? null : e, "renamed"),
+    "workspace-alias" => WorkspaceEdit((r, id) => r.AddAlias(id, pos[0], out var e) ? null : e, "aliased"),
+    "workspace-forget" => WorkspaceEdit((r, id) => r.Forget(id, out var e) ? null : e, "forgotten"),
+    "where" => Where(),
     "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), model = One("model"), effort = One("effort"), childArgs = Many("child-arg") }),
     "lane-stop" => Client(new { cmd = "lane-stop", lane = long.Parse(pos[0]) }),
     "lane-respawn" => Client(new { cmd = "lane-respawn", lane = long.Parse(pos[0]) }),
@@ -69,6 +127,115 @@ async Task<int> Dispatch() => cmd switch
     "stop-daemon" => Client(new { cmd = "stop-daemon" }),
     _ => Fail($"unknown command: {cmd}"),
 };
+
+// ---------------------------------------------------------------- workspaces (§1)
+
+int WorkspaceList()
+{
+    using var reg = new Registry();
+    var all = reg.All();
+    if (opts.ContainsKey("json"))
+    {
+        Console.WriteLine(JsonSerializer.Serialize(all.Select(w => new
+        {
+            id = w.Id, name = w.Name, live = Instance.IsLive(w.Id), store = Paths.Store(w.Id),
+            aliases = w.Aliases,
+            members = w.Members.Select(m => new { path = m.Path, git = m.IsGit }).ToList(),
+        })));
+        return 0;
+    }
+    if (all.Count == 0)
+    {
+        Console.WriteLine("no workspaces yet.");
+        Console.WriteLine("  dodona workspace-create --name work --member C:\\repos\\thing");
+        Console.WriteLine("  (or just run any command with --root <path>: a workspace is made for it)");
+        return 0;
+    }
+    foreach (var w in all)
+    {
+        Console.WriteLine($"{(Instance.IsLive(w.Id) ? "*" : " ")} {w.Name}  ({w.Id})" +
+                          (w.Aliases.Count > 0 ? $"  aka {string.Join(", ", w.Aliases)}" : ""));
+        foreach (var m in w.Members) Console.WriteLine($"      {(m.IsGit ? "repo  " : "folder")} {m.Path}");
+        if (w.Members.Count == 0) Console.WriteLine("      (no members yet — dodona workspace-attach --member <path>)");
+    }
+    Console.WriteLine("\n* = a daemon is running for it");
+    return 0;
+}
+
+int WorkspaceCreate()
+{
+    var name = One("name") ?? (pos.Count > 0 ? pos[0] : null);
+    if (name is null) return Fail("workspace-create --name <NAME> [--member <path>]... [--bulk]");
+    using var reg = new Registry();
+    if (reg.ByNameOrId(name) is Workspace clash) return Fail($"\"{name}\" already resolves to {clash.Label}");
+    var ws = reg.Create(name);
+    Console.WriteLine($"workspace \"{ws.Name}\" ({ws.Id})  store {Paths.Store(ws.Id)}");
+    int worst = 0;
+    foreach (var m in Many("member"))
+        foreach (var path in opts.ContainsKey("bulk") ? WorkspaceResolve.BulkCandidates(m) : new List<string> { m })
+            worst = Math.Max(worst, AttachOne(reg, ws.Id, path));
+    Console.WriteLine($"undo: dodona workspace-forget --workspace {ws.Id}   (the store directory is kept)");
+    return worst;
+}
+
+int WorkspaceAttach()
+{
+    var members = Many("member");
+    if (members.Count == 0) return Fail("workspace-attach --member <path>... [--bulk]   (--bulk expands a folder into its repos)");
+    using var reg = new Registry();
+    int worst = 0;
+    foreach (var m in members)
+        foreach (var path in opts.ContainsKey("bulk") ? WorkspaceResolve.BulkCandidates(m) : new List<string> { m })
+            worst = Math.Max(worst, AttachOne(reg, instanceId, path));
+    return worst;
+}
+
+int AttachOne(Registry reg, string wsId, string path)
+{
+    if (reg.Attach(wsId, path, out var err)) { Console.WriteLine($"  + {Instance.Canonical(path)}"); return 0; }
+    Console.Error.WriteLine($"error: {err}");
+    return 2;
+}
+
+string RequireMember() => One("member") ?? (pos.Count > 0 ? pos[0] : throw new ArgumentOutOfRangeException(nameof(opts), "--member <path> required"));
+
+int WorkspaceEdit(Func<Registry, string, string?> op, string verb)
+{
+    using var reg = new Registry();
+    var err = op(reg, instanceId);
+    if (err is not null) return Fail($"error: {err}");
+    Console.WriteLine($"{verb}: workspace {wsName} ({instanceId})");
+    return 0;
+}
+
+/// <summary>Where this workspace's state actually lives. Exists because the answer stopped
+/// being obvious the moment a store left the project folder: DEBUGGING.md's whole first
+/// section was a table of `&lt;root&gt;\.dodona\...` paths, and an acceptance suite that
+/// wants to read a store must be able to ask rather than reconstruct.</summary>
+int Where()
+{
+    var storeDir = Paths.WorkspaceDir(instanceId);
+    if (opts.ContainsKey("json"))
+    {
+        using var reg = new Registry();
+        var ws = reg.ById(instanceId);
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            id = instanceId, name = wsName, live = Instance.IsLive(instanceId),
+            dir = storeDir, store = Paths.Store(instanceId), primary,
+            ctlPipe, uiPipe, registry = Paths.Registry,
+            members = ws?.Members.Select(m => m.Path).ToList() ?? new List<string>(),
+        }));
+        return 0;
+    }
+    Console.WriteLine($"workspace  {wsName} ({instanceId}){(Instance.IsLive(instanceId) ? "  [daemon running]" : "")}");
+    Console.WriteLine($"  store    {Paths.Store(instanceId)}");
+    Console.WriteLine($"  dir      {storeDir}       (shim-lane<N>.json live here too)");
+    Console.WriteLine($"  primary  {primary}");
+    Console.WriteLine($"  ctl pipe {ctlPipe}");
+    Console.WriteLine($"  registry {Paths.Registry}");
+    return 0;
+}
 
 int Version()
 {
@@ -247,8 +414,8 @@ int Client(object request, string? pipeName = null)
         if (pipeName != ctlPipe || cmd == "stop-daemon" || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
             return Fail(pipeName == ctlPipe ? $"daemon not running for this root (ctl pipe {pipeName})" : $"UI not running for this root (pipe {pipeName})");
 
-        var reborn = Autostart(root);
-        if (reborn is not null) return Fail($"could not start a daemon for this root: {reborn}");
+        var reborn = Autostart(instanceId, primary);
+        if (reborn is not null) return Fail($"could not start a daemon for workspace {wsName}: {reborn}");
         pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
         try { pipe.Connect(15000); }
         catch { pipe.Dispose(); return Fail("started a daemon but it never answered its control pipe"); }
@@ -275,24 +442,25 @@ int Client(object request, string? pipeName = null)
 
 // ---------------------------------------------------------------- plumbing
 
-/// <summary>Launch a daemon for this root, fully detached: no redirected stdio (a parent
-/// that exits would break the pipe under it) and no window. Returns null on success, or
-/// the failure reason.</summary>
-static string? Autostart(string root)
+/// <summary>Launch a daemon for this workspace, fully detached: no redirected stdio (a
+/// parent that exits would break the pipe under it) and no window. Addressed by workspace
+/// id, not by path — the registry has already resolved who this is, and re-resolving in
+/// the child is a second chance to disagree. Returns null on success, or the reason.</summary>
+static string? Autostart(string wsId, string primary)
 {
     try
     {
-        Console.Error.WriteLine("no daemon for this root — starting one");
+        Console.Error.WriteLine("no daemon for this workspace — starting one");
         var exe = Environment.ProcessPath ?? "dodona.exe";
         var psi = new System.Diagnostics.ProcessStartInfo(exe)
         {
             UseShellExecute = true,                     // detach: the daemon must outlive this CLI
             WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
-            WorkingDirectory = Path.GetFullPath(root),
+            WorkingDirectory = Directory.Exists(primary) ? primary : Path.GetTempPath(),
         };
         psi.ArgumentList.Add("daemon");
-        psi.ArgumentList.Add("--root");
-        psi.ArgumentList.Add(Path.GetFullPath(root));
+        psi.ArgumentList.Add("--workspace");
+        psi.ArgumentList.Add(wsId);
         return System.Diagnostics.Process.Start(psi) is null ? "Process.Start returned null" : null;
     }
     catch (Exception ex) { return ex.Message; }
@@ -302,7 +470,7 @@ static (string? cmd, string root, Dictionary<string, List<string>> opts, List<st
 {
     // Valueless flags must be declared: otherwise `--json` at the end of a line is
     // indistinguishable from a positional argument, and silently becomes one.
-    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi" };
+    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk" };
 
     string? cmd = null;
     string root = Environment.CurrentDirectory;
@@ -331,9 +499,18 @@ List<string> Many(string name) => opts.TryGetValue(name, out var l) ? l : new Li
 static int Fail(string msg) { Console.Error.WriteLine(msg); return 2; }
 
 static void Help() => Console.WriteLine("""
-    dodona — multi-agent orchestrator (M4)
-      dodona daemon [--root <path>] [--successor]
+    dodona — multi-agent orchestrator (M4 + workspaces)
+      dodona daemon [--workspace <name>] [--root <path>] [--successor]
       dodona version [--json]
+    workspaces (a named, durable session group over N folders):
+      dodona workspaces [--json]            (all of them; * = a daemon is running)
+      dodona workspace-create --name <NAME> [--member <path>]... [--bulk]
+              --bulk expands a folder into the repositories under it
+      dodona workspace-attach --member <path>... [--bulk]
+      dodona workspace-detach --member <path> | workspace-move --member <path>
+              a REPO belongs to at most one workspace; move is how you reassign it
+      dodona workspace-rename <NAME> | workspace-alias <name> | workspace-forget
+      dodona where [--json]                 (store, dir, pipes — state left the project folder)
     lanes:
       dodona lane-start --title <T> [--model sonnet] [--child <exe> [--child-arg <a>]...]
               no --child means a real claude lane in the project (no ticket, no claim gate)
@@ -372,5 +549,7 @@ static void Help() => Console.WriteLine("""
       dodona ui overlay <PANE|off> | ui update <DodonaUi.exe> | ui close
       dodona ack <pane_event_id> | undo-route <routing_decision_id>
       dodona stop-daemon
-    All commands accept --root <path> (default: cwd).
+    Every command takes --workspace <name|id|alias>, or --root <path> (default: cwd) to
+    address the workspace that owns that path — an unowned path gets a workspace made for
+    it, named after the folder, with that folder as its sole member.
     """);

@@ -24,7 +24,7 @@ public partial class PickerWindow : Window
         public string Detail => Entry.Exists ? $"{Entry.Path}    ·    opened {Entry.LastOpened}" : $"{Entry.Path}    ·    MISSING";
         public string Status => !Entry.Exists ? "gone"
             : Entry.IsLive ? "running"
-            : Entry.IsWorkspace ? "workspace"
+            : Entry.HoldsRepos ? "holds repos"
             : !Entry.IsGitRepo ? "no repo"
             : Entry.HasStore ? "idle" : "new";
         public Brush StatusBrush => Status switch
@@ -32,7 +32,7 @@ public partial class PickerWindow : Window
             "running" => new SolidColorBrush(Color.FromRgb(0x81, 0xC7, 0x84)),
             "idle" => new SolidColorBrush(Color.FromRgb(0x8A, 0x90, 0x99)),
             "new" => new SolidColorBrush(Color.FromRgb(0x4F, 0xC3, 0xF7)),
-            "workspace" => new SolidColorBrush(Color.FromRgb(0xBA, 0x68, 0xC8)),
+            "holds repos" => new SolidColorBrush(Color.FromRgb(0xBA, 0x68, 0xC8)),
             "no repo" => new SolidColorBrush(Color.FromRgb(0xE0, 0xA9, 0x6D)),   // a note, not an error
             _ => new SolidColorBrush(Color.FromRgb(0xE5, 0x73, 0x73)),
         };
@@ -146,22 +146,38 @@ public partial class PickerWindow : Window
 
         IsEnabled = false;
         Warn("Creating the repository…");
-        var id = Instance.Id(root);
-        var reason = DaemonClient.Ensure(root, id);
-        var result = reason ?? DaemonClient.Send(id, new { cmd = "repo-init", adopt });
+        var ws = ResolveWorkspace(root);
+        if (ws is null) { IsEnabled = true; return; }
+        var reason = DaemonClient.Ensure(ws.Primary ?? root, ws.Id);
+        var result = reason ?? DaemonClient.Send(ws.Id, new { cmd = "repo-init", adopt });
         IsEnabled = true;
         Warn(result);
         Refresh();
+    }
+
+    /// <summary>The folder the operator picked, turned into the workspace that owns it —
+    /// creating one (named after the folder, that folder as sole member) if nobody does.
+    /// This is the same resolver the CLI and the daemon use; picking a folder is now a way
+    /// of NAMING a workspace rather than of locating one (WORKSPACES-CONCIERGE.md §1).</summary>
+    Workspace? ResolveWorkspace(string root)
+    {
+        try
+        {
+            using var reg = new Registry();
+            return WorkspaceResolve.ForPath(reg, root).Ws;
+        }
+        catch (Exception ex) { Warn(ex.Message); return null; }
     }
 
     void Open(string path)
     {
         if (!Directory.Exists(path)) { Warn("That folder does not exist."); return; }
         var root = Instance.Canonical(path);
+        var ws = ResolveWorkspace(root);
+        if (ws is null) return;
 
         // Already open? Show that window instead of racing it for the UI pipe.
-        var id = Instance.Id(root);
-        if (Application.Current.Windows.OfType<MainWindow>().FirstOrDefault(w => w.InstanceId == id) is MainWindow open)
+        if (Application.Current.Windows.OfType<MainWindow>().FirstOrDefault(w => w.InstanceId == ws.Id) is MainWindow open)
         {
             open.Activate();
             Close();
@@ -169,13 +185,13 @@ public partial class PickerWindow : Window
         }
 
         IsEnabled = false;
-        Warn($"Starting {Path.GetFileName(root)}…");
-        var reason = DaemonClient.Ensure(root, id);
+        Warn($"Starting {ws.Name}…");
+        var reason = DaemonClient.Ensure(ws.Primary ?? root, ws.Id);
         IsEnabled = true;
         if (reason is not null) { Warn(reason); return; }
 
         ProjectStore.Touch(root);
-        new MainWindow(root, id).Show();
+        new MainWindow(ws.Primary ?? root, ws.Id, ws.Name).Show();
         Close();
     }
 }

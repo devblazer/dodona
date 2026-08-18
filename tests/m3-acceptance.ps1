@@ -4,6 +4,10 @@
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot\_workspace.ps1"
+# Isolated workspace registry + store tree for this suite: never touch the
+# operator's own workspaces (§17, and CLAUDE.md §4's reasoning one level up).
+$dodonaHome = Use-IsolatedDodonaHome 'm3'
 $dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
 $ui = "$repo\src\DodonaUi\bin\Release\net8.0-windows\DodonaUi.exe"
 $fake = "$repo\src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.exe"
@@ -39,6 +43,12 @@ function PngDims([string]$path) {
 $daemon = $null
 $uiProc = $null
 try {
+    # Where this workspace keeps its state. Not `<root>\.dodona` any more: a workspace
+    # is named rather than located, so the suite asks the binary (see tests/_workspace.ps1).
+    $ws = Get-WorkspacePaths $dodona $root
+    $storeDb = $ws.Store
+    $wsDir = $ws.Dir
+
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Start-Sleep -Milliseconds 800
@@ -106,7 +116,7 @@ try {
     Start-Sleep -Milliseconds 400
     $route = (python -c "
 import sqlite3
-db = sqlite3.connect(r'$root\.dodona\store.db')
+db = sqlite3.connect(r'$storeDb')
 print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fetchone()[0])
 ") | Out-String
     Dodona @("undo-route", $route.Trim()) | Out-Null
@@ -114,7 +124,7 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     $tail = Dodona @("tail", "$skyLane", "10")
     $undone = (python -c "
 import sqlite3
-db = sqlite3.connect(r'$root\.dodona\store.db')
+db = sqlite3.connect(r'$storeDb')
 print(db.execute('SELECT undone FROM routing_decisions ORDER BY id DESC LIMIT 1').fetchone()[0])
 ") | Out-String
     Check 'undo_route_retracts' ($tail -match 'Disregard' -and $undone.Trim() -eq '1') "undone=$($undone.Trim()) tail=$tail"
@@ -126,7 +136,7 @@ print(db.execute('SELECT undone FROM routing_decisions ORDER BY id DESC LIMIT 1'
     Set-Content "$wt1\src\water\sim.cs" "// landed work"
     git -C $wt1 add -A
     git -C $wt1 -c user.email=t@t -c user.name=t commit -q -m "water work"
-    $shimInfo = Get-Content "$root\.dodona\shim-lane$waterLane.json" | ConvertFrom-Json
+    $shimInfo = Get-Content "$wsDir\shim-lane$waterLane.json" | ConvertFrom-Json
     Dodona @("token-request", "1") | Out-Null
     $land = Dodona @("land", "1")
     Check 'land_succeeds' ($land -match 'landed ticket 1') $land
@@ -194,17 +204,18 @@ print(db.execute('SELECT undone FROM routing_decisions ORDER BY id DESC LIMIT 1'
     Dodona @("stop-daemon") | Out-Null
 }
 finally {
+    Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     if ($uiProc -and -not $uiProc.HasExited) { try { Stop-Process -Id $uiProc.Id -Force } catch { } }
     if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
     # Scoped cleanup: only THIS test's processes, resolved from its own shim-info
     # files. Killing by process NAME once murdered the operator's live session's shim
     # and UI mid-dogfood (17: tests collide with nothing -- including the instance the
     # operator is using right now).
-    Get-ChildItem "$root\.dodona\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem "$wsDir\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
         $si = Get-Content $_.FullName | ConvertFrom-Json
         foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
     }
-    Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
+    Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
 }
 
 $results | ConvertTo-Json | Set-Content "$out\results.json" -Encoding utf8

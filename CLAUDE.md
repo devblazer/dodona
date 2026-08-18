@@ -115,7 +115,7 @@ Two things publish cannot do, so say them plainly when they apply:
 
 ## 3. Verify with the suites, not by looking
 
-Seven model-free suites, all fake agents, all free. Run the ones your change touches; run
+Nine model-free suites, all fake agents, all free. Run the ones your change touches; run
 all of them before publishing something structural:
 
 ```powershell
@@ -124,9 +124,10 @@ powershell ... tests\m1-acceptance.ps1        # claims, gate, merge token
 powershell ... tests\m2-acceptance.ps1        # routing, backstop, presence
 powershell ... tests\m3-acceptance.ps1        # the UI as a view over the store
 powershell ... tests\m4-acceptance.ps1        # hot swap
-powershell ... tests\workspace-acceptance.ps1 # multi-repo workspaces
+powershell ... tests\workspace-acceptance.ps1 # workspaces: identity, repo-exclusivity, multi-repo
 powershell ... tests\ui-use-acceptance.ps1    # the UI driven like a person
 powershell ... tests\compression-acceptance.ps1  # selective compression (§5)
+powershell ... testsrain-acceptance.ps1     # the dispatcher brain and its routing ladder
 ```
 
 `ui-use` is the one that matters most for UI work: dumps and screenshots prove the UI
@@ -156,15 +157,38 @@ Get-Process DodonaShim | Stop-Process -Force    # NEVER
 
 This murdered the operator's live session — their shim, their agent, and their open
 window — in the middle of a trial. Machine-wide kills do not know which instance is a
-test and which is the human's work. Resolve pids from the specific project root's
-`.dodona/shim-lane*.json` instead. Tests collide with nothing (§17), *including the
-instance the operator is using right now*.
+test and which is the human's work. Resolve pids from the specific workspace's
+`shim-lane*.json` instead — `dodona where` prints the directory they live in (they moved
+out of `<root>/.dodona/` when workspaces landed; see §5). Tests collide with nothing (§17),
+*including the instance the operator is using right now*.
 
-## 5. Dodona's own state is never repo content
+## 5. Dodona's own state is never repo content — and now lives outside the repo entirely
 
-`.dodona/` holds the live store, its WAL twins, and the worktrees. It is git-ignored, and
-it must stay that way — a `git add -A` once committed a live SQLite database into this
-repo. Deployed gate files live in `.git/info/exclude` for the same reason.
+Identity is a **workspace**, not a project root (`docs/WORKSPACES-CONCIERGE.md` §1): a
+named, durable session group over N member folders. So state left the project tree:
+
+- **`%LOCALAPPDATA%\Dodona\workspaces\<id>\`** — the store, its WAL twins, `shim-lane<N>.json`
+- **`%LOCALAPPDATA%\Dodona\concierge\registry.db`** — workspace names, ids, aliases, members
+- **`<member>\.dodona\wt\t<N>`** — ticket worktrees, the one deliberate exception: they are
+  volume- and path-sensitive, and moving them buys nothing
+- **`$env:DODONA_HOME`** relocates all of it. **Every suite must set it** (`tests/_workspace.ps1`
+  does) or a test run litters the operator's real workspace list — and a test of the
+  repo-exclusivity *refusal* could refuse one of their real repos.
+
+`.dodona/` is still git-ignored and must stay that way — a `git add -A` once committed a
+live SQLite database into this repo. Deployed gate files live in `.git/info/exclude` for the
+same reason.
+
+**Never reconstruct a store path by hand.** `dodona where [--json]` answers it; the suites
+ask instead of guessing, which is what let the store move without rewriting eight of them.
+
+The invariant that path-hash identity used to give for free is now enforcement in code
+(§0's strongest form): **a git repo belongs to at most one workspace at a time** — a partial
+unique index, a loud attach-time refusal carrying the `workspace-move` command, and a third
+check at `ticket-create` for the bare-folder-that-later-became-a-repo case. Two workspaces
+over one repo is two merge tokens over one main, which is the race this system exists to
+prevent. If `tests/workspace-acceptance.ps1`'s exclusivity checks ever go red, that is a
+correctness incident, not a flaky test.
 
 ## 5.1 Delivery is a skill
 

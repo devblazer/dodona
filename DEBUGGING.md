@@ -7,18 +7,52 @@ daemon is up).
 
 ## Where things live
 
-Everything is scoped to a **project root** (the `--root` the daemon was started with):
+Everything is scoped to a **workspace** — a named, durable session group, no longer a
+project root (`docs/WORKSPACES-CONCIERGE.md` §1). The `<instance>` in every pipe name below
+is the workspace's generated id slug, e.g. `personal-3f9a`, and **`--root <path>` still
+works**: it resolves to whichever workspace owns that path.
+
+**Start here, always:**
+
+```
+dodona where --root <path>          # or --workspace <name|id|alias>
+dodona where --workspace work --json
+dodona workspaces                   # every workspace, its members, * = daemon running
+```
+
+That prints the store, the workspace directory and the pipe names. It exists because a
+store's location is derived from a generated id, so it is no longer something you can work
+out by looking at a folder.
 
 | Thing | Location |
 |---|---|
-| The store (all state, all history) | `<root>\.dodona\store.db` |
-| Shim identity per lane | `<root>\.dodona\shim-lane<N>.json` → `{shimPid, childPid, pipeName}` |
-| Control pipe (daemon alive only) | `dodona-<instance>-ctl`, instance = first 8 hex of SHA256(lowercased canonical root) |
+| The store (all state, all history) | `%LOCALAPPDATA%\Dodona\workspaces\<id>\store.db` |
+| Shim identity per lane | `%LOCALAPPDATA%\Dodona\workspaces\<id>\shim-lane<N>.json` → `{shimPid, childPid, pipeName}` |
+| The workspace registry (names, ids, aliases, members) | `%LOCALAPPDATA%\Dodona\concierge\registry.db` |
+| Ticket worktrees — **still beside the repo** | `<member>\.dodona\wt\t<N>` |
+| Control pipe (daemon alive only) | `dodona-<instance>-ctl`, instance = the workspace id slug |
 | Lane pipes (shim alive) | `dodona-<instance>-lane<N>` |
 | UI pipe (UI alive only) | `dodona-<instance>-ui` |
 | Handoff pipe (during a swap only) | `dodona-<instance>-handoff` |
 | Published builds | `%LOCALAPPDATA%\Dodona\bin\<stamp>` (or `$env:DODONA_BIN_ROOT`) |
 | Agent session files (Claude Code's own) | `$env:CLAUDE_CONFIG_DIR\projects\<cwd-slug>\<session-id>.jsonl` |
+
+`$env:DODONA_HOME` relocates every `%LOCALAPPDATA%\Dodona` row above (bar published
+builds, which have `DODONA_BIN_ROOT`). Every acceptance suite sets it, so a suite never
+touches the registry the operator is using.
+
+**The registry is readable with nothing running**, same as a store:
+
+```sql
+SELECT id, name FROM workspaces;
+SELECT workspace_id, path, is_git FROM members ORDER BY workspace_id, id;
+SELECT ts, kind, workspace_id, detail FROM events ORDER BY id;   -- attach_refused lives here
+```
+
+`members` carries a partial unique index on `key WHERE is_git = 1`: **a git repo belongs to
+at most one workspace.** That index is what replaced path-hash identity as the structural
+guarantee against two merge tokens over one main. If you ever see one repo path under two
+workspace ids, that is the incident — not a display bug.
 
 ## Model and effort (§9)
 
@@ -43,11 +77,30 @@ interactive session — before this existed, no effort level was passed at all. 
 
 ## Workspaces and repositories
 
-A project root is a **workspace**: it anchors identity (one store, one daemon, one grid,
-one dispatcher) and holds either itself as a repository or several underneath it.
-`dodona repos` lists them. A repository is named by its workspace-relative path, or `.`
-when the workspace root is itself the repository — the ordinary single-repo project,
-where nothing ever mentions repos at all.
+A **workspace** is a named, durable session group (`docs/WORKSPACES-CONCIERGE.md` §1). It
+anchors identity — one store, one daemon, one grid, one dispatcher — and holds **members**:
+folders attached to it, each either a repository itself or a folder with repositories under
+it. `dodona repos` lists the repositories; `dodona workspaces` lists the members.
+
+```
+dodona workspace-create --name work --member C:\repos\engine --member C:\repos\tools
+dodona workspace-attach --member C:\repos\thing [--bulk]      # --bulk expands a folder
+dodona workspace-move --member C:\repos\thing --workspace personal
+dodona workspace-rename <NAME> | workspace-alias <name> | workspace-forget
+```
+
+A repository is named by its workspace-relative path. **With one member that is exactly what
+it always was** — `.` when the member is itself the repository (the ordinary single-repo
+project, where nothing mentions repos at all), or `engine`/`tools` for repos underneath it.
+Only a second member introduces a `<member-leaf>/` prefix, because only then is `engine`
+ambiguous.
+
+**A git repo belongs to at most one workspace at a time.** Attaching one that is already
+owned is refused loudly and told to use `workspace-move`; bare folders are exempt (no merge
+token exists to split). Enforced by a partial unique index, by the attach-time check, and
+again at `ticket-create` — the last one catches a bare folder that became a repo after it
+was attached to two workspaces. Look for `attach_refused` in the registry's events and
+`ticket_repo_not_exclusive` in a workspace store.
 
 - **A ticket belongs to exactly one repository.** Landing fast-forwards one branch onto
   one main, and two fast-forwards cannot be made atomic, so a change spanning
@@ -213,14 +266,16 @@ SELECT ts, kind, detail FROM events WHERE kind IN ('daemon_start','reconcile_don
 ## Reading it live
 
 ```
-dodona status --root <root>
+dodona status --root <root>            # or --workspace <name|id>
 dodona tail <lane> [n] --root <root>
+dodona where --json                   # which store am I even reading
 ```
 
 If the CLI reports the daemon isn't running, read the store directly — that is the
 point of the design. A lane whose shim still runs (check the pids in
-`shim-lane<N>.json`) is buffering; whatever it holds arrives when the next daemon
-connects, deduped by seq.
+`%LOCALAPPDATA%\Dodona\workspaces\<id>\shim-lane<N>.json` — `dodona where` prints that
+directory) is buffering; whatever it holds arrives when the next daemon connects, deduped
+by seq.
 
 ## Hot swap (§13/§14)
 

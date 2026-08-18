@@ -45,6 +45,103 @@ Naming decision: **workspace**, not "session" — a session implies something th
 when you stand up; this thing has a registry entry, a store, and a history. The name
 should say durable.
 
+## 1.1 Decided while building milestone 2 — questions §1 left open
+
+Implementation forced answers the design session did not reach. They are recorded here
+rather than in commit messages alone, because the next person to read §1 will hit the same
+questions in the same order (CLAUDE.md §0).
+
+- **The registry is a SQLite store at `%LOCALAPPDATA%\Dodona\concierge\registry.db`** —
+  the concierge's territory from the start, even though milestone 2 ships no concierge.
+  In M2 every writer is a CLI process, serialized by SQLite's own transactions with a
+  partial unique index as the real arbiter. M3 makes the concierge the sole *writer*;
+  **reads stay direct forever**, for the same reason the UI reads stores directly rather
+  than asking the daemon — a dead manager must never blind you. Rejected: putting the
+  registry under a workspace (it belongs to none) and holding it in a JSON file (the
+  exclusivity invariant wants an index, not a linear scan and a hope).
+
+- **`DODONA_HOME` redirects the whole tree** (registry, workspace stores, shim-info,
+  neutral cwd). Not a convenience: the suites must be able to create workspaces and to
+  test the *refusal* path without touching the operator's real registry or refusing one of
+  their real repos. Same reasoning as `DODONA_BIN_ROOT`, and the same reasoning as §17's
+  "tests collide with nothing".
+
+- **Every workspace has a PRIMARY MEMBER** — the first attached — and it stands in
+  everywhere the old code said "the project root": where a lane spawns, which `dodona.json`
+  the workspace falls back to, what `repo-init`/`repo-status` act on, what auto-publish
+  watches. For a one-member workspace it is literally the old root, which is most of why
+  the degenerate case is indistinguishable. **Open, and deliberately not answered yet:**
+  which member a lane should work in when a workspace has several. Today it is the primary;
+  a per-lane working directory is the obvious extension and nobody has needed it.
+
+- **Repo names gain a member prefix only when they must.** One member → the names are
+  byte-for-byte what they always were (`.`, `engine`, `tools`), which is the property that
+  keeps claims, gate prefixes, tickets and every pre-existing suite meaningful. Several
+  members → `<member-leaf>/<member-relative>`, or just `<member-leaf>` when the member is
+  itself a repo. Two members with the same leaf get `leaf~2`, because a display collision
+  here would become a claim-routing collision.
+
+- **Worktrees live at `<member>\.dodona\wt\t<N>`** — §1's stated exception, made concrete.
+  Beside the member holding the repo, not beside the workspace and not beside the primary.
+  For a one-member workspace this is the exact path it has always been.
+
+- **Shim-info files moved into the workspace directory.** `shim-lane<N>.json` was per-root;
+  lanes are workspace-wide and a workspace has N members, so there is no single root left
+  to put them under. CLAUDE.md §4 (resolve pids from these, never kill by name) now points
+  at `%LOCALAPPDATA%\Dodona\workspaces\<id>\`.
+
+- **Repo-exclusivity is enforced in THREE layers, and the third answers a case §3 did not
+  cover.** §3 says bare folders are exempt — correctly, no merge token exists to split. But
+  a bare folder legitimately attached to two workspaces can be `git init`-ed afterwards, and
+  at that instant two workspaces hold one repo with every registry row still valid. So
+  besides (1) the partial unique index and (2) the loud attach-time refusal with its move
+  command, there is (3) a check at **ticket-create**, which is where a merge token first
+  comes into existence. Layers 1 and 2 cover intent; layer 3 covers drift. This is the same
+  two-layer shape as the claim gate and the merge-time diff backstop (§6), for the same
+  reason: a check at the point of decision and a check at the point of use catch different
+  things.
+
+- **An unowned `--root` gets a workspace made for it, on the spot.** That IS the migration
+  mechanism: the first command to address a pre-workspace project turns it into "a workspace
+  named after its root, with that root as sole member" and moves its store (with both WAL
+  twins, and the shim-info files) into workspace territory. It is announced on stderr, and
+  `dodona workspace-forget` reverses it. **`--workspace <name>` never creates** — naming a
+  workspace that does not exist is a typo, and inventing one would hide the typo. Migration
+  refuses outright while a pre-workspace daemon still holds that store: a live WAL file is
+  not a file you move, and `Instance.LegacyId` survives for exactly that check.
+
+- **`dodona where [--json]` is new, and is a debugging affordance rather than a
+  convenience.** DEBUGGING.md's first section was a table of `<root>\.dodona\...` paths;
+  once a store's location derives from a generated id, "where is my store" stops being
+  answerable by looking. The suites use it instead of reconstructing paths.
+
+- **`workspace-forget` deletes registry rows and keeps the store directory.** Undoing a
+  workspace made by accident must never be able to mean deleting six lanes of transcript
+  (§12: nothing in this system deletes history).
+
+- **A renamed workspace keeps its id, and therefore an id whose slug half is stale.**
+  Accepted. `personal-3f9a` renamed to "home" still reads `personal-3f9a` in its pipe name.
+  The alternative — an id that means the name — would make a rename move a store directory,
+  which is precisely what §1 exists to prevent. Name is display; id is identity.
+
+- **The build that flips identity cannot hot-swap into a running pre-workspace daemon, and
+  that is not fixable.** The handoff pipe name is `dodona-<instance>-handoff`, and
+  `<instance>` is exactly what changed: the old daemon opens the pipe under its path hash
+  and the successor would listen under a workspace slug. They cannot meet. What happens is
+  safe and is the M4 contract working as designed — the successor exits before touching
+  anything, the old daemon records `swap_failed` and **keeps running**, nothing is lost —
+  but the swap does not land. **This build needs one manual daemon restart**, once, per
+  pre-workspace instance. Migration refuses while that daemon is alive, for the WAL reason
+  above, so the order is: stop the daemon, then any command migrates it.
+  The migration leaves a `MOVED-TO-WORKSPACE.txt` breadcrumb where the store used to be —
+  it is the one irreversible step in this change, and the first place anyone will look for
+  a store that is no longer there is the folder it left.
+
+Found and fixed on the way, unrelated to workspaces but the same complaint: **`--test-window`
+now survives a UI hot swap.** The successor was spawned without it, so a swap turned an
+invisible test window into a visible one that activates — reintroducing the focus-stealing
+the flag exists to prevent.
+
 ## 2. The concierge
 
 One per machine. It is **daemon-natured, not view-natured**: it holds pending operator

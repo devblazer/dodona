@@ -1,10 +1,18 @@
+using System.IO;                 // explicit: this file also compiles into the WPF project,
+using System.Linq;               // whose implicit usings are narrower than the console one's
+
 namespace Dodona;
 
 /// <summary>One repository inside the workspace. <see cref="Name"/> is its
-/// workspace-relative path with forward slashes — or "." when the workspace root is
-/// itself the repository, which is the ordinary single-repo project and the case every
-/// path below must reduce to exactly.</summary>
-sealed record RepoRef(string Name, string Path)
+/// workspace-relative path with forward slashes — or "." when the workspace's single
+/// member is itself the repository, which is the ordinary single-repo project and the case
+/// every path below must reduce to exactly.
+///
+/// <see cref="MemberPath"/> is the workspace member this repo was discovered under. It
+/// exists because ticket worktrees stay beside their repo's member
+/// (WORKSPACES-CONCIERGE.md §1's stated exception to "state leaves user folders"), so the
+/// worktree root cannot be a single per-workspace directory any more.</summary>
+sealed record RepoRef(string Name, string Path, string MemberPath)
 {
     public bool IsRoot => Name == ".";
     /// <summary>What to prepend to a repo-relative path to make it a claim path.</summary>
@@ -12,9 +20,9 @@ sealed record RepoRef(string Name, string Path)
 }
 
 /// <summary>
-/// The workspace's repositories (§14 extended): the project root anchors identity — one
-/// store, one daemon, one grid, one dispatcher — and holds either itself as a repository
-/// or several underneath it. Discovery is filesystem-only so it can run on every ticket
+/// The workspace's repositories (§14, as extended by WORKSPACES-CONCIERGE.md §1). A
+/// workspace holds N members, and each member is either a repository itself or a folder
+/// with repositories under it. Discovery is filesystem-only so it can run on every ticket
 /// without spawning a git process per directory; git remains the authority wherever the
 /// answer actually matters.
 ///
@@ -32,11 +40,47 @@ static class Repos
     static bool LooksLikeRepo(string dir) =>
         Directory.Exists(Path.Combine(dir, ".git")) || File.Exists(Path.Combine(dir, ".git"));
 
-    public static List<RepoRef> Discover(string root, int maxDepth = 2)
+    /// <summary>
+    /// Every repository in the workspace, named workspace-relatively.
+    ///
+    /// **A one-member workspace produces byte-for-byte the names it always did** — that is
+    /// not an accident, it is the property that keeps claims, tickets, gate prefixes and
+    /// every pre-existing acceptance suite meaningful through the migration (§1's
+    /// degenerate case). Only when a second member is attached does a member prefix appear,
+    /// because only then is `engine` ambiguous.
+    ///
+    /// Multi-member naming: the member's folder leaf, then the repo's member-relative path
+    /// under it (`work/engine`), or just the leaf when the member IS a repo (`dodona`).
+    /// Two members with the same leaf get `leaf~2` — a display collision would otherwise
+    /// become a claim-routing collision, which is a correctness problem rather than a
+    /// cosmetic one. (Decision recorded in WORKSPACES-CONCIERGE.md §2.1.)
+    /// </summary>
+    public static List<RepoRef> Discover(List<Member> members, int maxDepth = 2)
+    {
+        if (members.Count == 0) return new List<RepoRef>();
+        if (members.Count == 1) return Under(members[0].Path, "", maxDepth);
+
+        var found = new List<RepoRef>();
+        var usedLeaves = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in members)
+        {
+            var leaf = Path.GetFileName(m.Path);
+            if (leaf.Length == 0) leaf = m.Path.Replace('\\', '-').Replace(':', '-').Trim('-');
+            var unique = leaf;
+            for (int n = 2; !usedLeaves.Add(unique); n++) unique = $"{leaf}~{n}";
+            found.AddRange(Under(m.Path, unique, maxDepth));
+        }
+        return found.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>Single-root discovery — the shape this method has always had. `prefix` is
+    /// empty for a one-member workspace, which is what makes that case unchanged.</summary>
+    public static List<RepoRef> Under(string root, string prefix = "", int maxDepth = 2)
     {
         // A repository's insides are its own business: if the root is one, that is the
         // whole answer, and anything below is a submodule or a vendored copy.
-        if (LooksLikeRepo(root)) return new List<RepoRef> { new(".", root) };
+        if (LooksLikeRepo(root))
+            return new List<RepoRef> { new(prefix.Length == 0 ? "." : prefix, root, root) };
 
         var found = new List<RepoRef>();
         void Walk(string dir, int depth)
@@ -51,7 +95,8 @@ static class Repos
                 if (name.Length == 0 || Skip.Contains(name)) continue;
                 if (LooksLikeRepo(child))
                 {
-                    found.Add(new RepoRef(Path.GetRelativePath(root, child).Replace('\\', '/'), child));
+                    var rel = Path.GetRelativePath(root, child).Replace('\\', '/');
+                    found.Add(new RepoRef(prefix.Length == 0 ? rel : $"{prefix}/{rel}", child, root));
                     continue;
                 }
                 Walk(child, depth + 1);

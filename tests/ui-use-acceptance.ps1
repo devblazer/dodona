@@ -11,6 +11,10 @@
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot\_workspace.ps1"
+# Isolated workspace registry + store tree for this suite: never touch the
+# operator's own workspaces (§17, and CLAUDE.md §4's reasoning one level up).
+$dodonaHome = Use-IsolatedDodonaHome 'uiuse'
 $dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
 $ui = "$repo\src\DodonaUi\bin\Release\net8.0-windows\DodonaUi.exe"
 $fake = "$repo\src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.exe"
@@ -54,6 +58,12 @@ function TypeInDispatcher([string]$text) {
 $daemon = $null
 $uiProc = $null
 try {
+    # Where this workspace keeps its state. Not `<root>\.dodona` any more: a workspace
+    # is named rather than located, so the suite asks the binary (see tests/_workspace.ps1).
+    $ws = Get-WorkspacePaths $dodona $root
+    $storeDb = $ws.Store
+    $wsDir = $ws.Dir
+
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Start-Sleep -Milliseconds 800
@@ -130,7 +140,7 @@ try {
     Check 'override_tokens_stripped_from_prompt' ($delivered -match 'fix the spelling' -and $delivered -notmatch '@haiku' -and $delivered -notmatch '@low') $delivered
     $choice = (python -c "
 import sqlite3
-db = sqlite3.connect(r'$root\.dodona\store.db')
+db = sqlite3.connect(r'$storeDb')
 r = db.execute('''SELECT detail FROM events WHERE kind='policy_choice' ORDER BY id DESC LIMIT 1''').fetchone()
 print(r[0] if r else 'none')
 ") | Out-String
@@ -152,7 +162,7 @@ print(r[0] if r else 'none')
     Start-Sleep -Milliseconds 800                             # presence is now working/sleeping
     $route = (python -c "
 import sqlite3
-db = sqlite3.connect(r'$root\.dodona\store.db')
+db = sqlite3.connect(r'$storeDb')
 print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fetchone()[0])
 ") | Out-String
     Dodona @("undo-route", $route.Trim()) | Out-Null          # writes an unacked announcement mid-turn
@@ -198,12 +208,13 @@ finally {
     # files. Killing by process NAME once murdered the operator's live session's shim
     # and UI mid-dogfood (17: tests collide with nothing -- including the instance the
     # operator is using right now).
-    Get-ChildItem "$root\.dodona\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem "$wsDir\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
         $si = Get-Content $_.FullName | ConvertFrom-Json
         foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
     }
-    Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
+    Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
+    Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
 }
 
 $results | ConvertTo-Json | Set-Content "$out\results.json" -Encoding utf8

@@ -8,3 +8,10 @@ spikes/spike3/workspace/
 # Dodona instance state: the store is runtime, never repo content
 .dodona/
 .cmp3/
+
+# Per-workspace daemon logs from the workspace suite: the filename carries a GENERATED
+# workspace id, so every run would add new files forever rather than overwrite last run's.
+# The suite's other artifacts are tracked on purpose (they are what you read after a
+# failure); these are not, because they are unbounded.
+tests/*-output/daemon-*.out
+tests/*-output/daemon-*.err

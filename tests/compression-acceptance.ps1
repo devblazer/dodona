@@ -10,6 +10,10 @@
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot\_workspace.ps1"
+# Isolated workspace registry + store tree for this suite: never touch the
+# operator's own workspaces (§17, and CLAUDE.md §4's reasoning one level up).
+$dodonaHome = Use-IsolatedDodonaHome 'compress'
 $dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
 $ui = "$repo\src\DodonaUi\bin\Release\net8.0-windows\DodonaUi.exe"
 $fake = "$repo\src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.exe"
@@ -35,7 +39,7 @@ function Rows([string]$sql) {
     # The query travels via an environment variable, not string interpolation: a query
     # that ENDS in a '...' literal inside '''...''' makes four quotes in a row, which is
     # a Python syntax error. Env transport has no quoting at all to collide with.
-    $db = "$root\.dodona\store.db"
+    $db = $storeDb
     $env:DODONA_TEST_SQL = $sql
     $o = (python -c "
 import sqlite3, os
@@ -53,6 +57,12 @@ $long = "the shoreline foam looked wrong at grazing angles because the mask came
 $daemon = $null
 $uiProc = $null
 try {
+    # Where this workspace keeps its state. Not `<root>\.dodona` any more: a workspace
+    # is named rather than located, so the suite asks the binary (see tests/_workspace.ps1).
+    $ws = Get-WorkspacePaths $dodona $root
+    $storeDb = $ws.Store
+    $wsDir = $ws.Dir
+
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Start-Sleep -Milliseconds 800
@@ -141,14 +151,15 @@ try {
     Dodona @("stop-daemon") | Out-Null
 }
 finally {
+    Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     if ($uiProc -and -not $uiProc.HasExited) { try { Stop-Process -Id $uiProc.Id -Force } catch { } }
     if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
     # Only this test's processes, resolved from its own shim-info files (CLAUDE.md §4).
-    Get-ChildItem "$root\.dodona\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem "$wsDir\shim-lane*.json" -ErrorAction SilentlyContinue | ForEach-Object {
         $si = Get-Content $_.FullName | ConvertFrom-Json
         foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
     }
-    Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
+    Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
 }
 
 $results | ConvertTo-Json | Set-Content "$out\results.json" -Encoding utf8

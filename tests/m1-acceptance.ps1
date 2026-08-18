@@ -7,6 +7,10 @@
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot\_workspace.ps1"
+# Isolated workspace registry + store tree for this suite: never touch the
+# operator's own workspaces (§17, and CLAUDE.md §4's reasoning one level up).
+$dodonaHome = Use-IsolatedDodonaHome 'm1'
 $dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
 $env:DODONA_NO_AUTOSTART = "1"   # this test owns daemon lifetime; start-on-demand (M4) must not join in
 $out = Join-Path $PSScriptRoot 'm1-output'
@@ -33,6 +37,12 @@ function Check([string]$name, [bool]$cond, [string]$detail = '') {
 
 $daemon = $null
 try {
+    # Where this workspace keeps its state. Not `<root>\.dodona` any more: a workspace
+    # is named rather than located, so the suite asks the binary (see tests/_workspace.ps1).
+    $ws = Get-WorkspacePaths $dodona $root
+    $storeDb = $ws.Store
+    $wsDir = $ws.Dir
+
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Start-Sleep -Milliseconds 800
@@ -129,7 +139,7 @@ try {
     # ---- 12. the causal chain is in the store (§12) ----
     $events = (python -c "
 import sqlite3
-db = sqlite3.connect(r'$root\.dodona\store.db')
+db = sqlite3.connect(r'$storeDb')
 print('\n'.join(k for (k,) in db.execute('SELECT kind FROM events ORDER BY id')))
 ") | Out-String
     foreach ($k in 'ticket_created','claim_conflict','token_refused_unapproved','token_granted','token_queued','landed','verify_green','token_expired_reclaimed','worktree_pruned') {
@@ -139,8 +149,9 @@ print('\n'.join(k for (k,) in db.execute('SELECT kind FROM events ORDER BY id'))
     Dodona @("stop-daemon") | Out-Null
 }
 finally {
+    Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
-    Copy-Item "$root\.dodona\store.db" "$out\store.db" -ErrorAction SilentlyContinue
+    Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
 }
 
 $results | ConvertTo-Json | Set-Content "$out\results.json" -Encoding utf8

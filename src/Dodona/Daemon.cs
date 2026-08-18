@@ -101,7 +101,12 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
 
 sealed class Daemon
 {
-    readonly string _root, _instanceId, _ctlPipe;
+    /// <summary>_instanceId is the WORKSPACE ID (WORKSPACES-CONCIERGE.md §1) — a generated
+    /// slug, no longer a hash of a path. _primary is the workspace's primary member: the
+    /// folder that stands in wherever this code used to say "the project root" (where a
+    /// lane spawns, which dodona.json we fall back to, what repo-init acts on). For a
+    /// one-member workspace they are the same thing they always were.</summary>
+    readonly string _primary, _instanceId, _wsName, _ctlPipe;
     readonly Store _store;
     readonly Dictionary<long, LaneRuntime> _lanes = new();
     readonly SemaphoreSlim _routerLock = new(1, 1);   // one classification at a time on the warm session
@@ -114,29 +119,47 @@ sealed class Daemon
     int _compressorNext;                              // round-robin cursor
     Config _config;
 
+    /// <summary>This workspace's members, re-read from the registry on demand — the same
+    /// doctrine as repo discovery below: a member attached while the daemon runs must be
+    /// usable without a restart. Falls back to the primary alone if the registry cannot be
+    /// opened, so a locked or missing registry degrades to today's single-root behaviour
+    /// rather than to a daemon that can find no repositories at all.</summary>
+    List<Member> Members()
+    {
+        try
+        {
+            using var reg = new Registry();
+            var ws = reg.ById(_instanceId);
+            if (ws is not null && ws.Members.Count > 0) return ws.Members;
+        }
+        catch { }
+        return new List<Member> { new(_primary, _primary.ToLowerInvariant(), Registry.LooksLikeRepo(_primary), "") };
+    }
+
     /// <summary>The workspace's repositories, rediscovered on demand — git is the truth,
     /// the registry is a cache of it (§12). A repo added to the workspace while the
     /// daemon runs must be usable without a restart.</summary>
-    List<RepoRef> Repositories() => Repos.Discover(_root);
+    List<RepoRef> Repositories() => Repos.Discover(Members());
 
-    /// <summary>Where a ticket's git work happens. Falls back to the workspace root, so a
+    /// <summary>Where a ticket's git work happens. Falls back to the primary member, so a
     /// ticket written before its repo disappeared still reports honestly rather than
     /// throwing.</summary>
     string RepoPath(string repoName) =>
-        Repos.ByName(Repositories(), repoName)?.Path ?? _root;
+        Repos.ByName(Repositories(), repoName)?.Path ?? _primary;
 
-    Config ConfigFor(string repoName) => Config.For(_root, RepoPath(repoName));
+    Config ConfigFor(string repoName) => Config.For(_primary, RepoPath(repoName));
 
-    Daemon(string root, string instanceId, string ctlPipe, Store store)
+    Daemon(string primary, string wsId, string wsName, string ctlPipe, Store store)
     {
-        _root = root;
-        _instanceId = instanceId;
+        _primary = primary;
+        _instanceId = wsId;
+        _wsName = wsName;
         _ctlPipe = ctlPipe;
         _store = store;
-        _config = Config.Load(root);
+        _config = Config.Load(primary);
     }
 
-    public static async Task<int> RunAsync(string root, string instanceId, string ctlPipe, bool successor)
+    public static async Task<int> RunAsync(string primary, string wsId, string wsName, string ctlPipe, bool successor)
     {
         // A successor waits its turn BEFORE touching anything: it handshakes with the
         // predecessor, then waits for it to actually exit. Only then is it safe to take
@@ -145,15 +168,18 @@ sealed class Daemon
         int predecessor = 0;
         if (successor)
         {
-            predecessor = await HandshakeAsSuccessorAsync(instanceId);
+            predecessor = await HandshakeAsSuccessorAsync(wsId);
             if (predecessor < 0) { Console.Error.WriteLine("successor handshake failed; predecessor keeps running"); return 4; }
         }
 
-        // One daemon per canonical root, enforced at the OS (design §14).
+        // One daemon per WORKSPACE, enforced at the OS (design §14). The id is now the
+        // registry's slug rather than a path hash, so what this mutex protects is the
+        // workspace's store — and repo-exclusivity (Registry's three layers) is what keeps
+        // two workspaces from ever aiming two of these at one main.
         Mutex? mutex = null;
         for (int i = 0; i < (successor ? 80 : 1); i++)
         {
-            mutex = new Mutex(initiallyOwned: true, $"Global\\dodona-{instanceId}", out bool createdNew);
+            mutex = new Mutex(initiallyOwned: true, $"Global\\dodona-{wsId}", out bool createdNew);
             if (createdNew) break;
             mutex.Dispose();
             mutex = null;
@@ -161,13 +187,13 @@ sealed class Daemon
         }
         if (mutex is null)
         {
-            Console.Error.WriteLine($"another daemon already owns this root (instance {instanceId})");
+            Console.Error.WriteLine($"another daemon already owns workspace {wsName} ({wsId})");
             return 3;
         }
         using (mutex)
         {
-            using var store = new Store(Path.Combine(root, ".dodona", "store.db"));
-            return await new Daemon(root, instanceId, ctlPipe, store).LoopAsync(predecessor);
+            using var store = new Store(Paths.Store(wsId));
+            return await new Daemon(primary, wsId, wsName, ctlPipe, store).LoopAsync(predecessor);
         }
     }
 
@@ -204,9 +230,11 @@ sealed class Daemon
     async Task<int> LoopAsync(int predecessorPid)
     {
         _store.Event("daemon_start", null,
-            $"pid={Environment.ProcessId} build={Ver.Build} schema={Ver.Schema} exe={Ver.ExePath} root={_root}" +
+            $"pid={Environment.ProcessId} build={Ver.Build} schema={Ver.Schema} exe={Ver.ExePath} " +
+            $"workspace={_wsName} ({_instanceId}) primary={_primary}" +
             (predecessorPid > 0 ? $" successor_of={predecessorPid}" : ""));
-        Console.WriteLine($"dodona daemon: instance {_instanceId}, ctl pipe {_ctlPipe}, pid {Environment.ProcessId}, build {Ver.Build}");
+        Console.WriteLine($"dodona daemon: workspace {_wsName} ({_instanceId}), ctl pipe {_ctlPipe}, " +
+                          $"pid {Environment.ProcessId}, build {Ver.Build}, store {Paths.Store(_instanceId)}");
 
         // Reconcile (design §12): rows are the claim; the pipe is the proof. A successor
         // is adopting shims the predecessor only just let go of, so give them room.
@@ -302,7 +330,7 @@ sealed class Daemon
                     w.WriteLine((await SpawnAgentLaneAsync(title, Pick(e, "model", _config.Model), Pick(e, "effort", _config.Effort))).Msg);
                     break;
                 }
-                w.WriteLine((await SpawnLaneAsync(title, "work", _root, child, childArgs)).Msg);
+                w.WriteLine((await SpawnLaneAsync(title, "work", _primary, child, childArgs)).Msg);
                 break;
             }
             case "say":
@@ -386,6 +414,8 @@ sealed class Daemon
                 break;
             case "status":
                 w.WriteLine($"daemon pid={Environment.ProcessId} build={Ver.Build} schema={Ver.Schema} exe={Ver.ExePath}");
+                w.WriteLine($"workspace {_wsName} ({_instanceId})  store={Paths.Store(_instanceId)}");
+                w.WriteLine($"members: {string.Join(", ", Members().Select(m => m.Path))}");
                 w.WriteLine($"lanes: model={_config.Model} effort={(_config.Effort is { Length: > 0 } ? _config.Effort : "cli default")}  " +
                             $"router: model={_config.RouterModel} effort={(_config.RouterEffort is { Length: > 0 } ? _config.RouterEffort : "cli default")}  " +
                             $"agent={_config.Agent}");
@@ -524,7 +554,7 @@ sealed class Daemon
                     {
                         _store.Event("ticket_repo_unresolved", null, $"'{title}': {err}");
                         w.WriteLine($"error: {err}");
-                        if (repos.Count == 0 && !Git.IsRepo(_root))
+                        if (repos.Count == 0 && !Git.IsRepo(_primary))
                             w.WriteLine("       (lanes work without git; only tickets need a repository)");
                         w.WriteLine("##exit 1");
                         break;
@@ -532,7 +562,30 @@ sealed class Daemon
                     repo = inferred;
                 }
 
-                var repoCfg = Config.For(_root, repo.Path);
+                // Repo-exclusivity, layer 3 (Registry's doc comment): asked HERE because
+                // here is where a merge token first comes into existence for this repo.
+                // Attach-time enforcement and the partial unique index both cover the
+                // ordinary case; neither can cover a BARE FOLDER legitimately attached to
+                // two workspaces (exempt, harmless) that someone later ran `git init` in.
+                // Only a check at the point of use notices the ground moved — the same
+                // reasoning that puts a diff backstop behind the claim gate (§6).
+                try
+                {
+                    using var reg = new Registry();
+                    if (reg.RepoConflict(repo.Path, _instanceId) is Workspace other)
+                    {
+                        _store.Event("ticket_repo_not_exclusive", null, $"'{title}': {repo.Path} also in {other.Id}");
+                        w.WriteLine($"error: {repo.Path} also belongs to workspace \"{other.Name}\" ({other.Id})");
+                        w.WriteLine("       a repo belongs to at most ONE workspace at a time — two workspaces over one");
+                        w.WriteLine("       repo is two merge tokens over one main, the race this system exists to prevent");
+                        w.WriteLine($"       move it:  dodona workspace-move --member \"{repo.Path}\" --workspace \"{_wsName}\"");
+                        w.WriteLine("##exit 1");
+                        break;
+                    }
+                }
+                catch (Exception ex) { _store.Event("registry_unreadable", null, ex.Message); }
+
+                var repoCfg = Config.For(_primary, repo.Path);
                 if (!Git.HasCommit(repo.Path))
                 {
                     w.WriteLine($"error: {repo.Name} is a git repository with no commits, so there is no '{repoCfg.Main}' to branch from");
@@ -550,10 +603,14 @@ sealed class Daemon
                     break;
                 }
 
-                // Branch names are workspace-unique because ticket ids are; the worktree
-                // lives under the workspace even when its repository does not.
+                // Branch names are workspace-unique because ticket ids are. The worktree
+                // lives beside the MEMBER holding this repository — worktrees are the one
+                // piece of state that deliberately did NOT move into workspace territory
+                // (WORKSPACES-CONCIERGE.md §1: they are volume- and path-sensitive, and
+                // moving them buys nothing). For a one-member workspace this is the exact
+                // path it has always been.
                 var branch = $"ticket/{id}";
-                var wt = Path.Combine(_root, ".dodona", "wt", $"t{id}");
+                var wt = Path.Combine(Paths.Worktrees(repo.MemberPath), $"t{id}");
                 var (code, output) = Git.Run(repo.Path, "worktree", "add", "-b", branch, wt, repoCfg.Main);
                 if (code != 0)
                 {
@@ -585,7 +642,7 @@ sealed class Daemon
                 var prefix = ticketRepo?.ClaimPrefix ?? "";
                 var full = Path.GetFullPath(path, t.Worktree).Replace('\\', '/');
                 string? rel = null;
-                foreach (var (baseDir, addPrefix) in new[] { (t.Worktree, true), (_root, false) })
+                foreach (var (baseDir, addPrefix) in new[] { (t.Worktree, true), (_primary, false) })
                 {
                     var b = Path.GetFullPath(baseDir).Replace('\\', '/').TrimEnd('/') + "/";
                     if (full.StartsWith(b, StringComparison.OrdinalIgnoreCase))
@@ -679,13 +736,13 @@ sealed class Daemon
                 var found = Repositories();
                 if (found.Count == 0)
                 {
-                    w.WriteLine($"no git repository in {_root}");
+                    w.WriteLine($"no git repository in {_primary}");
                     w.WriteLine("run `dodona repo-init` to make this folder one (lanes work meanwhile; only tickets need git)");
                     break;
                 }
                 foreach (var r in found)
                 {
-                    var cfg = Config.For(_root, r.Path);
+                    var cfg = Config.For(_primary, r.Path);
                     var tok = _store.TokenRead(r.Name);
                     var open = _store.Tickets().Count(t => t.Repo == r.Name && t.State == "open");
                     w.WriteLine($"{r.Name,-14} main={cfg.Main,-8} open-tickets={open}  token={(tok.Holder?.ToString() ?? "free"),-6} verify={cfg.Verify.Length} step(s)  {r.Path}");
@@ -719,9 +776,9 @@ sealed class Daemon
                 // base; any touched path outside the claim refuses the token. This
                 // catches everything the fail-open hook gate cannot see.
                 var reqRepo = Repos.ByName(Repositories(), t.Repo);
-                var reqPath = reqRepo?.Path ?? _root;
+                var reqPath = reqRepo?.Path ?? _primary;
                 var reqPrefix = reqRepo?.ClaimPrefix ?? "";
-                var reqCfg = Config.For(_root, reqPath);
+                var reqCfg = Config.For(_primary, reqPath);
                 var (dc, diff) = Git.Run(reqPath, "diff", "--name-only", $"{reqCfg.Main}...{t.Branch}");
                 if (dc == 0 && diff.Length > 0)
                 {
@@ -805,30 +862,30 @@ sealed class Daemon
             case "repo-status":
             {
                 // What the picker (and anyone else) needs to know before offering a fix.
-                var isRepo = Git.IsRepo(_root);
-                var nested = isRepo ? new List<string>() : Git.FindRepos(_root);
-                var entries = Directory.Exists(_root)
-                    ? Directory.EnumerateFileSystemEntries(_root).Where(p => Path.GetFileName(p) is not ".dodona" and not ".git").Take(1).Count()
+                var isRepo = Git.IsRepo(_primary);
+                var nested = isRepo ? new List<string>() : Git.FindRepos(_primary);
+                var entries = Directory.Exists(_primary)
+                    ? Directory.EnumerateFileSystemEntries(_primary).Where(p => Path.GetFileName(p) is not ".dodona" and not ".git").Take(1).Count()
                     : 0;
                 w.WriteLine(JsonSerializer.Serialize(new
                 {
-                    root = _root,
+                    root = _primary,
                     isRepo,
-                    hasCommit = isRepo && Git.HasCommit(_root),
+                    hasCommit = isRepo && Git.HasCommit(_primary),
                     empty = entries == 0,
-                    nested = nested.Select(r => Path.GetRelativePath(_root, r)).ToList(),
+                    nested = nested.Select(r => Path.GetRelativePath(_primary, r)).ToList(),
                     main = _config.Main,
                 }));
                 break;
             }
             case "repo-init":
             {
-                if (Git.IsRepo(_root) && Git.HasCommit(_root)) { w.WriteLine($"error: {_root} is already a git repository with commits"); break; }
+                if (Git.IsRepo(_primary) && Git.HasCommit(_primary)) { w.WriteLine($"error: {_primary} is already a git repository with commits"); break; }
                 var adopt = e.TryGetProperty("adopt", out var ad) && ad.ValueKind == JsonValueKind.True;
 
-                if (!Git.IsRepo(_root))
+                if (!Git.IsRepo(_primary))
                 {
-                    var (ic, io) = Git.Run(_root, "init", "-b", _config.Main);
+                    var (ic, io) = Git.Run(_primary, "init", "-b", _config.Main);
                     if (ic != 0) { w.WriteLine($"error: git init failed: {io}"); w.WriteLine("##exit 1"); break; }
                     w.WriteLine($"initialized empty repository on '{_config.Main}'");
                 }
@@ -836,7 +893,7 @@ sealed class Daemon
                 // Dodona's own state is never repo content: worktrees, the store and the
                 // deployed gate files all live under .dodona/ and would otherwise be
                 // committed by an agent's `git add -A` (the bug M1's test caught).
-                var ignore = Path.Combine(_root, ".gitignore");
+                var ignore = Path.Combine(_primary, ".gitignore");
                 var ignoreText = File.Exists(ignore) ? File.ReadAllText(ignore) : "";
                 if (!ignoreText.Split('\n').Any(l => l.Trim() == ".dodona/"))
                 {
@@ -844,22 +901,22 @@ sealed class Daemon
                     w.WriteLine("added .dodona/ to .gitignore");
                 }
 
-                if (!Git.HasCommit(_root))
+                if (!Git.HasCommit(_primary))
                 {
                     // An empty repo has no branch, so no worktree can be cut from it. What
                     // goes into the first commit is the user's call, not ours: adopt takes
                     // the files that are already here, otherwise the commit is empty and
                     // they stay untracked.
-                    if (adopt) Git.Run(_root, "add", "-A");
+                    if (adopt) Git.Run(_primary, "add", "-A");
                     var args = new List<string> { "commit", "-m", adopt ? "Initial commit" : "Initial commit (empty)" };
                     if (!adopt) args.Insert(1, "--allow-empty");
-                    var (cc, co) = Git.Run(_root, args.ToArray());
+                    var (cc, co) = Git.Run(_primary, args.ToArray());
                     if (cc != 0) { w.WriteLine($"error: initial commit failed: {co}"); w.WriteLine("##exit 1"); break; }
                     w.WriteLine(adopt ? "committed the existing files as the initial commit" : "made an empty initial commit; existing files left untracked");
                 }
-                _store.Event("repo_init", null, $"{_root} main={_config.Main} adopt={adopt}");
+                _store.Event("repo_init", null, $"{_primary} main={_config.Main} adopt={adopt}");
                 Announce($"[dodona] git repository ready on '{_config.Main}' — tickets can branch now");
-                w.WriteLine($"ready: {_root} is a git repository on '{_config.Main}'");
+                w.WriteLine($"ready: {_primary} is a git repository on '{_config.Main}'");
                 break;
             }
 
@@ -1042,10 +1099,10 @@ sealed class Daemon
         Process? p = null;
         try
         {
-            var psi = new ProcessStartInfo(nb.Exe) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = _root };
+            var psi = new ProcessStartInfo(nb.Exe) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = _primary };
             psi.ArgumentList.Add("daemon");
-            psi.ArgumentList.Add("--root");
-            psi.ArgumentList.Add(_root);
+            psi.ArgumentList.Add("--workspace");
+            psi.ArgumentList.Add(_instanceId);
             psi.ArgumentList.Add("--successor");
             p = Process.Start(psi);
             _store.Event("swap_spawned", null, $"swap {swapId} build {nb.Build} pid={p?.Id} exe={nb.Exe}");
@@ -1131,7 +1188,7 @@ sealed class Daemon
     {
         if (!_config.AutoPublish) return;
         if (Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1") return;   // suites own their lifetime
-        var project = string.IsNullOrEmpty(_config.AutoPublishProject) ? _root : Path.GetFullPath(_config.AutoPublishProject);
+        var project = string.IsNullOrEmpty(_config.AutoPublishProject) ? _primary : Path.GetFullPath(_config.AutoPublishProject);
         if (!File.Exists(Path.Combine(project, "src", "Dodona", "Dodona.csproj")))
         {
             _store.Event("autopublish_misconfigured", null, $"{project} is not a Dodona source tree");
@@ -1220,8 +1277,11 @@ sealed class Daemon
     (int Code, string Output) RunPublish(string project)
     {
         var psi = new ProcessStartInfo(Ver.ExePath)
-        { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = _root };
-        foreach (var a in new[] { "publish", "--project", project, "--root", _root }) psi.ArgumentList.Add(a);
+        { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = _primary };
+        // Scoped to THIS workspace, never --all: an auto-publish is one workspace noticing
+        // its own sources moved, and broadcasting a swap to every daemon on the machine
+        // because one repo was edited is exactly what §7 set out to stop.
+        foreach (var a in new[] { "publish", "--project", project, "--workspace", _instanceId }) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
         var errT = Task.Run(() => p.StandardError.ReadToEnd());
         var so = p.StandardOutput.ReadToEnd();
@@ -1267,19 +1327,11 @@ sealed class Daemon
     /// <summary>The argv every claude lane is started with — one place, so model and
     /// effort are policy rather than four scattered literals. `--effort` is omitted when
     /// blank so a project can opt out of setting it at all.</summary>
-    /// <summary>Where management-role agents live: a neutral directory OUTSIDE any
-    /// repository. Claude discovers project context by walking up from its cwd, so a
-    /// router/compressor/brain started inside the project would load the project's
-    /// CLAUDE.md and skills — files that order WORK agents to build, test and publish.
-    /// A manager reading a worker's orders is how a classifier ends up running /ship
-    /// (operator: "that could be disastrous"). Utility roles get no project context at
-    /// all: their whole job description is their system prompt.</summary>
-    static string NeutralCwd()
-    {
-        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Dodona", "neutral");
-        Directory.CreateDirectory(dir);
-        return dir;
-    }
+    /// <summary>Where management-role agents live — see <see cref="Paths.NeutralCwd"/>.
+    /// The definition moved there because the concierge (§2) runs its own management models
+    /// and must get the identical treatment: utility roles get no project context at all,
+    /// and their whole job description is their system prompt.</summary>
+    static string NeutralCwd() => Paths.NeutralCwd();
 
     List<string> ClaudeArgs(string model, string effort, string systemPrompt, bool acceptEdits, bool utility = false)
     {
@@ -1326,7 +1378,7 @@ sealed class Daemon
         var args = IsClaude(child)
             ? ClaudeArgs(model ?? _config.Model, effort ?? _config.Effort, LaneSystemPrompt(title), acceptEdits: true)
             : new List<string>();                       // a stand-in agent takes no claude flags
-        return SpawnLaneAsync(title, "work", _root, child, args);
+        return SpawnLaneAsync(title, "work", _primary, child, args);
     }
 
     static bool IsClaude(string child) =>
@@ -1384,7 +1436,7 @@ sealed class Daemon
     Task<(long Id, string Msg)> RespawnLaneAsync(long laneId, string title, List<string> childArgs, string child)
     {
         var role = _store.LanesAll().FirstOrDefault(l => l.Id == laneId)?.Role ?? "work";
-        return AttachShimAsync(laneId, title, role, _root, child, childArgs);
+        return AttachShimAsync(laneId, title, role, _primary, child, childArgs);
     }
 
     async Task<(long Id, string Msg)> AttachShimAsync(long id, string title, string role, string workDir, string child, List<string> childArgs)
@@ -1398,7 +1450,7 @@ sealed class Daemon
         psi.ArgumentList.Add(pipe);
         psi.ArgumentList.Add(child);
         foreach (var a in childArgs) psi.ArgumentList.Add(a);
-        psi.Environment["DODONA_SHIM_INFO"] = Path.Combine(_root, ".dodona", $"shim-lane{id}.json");
+        psi.Environment["DODONA_SHIM_INFO"] = Paths.ShimInfo(_instanceId, id);
         // What this lane is for. A real claude learns its job from the system prompt; this
         // says the same thing to a child that has no system prompt to read (§17's fake
         // agent), and is worth having in the environment of any child when debugging.
@@ -1854,8 +1906,8 @@ sealed class Daemon
         if (t is null || t.State != "open") return $"refused: ticket {tid} not open";
 
         var repo = Repos.ByName(Repositories(), t.Repo);
-        var repoPath = repo?.Path ?? _root;
-        var cfg = Config.For(_root, repoPath);
+        var repoPath = repo?.Path ?? _primary;
+        var cfg = Config.For(_primary, repoPath);
         var where = t.Repo == "." ? "project root" : $"repository {t.Repo}";
 
         var tok = _store.TokenRead(t.Repo);
@@ -1985,10 +2037,10 @@ sealed class Daemon
             try { $j = $in | ConvertFrom-Json } catch { exit 0 }
             $fp = $j.tool_input.file_path
             if (-not $fp) { exit 0 }
-            & '__DODONA__' claim-check __TICKET__ "$fp" --root '__ROOT__' > $null 2> $null
+            & '__DODONA__' claim-check __TICKET__ "$fp" --workspace '__WSID__' > $null 2> $null
             if ($LASTEXITCODE -eq 0) { exit 0 }
             if ($LASTEXITCODE -eq 1) {
-                $reason = "outside ticket __TICKET__'s claim: $fp. Stay within claimed paths, or request an extension: dodona claim-extend __TICKET__ --claim <spec> --root '__ROOT__'"
+                $reason = "outside ticket __TICKET__'s claim: $fp. Stay within claimed paths, or request an extension: dodona claim-extend __TICKET__ --claim <spec> --workspace '__WSID__'"
                 @{ hookSpecificOutput = @{ hookEventName = 'PreToolUse'; permissionDecision = 'deny'; permissionDecisionReason = $reason } } | ConvertTo-Json -Compress
                 exit 0
             }
@@ -1997,7 +2049,7 @@ sealed class Daemon
             """;
         gate = gate.Replace("__DODONA__", Environment.ProcessPath ?? "dodona.exe")
                    .Replace("__TICKET__", ticketId.ToString())
-                   .Replace("__ROOT__", _root)
+                   .Replace("__WSID__", _instanceId)
                    .Replace("__WT__", worktree);
         File.WriteAllText(Path.Combine(worktree, "dodona-gate.ps1"), gate);
     }
