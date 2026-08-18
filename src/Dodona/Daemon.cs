@@ -541,14 +541,38 @@ sealed class Daemon
                 // ("make the skybox red") goes to the lane it names, cheap thought.
                 // Only text that is neither obviously generic nor obviously aimed earns
                 // expensive thought (the brain's high tier picks it up).
-                var sys = "You are Dodona's input router. You will be given a list of lanes (title and subject), " +
-                          "the currently focused lane, and one user input. Reply with ONLY one line of JSON, no prose, no markdown: " +
-                          "{\"kind\":\"generic|specific|unclear\",\"target\":\"<LANE TITLE or none>\",\"confidence\":\"high|medium|low\",\"cleaned_text\":\"<the input, cleaned of dictation noise>\"} " +
-                          "kind=generic means the remark could apply to any ongoing work (acknowledgements, stop, corrections " +
-                          "with no subject) — it belongs to the FOCUSED lane and target must be none. " +
-                          "kind=specific means the content plainly names its subject — target is that lane. " +
-                          "kind=unclear means you genuinely cannot tell; say so, someone smarter will look. " +
-                          "Be willing to say unclear or confidence low — a confident wrong guess is worse than an honest unsure.";
+                // Four verdicts (WORKSPACES-CONCIERGE.md §5). The old vocabulary was
+                // generic|specific|unclear, where `specific` meant "an existing lane's title" —
+                // so no rung of the ladder could ever answer "this deserves a fresh lane", and
+                // while any lane was alive every input was a continuation of something.
+                //
+                // The tie-break and its REASON are both in the prompt deliberately: the cheap
+                // model has to know WHY the tie breaks toward new-task, or it will break it the
+                // other way whenever the input is vague.
+                var sys = "You are Dodona's input router. You are given some lanes (each an agent working on " +
+                          "something), which lane the operator is looking at, and one line of operator input. " +
+                          "You decide where it goes. Reply with ONLY one line of JSON, no prose, no markdown: " +
+                          "{\"kind\":\"generic|addendum|new-task|unclear\",\"target\":\"<LANE TITLE, for addendum only>\"," +
+                          "\"confidence\":\"high|medium|low\",\"reason\":\"<=60 chars, say WHY\"}\n" +
+                          "kind=generic — the remark could apply to any ongoing work: stop, no, try again, yes, " +
+                          "an acknowledgement, a correction naming no subject. It belongs to the FOCUSED lane. " +
+                          "target must be omitted.\n" +
+                          "kind=addendum — it continues an existing lane's thread. Two ways that happens, and both " +
+                          "are common: it is aimed at what that lane is doing NOW (reason: direct), or it is a small " +
+                          "correction or refinement of what that lane JUST FINISHED (reason: tweak). target names " +
+                          "that lane.\n" +
+                          "kind=new-task — a distinct piece of work. It gets its own fresh lane. Do not name a target.\n" +
+                          "kind=unclear — you genuinely cannot tell. Say so; someone with more budget looks, and " +
+                          "then the operator is asked. Nothing is delivered meanwhile, so unclear is SAFE.\n" +
+                          "WHEN TORN BETWEEN addendum AND new-task, CHOOSE new-task. Here is why, and it should " +
+                          "change how you weigh it: a wrong new lane costs one command to undo and pollutes nothing. " +
+                          "A wrong addendum cannot be undone at all — the agent has already been told, may already " +
+                          "be acting, and its context is spoiled. Prefer the mistake that is free.\n" +
+                          "But do not overcorrect: an operator interrupting a working agent is completely normal, " +
+                          "and the length of the input tells you nothing about which kind it is. What tells you is " +
+                          "the SUBJECT — does the input concern what that lane is about, or something else?\n" +
+                          "Be willing to say unclear or confidence low — an honest unsure is cheap here, and a " +
+                          "confident wrong guess is the one error that cannot be taken back.";
                 var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
                 w.WriteLine((await SpawnLaneAsync("ROUTER", "router", NeutralCwd(), child, args)).Msg);
                 break;
@@ -1827,10 +1851,35 @@ sealed class Daemon
         });
     }
 
-    /// <summary>Routing (§4): instant by default, corrected visibly. Tier 0 (prefix) is
-    /// code. Otherwise deliver to the focused lane IMMEDIATELY and let the warm
-    /// classifier run behind as an async second opinion — its latency is off the
-    /// critical path. A disagreement becomes a visible retarget with a receipt row.</summary>
+    /// <summary>
+    /// Lane granularity (docs/WORKSPACES-CONCIERGE.md §5, mechanism decided by the operator
+    /// 2026-08-18): **a distinct task gets its own lane.** New agent, new context, and lanes
+    /// are cheap. An existing lane keeps the input only when it clearly continues that thread.
+    ///
+    /// THE ERROR ASYMMETRY IS THE WHOLE DESIGN, and it is why this method stopped being
+    /// optimistic:
+    ///   * A WRONG CONTINUATION IS UNRECOVERABLE. `Say` delivers immediately; a later retarget
+    ///     re-sends the text to the right lane, but the wrong agent already received it, may
+    ///     already be acting on it, and its warm context is polluted. You cannot unsay a
+    ///     sentence to an agent.
+    ///   * A WRONG NEW LANE IS FREE. `dodona lane-stop N`, nothing polluted, nothing consumed
+    ///     but a process spawn.
+    ///
+    /// So §4's "deliver instantly, correct behind" no longer holds for input that might be new
+    /// work: correcting is exactly what is impossible. Nothing is delivered until the cheap
+    /// classifier answers (operator's call, 2026-08-18, on ~1s of latency being the honest
+    /// price). Two paths stay instant and model-free because they are free to decide in code:
+    /// a `LANE:` prefix, and an unmistakable generic.
+    ///
+    /// The four verdicts:
+    ///   generic   — "stop", "no", "try again". Focused lane, never second-guessed.
+    ///   addendum  — continues an existing lane. Reason `direct` (talking to its ongoing work)
+    ///               or `tweak` (a small correction to what it just finished). Same
+    ///               destination, distinguished because the operator named both and the
+    ///               distinction is worth having in the data.
+    ///   new-task  — distinct work. Spawn and deliver.
+    ///   unclear   — escalate to the expensive tier, then to the operator. Deliver NOTHING.
+    /// </summary>
     async Task<string> RouteInput(string rawText)
     {
         // The operator's override is dispatch syntax, not content — strip it before the
@@ -1839,8 +1888,13 @@ sealed class Daemon
 
         var work = _store.LanesAll().Where(l => l.Role == "work" && l.State == "alive").ToList();
 
-        // Tier 0: explicit prefix names its target. Code only.
-        var m = System.Text.RegularExpressions.Regex.Match(text, @"^([A-Za-z0-9_-]+):\s*(.+)$", System.Text.RegularExpressions.RegexOptions.Singleline);
+        // ---- tier 0: an explicit prefix names its target. Code only, instant. ------------
+        // `\s+`, not `\s*`: the documented form is `LANE: text`, and requiring the space
+        // stops a colon inside the sentence being read as a target. Found by a test whose
+        // directive `routekind:` became a LANE TITLED "ROUTEKIND", after which every later
+        // `routekind:...` line was silently delivered to it as a tier-0 prefix — and the same
+        // shape bites for real with a lane called HTTP and a sentence containing `http://`.
+        var m = System.Text.RegularExpressions.Regex.Match(text, @"^([A-Za-z0-9_-]+):\s+(.+)$", System.Text.RegularExpressions.RegexOptions.Singleline);
         if (m.Success)
         {
             var lane = work.FirstOrDefault(l => l.Title.Equals(m.Groups[1].Value, StringComparison.OrdinalIgnoreCase));
@@ -1852,166 +1906,276 @@ sealed class Daemon
             }
         }
 
-        // Optimistic: the focused lane gets it now. With no focus, pick rather than
-        // refuse — act, announce, allow undo (§11). Refusing to route a sentence because
-        // nobody has clicked a pane yet is the machine asking permission to do the
-        // obvious thing.
-        long fid = -1;
-        LaneRuntime? frt = null;
-        string? autoStarted = null;
-        Choice? chosen = null;
         var live = work.Where(l => _lanes.TryGetValue(l.Id, out var r) && r.Connected).ToList();
-        var focused = _store.KvGet("focused_lane");
-        if (focused is not null && long.TryParse(focused, out var f0) && live.Any(l => l.Id == f0))
+
+        // ---- nothing live: there is nothing to disambiguate, so start the work. ----------
+        // A first sentence on an empty project is not an error condition, it is the beginning
+        // of the work (§11: act, announce, allow undo).
+        if (live.Count == 0)
         {
-            fid = f0;
-            frt = _lanes[f0];
+            var (id, msg, choice) = await SpawnForAsync(text, ovModel, ovEffort);
+            if (id < 0) return msg;
+            _store.RoutingInsert(text, "first", id, id, "only");
+            return $"-> {msg} (started on {choice.Describe})";
         }
-        else if (live.Count > 0)
+
+        // ---- who is focused. With no focus, pick rather than refuse (§11). ---------------
+        long fid;
+        var focused = _store.KvGet("focused_lane");
+        if (focused is not null && long.TryParse(focused, out var f0) && live.Any(l => l.Id == f0)) fid = f0;
+        else
         {
             var pick = live[^1];                       // the newest lane is the one you just made
             fid = pick.Id;
-            frt = _lanes[pick.Id];
             _store.KvSet("focused_lane", fid.ToString());
             if (live.Count > 1)
                 _store.PaneEvent(fid, "announcement", $"↦ focused {pick.Title} (nothing was focused)", null, null);
         }
-        else
-        {
-            // Nowhere to put it — so make somewhere. A first sentence on an empty project
-            // is not an error condition, it is the beginning of the work, and answering it
-            // with instructions would be the machine asking permission to do the obvious
-            // (§11: act, announce, allow undo).
-            //
-            // STOPGAP, and worth naming as one: the lane's name is derived by CODE from
-            // the text, and the lane gets no ticket and no claims. Deciding that this
-            // sentence deserves a ticket claiming src/ui/** is a judgement, and the thing
-            // that makes such judgements — the dispatcher's own session — is not built
-            // yet. Until it is, the operator gets a working lane instantly instead of a
-            // dialog, and can promote it to a ticket deliberately.
-            var name = NameFromText(text);
-            // The table decides here, because here is where a lane is born and a model is
-            // fixed for its whole life — a claude process cannot change model mid-session.
-            var choice = Policy.Resolve(text, _config.Rules, _config.Model, _config.Effort, ovModel, ovEffort);
-            var (newId, msg) = await SpawnAgentLaneAsync(name, choice.Model, choice.Effort);
-            if (newId < 0) return $"error: could not start a lane for this: {msg}";
-            _store.Event("policy_choice", newId, $"{choice.Model}/{choice.Effort} why={choice.Why} overridden={choice.Overridden} text={text}");
-            chosen = choice;
-            fid = newId;
-            frt = _lanes[newId];
-            _store.KvSet("focused_lane", fid.ToString());
-            _store.Event("lane_auto_created", newId, $"from input: {text}");
-            // Announced once, in the lane it is about — the decision feed gathers every
-            // lane's announcements already, so saying it again as the system would put the
-            // same sentence in the feed twice.
-            _store.PaneEvent(fid, "announcement",
-                $"started this lane on {choice.Describe} for “{Truncate(text, 45)}” — undo: dodona lane-stop {newId}",
-                null, null, acked: true);   // a receipt: it badged the lane the instant it was born, which was a lie
-            autoStarted = name;
-            BrainReview(newId, text, name, choice);   // fire-and-forget: corrects behind, never gates
-        }
-        frt.Say(text);
-        var rowId = _store.RoutingInsert(text, "focus", null, fid, null);
+        var frt = _lanes[fid];
+        var focusedRow = work.First(l => l.Id == fid);
 
-        // Async second opinion, if a router lane is warm.
+        // ---- tier 0.5: an unmistakable generic. Code, instant, no model. -----------------
+        // The operator's rule, unchanged: a generic remark belongs to the focused lane, full
+        // stop, no cleverness. Doing the obvious ones here makes the most common interjections
+        // free AND keeps them out of the ~1s wait below — "stop" must never be slow.
+        if (IsObviousGeneric(text))
+        {
+            frt.Say(text);
+            _store.RoutingInsert(text, "generic", fid, fid, "explicit");
+            return $"-> {focusedRow.Title} (generic)";
+        }
+
+        // ---- the classifier decides, and we WAIT for it. --------------------------------
         var router = _store.LanesAll().FirstOrDefault(l => l.Role == "router" && _lanes.ContainsKey(l.Id));
-        if (router is not null)
+        if (router is null)
         {
-            var laneList = string.Join("\n", work.Select(l => $"- {l.Title} (lane {l.Id})"));
-            var focusedTitle = work.FirstOrDefault(l => l.Id == fid)?.Title ?? "?";
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await _routerLock.WaitAsync();
-                    string? reply;
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-                    try { reply = await _lanes[router.Id].AskAsync($"Lanes:\n{laneList}\nFocused: {focusedTitle}\nInput: {text}", 20000); }
-                    finally { _routerLock.Release(); }
-                    if (reply is null) { _store.Event("classifier_timeout", router.Id, text); return; }
-
-                    var js = reply[reply.IndexOf('{')..(reply.LastIndexOf('}') + 1)];
-                    using var d = JsonDocument.Parse(js);
-                    var target = d.RootElement.TryGetProperty("target", out var tg) ? tg.GetString() : null;
-                    var conf = d.RootElement.TryGetProperty("confidence", out var cf) ? cf.GetString() ?? "low" : "low";
-                    var kind = d.RootElement.TryGetProperty("kind", out var kd) ? kd.GetString() ?? "unclear" : "unclear";
-                    _store.Event("classified", router.Id, $"{sw.ElapsedMilliseconds}ms kind={kind} target={target} confidence={conf} input={text}");
-
-                    // The operator's three tiers (2026-08-18):
-                    // generic → it was for the focused lane; the cheap model never
-                    //           second-guesses a "stop" or a "try again". Done.
-                    if (kind == "generic") return;
-
-                    var tLane = work.FirstOrDefault(l => l.Title.Equals(target ?? "", StringComparison.OrdinalIgnoreCase));
-
-                    // specific + confident → cheap thought was enough; retarget visibly.
-                    if (kind == "specific" && conf != "low" && tLane is not null)
-                    {
-                        if (tLane.Id == fid) return;                    // agreement: silent
-                        _store.PaneEvent(fid, "announcement", $"→ retargeted to {tLane.Title} (classifier, {conf})", null, null);
-                        if (_lanes.TryGetValue(tLane.Id, out var trt))
-                        {
-                            trt.Say(text);
-                            _store.RoutingRetarget(rowId, tLane.Id, conf);
-                            _store.Event("routed_retarget", tLane.Id, $"from lane {fid}: {text}");
-                        }
-                        return;
-                    }
-
-                    // unclear (or a shaky guess) → the one case that earns expensive
-                    // thought: the brain's high tier makes the call.
-                    var verdict = await AskBrainHiAsync(
-                        $"Route this operator input to the right lane, or say none to leave it with the focused lane.\n" +
-                        $"Lanes:\n{laneList}\nFocused: {focusedTitle}\nInput: {text}\n" +
-                        "Reply ONLY one line of JSON: {\"target\":\"<LANE TITLE or none>\",\"confidence\":\"high|medium|low\",\"reason\":\"<=60 chars\"}");
-                    string? vTarget = null;
-                    var vConf = "low";
-                    if (verdict is JsonElement ve)
-                    {
-                        if (ve.TryGetProperty("target", out var vt)) vTarget = vt.GetString();
-                        if (ve.TryGetProperty("confidence", out var vc)) vConf = vc.GetString() ?? "low";
-                    }
-                    var vLane = work.FirstOrDefault(l => l.Title.Equals(vTarget ?? "", StringComparison.OrdinalIgnoreCase));
-
-                    // The expensive tier is sure → the usual visible, undoable retarget.
-                    if (vLane is not null && vLane.Id != fid && vConf != "low")
-                    {
-                        _store.PaneEvent(fid, "announcement", $"→ retargeted to {vLane.Title} (escalated)", null, null);
-                        if (_lanes.TryGetValue(vLane.Id, out var vrt))
-                        {
-                            vrt.Say(text);
-                            _store.RoutingRetarget(rowId, vLane.Id, "escalated");
-                            _store.Event("routed_retarget", vLane.Id, $"escalated, from lane {fid}: {text}");
-                        }
-                        return;
-                    }
-                    if (vLane is not null && vLane.Id == fid && vConf != "low") return;   // sure it belongs where it went
-
-                    // Even deep thought is unsure → the top of the ladder is the operator
-                    // (§3), asked in the dispatcher's own column — never a grid lane, and
-                    // never a block: the message already sits with the focused lane, which
-                    // is exactly where the operator's own policy sends ambiguity. The
-                    // question is a badged feed row; ack keeps it, a `LANE:` prefix moves
-                    // it, and either way work never waited on anyone.
-                    var candidates = string.Join(" / ", work.Where(l => l.Id != fid).Select(l => l.Title).Take(4));
-                    _store.Event("routing_clarification", fid, $"decision {rowId}: {text}");
-                    Announce($"[dodona] not sure where “{Truncate(text, 45)}” belongs — it stayed with {focusedTitle}. " +
-                             $"Ack to keep it there, or resend with a lane prefix ({candidates}) to move it.");
-                }
-                catch (Exception ex) { _store.Event("classifier_failed", router.Id, ex.Message); }
-            });
+            // No judgement available, so keep the old, well-understood default rather than
+            // inventing one. Spawning on every sentence would be worse than this: generics are
+            // already handled above, but "make it blue instead" would still become a lane, and
+            // a system that cannot tell continuation from new work should not pretend it can.
+            // The four-verdict behaviour needs the brain on, which is the default in
+            // dodona.json; the suites deliberately run without it.
+            frt.Say(text);
+            _store.RoutingInsert(text, "focus", null, fid, "no-classifier");
+            var stale0 = ovModel is not null || ovEffort is not null
+                ? "  (model/effort is set when a lane starts — this one is already running)" : "";
+            return $"-> {focusedRow.Title} (focus, no classifier warm){stale0}";
         }
-        // `work` was read before any auto-start, so a just-created lane is not in it —
-        // fall back to the name we gave it rather than showing a bare row id.
-        var fTitle = work.FirstOrDefault(l => l.Id == fid)?.Title ?? autoStarted ?? fid.ToString();
-        if (autoStarted is not null)
-            return $"-> {fTitle} (started on {chosen!.Describe})";
-        // A model is fixed when its process starts, so an override aimed at a lane that is
-        // already running cannot be honoured — say so rather than silently ignoring it.
-        var stale = ovModel is not null || ovEffort is not null
-            ? "  (model/effort is set when a lane starts — this one is already running)" : "";
-        return $"-> {fTitle} (focus{(router is not null ? ", classifier running behind" : "")}){stale}";
+
+        var verdict = await ClassifyAsync(router.Id, text, work, focusedRow);
+
+        // A classifier that timed out or answered nonsense has no opinion. Same reasoning as
+        // above: fall back to the known default rather than guessing in either direction.
+        if (verdict is null)
+        {
+            frt.Say(text);
+            _store.RoutingInsert(text, "focus", null, fid, "classifier-silent");
+            return $"-> {focusedRow.Title} (focus, classifier did not answer)";
+        }
+
+        var (kind, target, conf, reason) = verdict.Value;
+
+        // ---- generic: the focused lane, never second-guessed. ---------------------------
+        if (kind == "generic")
+        {
+            frt.Say(text);
+            _store.RoutingInsert(text, "generic", fid, fid, conf);
+            return $"-> {focusedRow.Title} (generic)";
+        }
+
+        // ---- addendum: an existing lane's thread continues. -----------------------------
+        if (kind == "addendum" && conf != "low")
+        {
+            var tLane = work.FirstOrDefault(l => l.Title.Equals(target ?? "", StringComparison.OrdinalIgnoreCase));
+            if (tLane is not null && _lanes.TryGetValue(tLane.Id, out var trt))
+            {
+                trt.Say(text);
+                _store.RoutingInsert(text, "addendum", tLane.Id, tLane.Id, conf);
+                _store.Event("routed_addendum", tLane.Id, $"{reason}: {Truncate(text, 80)}");
+                if (tLane.Id != fid)
+                    _store.PaneEvent(tLane.Id, "announcement", $"→ continued here rather than {focusedRow.Title} ({reason})", null, null);
+                return $"-> {tLane.Title} (addendum{(reason.Length > 0 ? ", " + reason : "")})";
+            }
+        }
+
+        // ---- new-task: spawn and deliver. The cheap, undoable side of the asymmetry. -----
+        if (kind == "new-task" && conf != "low")
+        {
+            var (id, msg, choice) = await SpawnForAsync(text, ovModel, ovEffort);
+            if (id < 0) return msg;
+            _store.RoutingInsert(text, "new-task", id, id, conf);
+            _store.Event("routed_new_task", id, $"conf={conf} reason={reason}");
+            return $"-> {msg} (new task, started on {choice.Describe})";
+        }
+
+        // ---- unclear, or a shaky guess: the expensive tier, then the operator. ----------
+        // NOTHING has been delivered yet, and that is the point. Guessing here is the one
+        // mistake that cannot be taken back, so the ladder's top rung is a question.
+        var laneList = string.Join("\n", work.Select(l => $"- {l.Title} (lane {l.Id})"));
+        var hi = await AskBrainHiAsync(
+            "Decide where one line of operator input belongs in a multi-agent orchestrator.\n" +
+            FactSheet(text, work, focusedRow) +
+            "A distinct task should get its OWN new lane — new agent, clean context, and lanes are cheap. " +
+            "An existing lane keeps it only when the input clearly continues that lane's thread: either it is " +
+            "aimed at work that lane is doing now, or it is a small correction to what that lane just finished.\n" +
+            "Reply ONLY one line of JSON: {\"kind\":\"generic|addendum|new-task|unclear\",\"target\":\"<LANE TITLE for addendum>\"," +
+            "\"confidence\":\"high|medium|low\",\"reason\":\"<=60 chars\"}");
+
+        string? hKind = null, hTarget = null, hReason = "";
+        var hConf = "low";
+        if (hi is JsonElement he)
+        {
+            if (he.TryGetProperty("kind", out var k2)) hKind = k2.GetString();
+            if (he.TryGetProperty("target", out var t2)) hTarget = t2.GetString();
+            if (he.TryGetProperty("confidence", out var c2)) hConf = c2.GetString() ?? "low";
+            if (he.TryGetProperty("reason", out var r2)) hReason = r2.GetString() ?? "";
+        }
+        _store.Event("classified_escalated", null, $"kind={hKind} target={hTarget} conf={hConf} input={Truncate(text, 80)}");
+
+        if (hConf != "low")
+        {
+            if (hKind == "new-task")
+            {
+                var (id, msg, choice) = await SpawnForAsync(text, ovModel, ovEffort);
+                if (id < 0) return msg;
+                _store.RoutingInsert(text, "new-task", id, id, "escalated");
+                _store.Event("routed_new_task", id, $"escalated reason={hReason}");
+                return $"-> {msg} (new task, escalated, started on {choice.Describe})";
+            }
+            var hLane = work.FirstOrDefault(l => l.Title.Equals(hTarget ?? "", StringComparison.OrdinalIgnoreCase));
+            if (hKind is "addendum" or "generic" && (hLane is not null || hKind == "generic"))
+            {
+                var dest = hLane ?? focusedRow;
+                if (_lanes.TryGetValue(dest.Id, out var drt))
+                {
+                    drt.Say(text);
+                    _store.RoutingInsert(text, hKind, dest.Id, dest.Id, "escalated");
+                    return $"-> {dest.Title} ({hKind}, escalated)";
+                }
+            }
+        }
+
+        // ---- double uncertainty: ask, and hold the sentence. ----------------------------
+        // The operator's own policy for ambiguity (§4) was "leave it with the focused lane",
+        // but that was written when delivery was already done and the question was only whether
+        // to retarget. Here nothing has been said yet, and delivering to the wrong lane is the
+        // unrecoverable error — so the honest thing is to hold it and ask. Undoing a wait costs
+        // nothing; undoing a polluted context costs the lane.
+        var candidates = string.Join(" / ", work.Select(l => l.Title).Take(4));
+        var rowId = _store.RoutingInsert(text, "ask", null, null, "unsure");
+        _store.Event("routing_clarification", fid, $"decision {rowId}: {Truncate(text, 120)}");
+        Announce($"[dodona] not sure whether “{Truncate(text, 45)}” is new work or continues something — " +
+                 $"NOT delivered yet. Send it with a lane prefix ({candidates}) to continue one, " +
+                 $"or `dodona lane-start --title <NAME>` then say it there for new work.");
+        return $"held: not sure if this is new work or a continuation — nothing was delivered. " +
+               $"Prefix a lane ({candidates}) to continue, or start a new lane.";
     }
+
+    /// <summary>
+    /// Unmistakable generics — the ones worth deciding in code so they are instant and free.
+    ///
+    /// Deliberately SHORT and anchored. This list exists to make "stop" fast, not to
+    /// second-guess the classifier: anything not obviously one of these goes to the model,
+    /// because the cost of a wrong guess here is a polluted lane. It matches the whole input,
+    /// so "stop the nightly build from running" is not a generic — it is work.
+    /// </summary>
+    static bool IsObviousGeneric(string text) =>
+        System.Text.RegularExpressions.Regex.IsMatch(
+            text.Trim(),
+            @"^(stop|wait|hold on|no|nope|yes|yep|ok|okay|continue|carry on|go on|go ahead|" +
+            @"try again|again|retry|undo|undo that|revert that|never ?mind|cancel|abort|" +
+            @"that'?s wrong|wrong|not that|do'?nt|don'?t do that|scrap that)[.!]?$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// What the classifier is told, as FACTS rather than things to guess at (§2.2: derive in
+    /// code what is not really a judgement).
+    ///
+    /// Two of these facts exist because of specific operator corrections:
+    ///   * MID-TURN IS A SIGNAL TOWARD THE LANE, not away from it. "some mid turn comments are
+    ///     definately meant for the lane" — talking to a working agent is normal and common, so
+    ///     the prompt says so rather than letting the model treat busy as "must be new work".
+    ///   * LENGTH IS NOT A SIGNAL AT ALL. An earlier draft treated short input as probably a
+    ///     continuation; the operator rejected it: "a short 'add this' on an existing lane might
+    ///     mean a new work on that workspace". So no word count is given, and the discriminator
+    ///     offered instead is SUBJECT — does the sentence name what this lane is about, or
+    ///     something else.
+    /// </summary>
+    string FactSheet(string text, List<Store.LaneRow> work, Store.LaneRow focusedRow)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("Input: ").Append(text).Append('\n');
+        sb.Append("Lanes:\n");
+        foreach (var l in work)
+        {
+            var last = _store.Tail(l.Id, 1).FirstOrDefault() ?? "";
+            var busy = l.Presence.Length > 0 && l.Presence is not ("idle" or "landed" or "system");
+            sb.Append($"- {l.Title}: {(busy ? "WORKING NOW" : "idle")}");
+            if (l.Id == focusedRow.Id) sb.Append(" [FOCUSED — the operator is looking at this one]");
+            if (last.Length > 0) sb.Append($"; last: {Truncate(last, 110)}");
+            sb.Append('\n');
+        }
+        // Referring expressions point at something already under discussion. A fact, not a rule.
+        var refs = System.Text.RegularExpressions.Regex.Matches(text, @"\b(that|it|this|instead|also|still|again|those|them)\b",
+                       System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                   .Select(x => x.Value.ToLowerInvariant()).Distinct().ToList();
+        if (refs.Count > 0)
+            sb.Append($"The input refers back with: {string.Join(", ", refs)} — it may be about something already being discussed.\n");
+        sb.Append("A lane that is WORKING NOW is a perfectly normal thing to talk to: operators interrupt working " +
+                  "agents constantly, and that is usually an addendum, not new work.\n");
+        return sb.ToString();
+    }
+
+    /// <summary>Ask the warm cheap classifier and WAIT. Null when it has no usable opinion —
+    /// every caller treats that as "fall back", never as "guess".</summary>
+    async Task<(string Kind, string? Target, string Conf, string Reason)?> ClassifyAsync(
+        long routerId, string text, List<Store.LaneRow> work, Store.LaneRow focusedRow)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await _routerLock.WaitAsync();
+        string? reply;
+        try { reply = await _lanes[routerId].AskAsync(FactSheet(text, work, focusedRow), 20000); }
+        finally { _routerLock.Release(); }
+
+        if (reply is null) { _store.Event("classifier_timeout", routerId, Truncate(text, 100)); return null; }
+        try
+        {
+            using var d = JsonDocument.Parse(reply[reply.IndexOf('{')..(reply.LastIndexOf('}') + 1)]);
+            var kind = d.RootElement.TryGetProperty("kind", out var k) ? k.GetString() ?? "unclear" : "unclear";
+            var target = d.RootElement.TryGetProperty("target", out var t) ? t.GetString() : null;
+            var conf = d.RootElement.TryGetProperty("confidence", out var c) ? c.GetString() ?? "low" : "low";
+            var reason = d.RootElement.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "";
+            _store.Event("classified", routerId, $"{sw.ElapsedMilliseconds}ms kind={kind} target={target} confidence={conf} reason={reason} input={Truncate(text, 80)}");
+            return (kind, target, conf, reason);
+        }
+        catch { _store.Event("classifier_failed", routerId, Truncate(reply, 120)); return null; }
+    }
+
+    /// <summary>
+    /// Spawn a lane for this input and deliver to it — the `new-task` action, and also the
+    /// first-lane case. Name derived in code, model/effort from the policy table (a claude
+    /// process cannot change model mid-session, so this is decided where the lane is born), and
+    /// `BrainReview` corrects the name or suggests a ticket from behind — machinery that already
+    /// existed and needed no change.
+    /// </summary>
+    async Task<(long Id, string Msg, Choice Choice)> SpawnForAsync(string text, string? ovModel, string? ovEffort)
+    {
+        var name = NameFromText(text);
+        var choice = Policy.Resolve(text, _config.Rules, _config.Model, _config.Effort, ovModel, ovEffort);
+        var (newId, msg) = await SpawnAgentLaneAsync(name, choice.Model, choice.Effort);
+        if (newId < 0) return (-1, $"error: could not start a lane for this: {msg}", choice);
+
+        _store.Event("policy_choice", newId, $"{choice.Model}/{choice.Effort} why={choice.Why} overridden={choice.Overridden} text={text}");
+        _store.KvSet("focused_lane", newId.ToString());
+        _store.Event("lane_auto_created", newId, $"from input: {text}");
+        _store.PaneEvent(newId, "announcement",
+            $"started this lane on {choice.Describe} for “{Truncate(text, 45)}” — undo: dodona lane-stop {newId}",
+            null, null, acked: true);   // a receipt: it badged the lane the instant it was born, which was a lie
+        _lanes[newId].Say(text);
+        BrainReview(newId, text, name, choice);   // fire-and-forget: corrects behind, never gates
+        return (newId, name, choice);
+    }
+
 
     /// <summary>The land (§7): the daemon executes the one atomic ref advance. The agent
     /// already rebased and verified in its own worktree; ff-only IS the freshness check —

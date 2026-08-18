@@ -112,29 +112,106 @@ try {
     Start-Sleep -Milliseconds 600
     Dodona @("focus", "$laneId") | Out-Null
 
-    # generic → stays with the focused lane; the classifier must not second-guess it
+    # =====================================================================================
+    # LANE GRANULARITY: the four verdicts (docs/WORKSPACES-CONCIERGE.md §5)
+    #
+    # The operator's rule: a distinct task gets its OWN lane. An existing lane keeps the input
+    # only when it clearly continues that thread -- either it is aimed at what the lane is doing
+    # now, or it is a small tweak to what it just finished.
+    #
+    # The error asymmetry is what every check below is really guarding. A wrong new lane costs
+    # one `lane-stop`. A wrong continuation cannot be undone at all: the agent has been told, may
+    # already be acting, and its context is spoiled. So routing WAITS for a verdict now instead
+    # of delivering optimistically -- correcting is precisely what is impossible.
+    # =====================================================================================
+
+    # generic → the focused lane, never second-guessed.
     Dodona @("input", "routekind:generic say dont do that") | Out-Null
     Start-Sleep -Seconds 2
-    Check 'generic_never_retargets' ((Rows "SELECT COUNT(*) FROM routing_decisions WHERE retargeted=1").Trim() -eq '0') ''
+    Check 'generic_goes_to_the_focused_lane' `
+        ((Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$laneId AND kind='user_input' AND body LIKE '%dont do that%'").Trim() -eq '1') `
+        (Rows "SELECT tier, delivered_lane FROM routing_decisions ORDER BY id DESC LIMIT 1")
 
-    # specific + confident → cheap retarget to the named lane
-    Dodona @("input", "routekind:specific routetarget:WATER say make the water red") | Out-Null
+    # An unmistakable generic is decided in CODE — instant, and it never reaches a model. That
+    # is what keeps "stop" fast even though everything else now waits for a verdict.
+    Dodona @("input", "stop") | Out-Null
+    Start-Sleep -Seconds 1
+    Check 'obvious_generic_needs_no_model' `
+        ((Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 1") -match 'generic\|explicit') `
+        (Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 1")
+
+    # addendum → the lane it names, with the reason recorded. Two legitimate reasons, both from
+    # the operator: `direct` (talking to work in progress) and `tweak` (a small correction to
+    # work just finished).
+    $waterLane = (Rows "SELECT id FROM lanes WHERE title='WATER'").Trim()
+    Dodona @("input", "routekind:addendum routetarget:WATER routereason:direct say make the water red") | Out-Null
     Start-Sleep -Seconds 2
-    Check 'specific_retargets_cheaply' ((Rows "SELECT COUNT(*) FROM routing_decisions WHERE retargeted=1 AND confidence!='escalated'").Trim() -eq '1') ''
+    Check 'addendum_goes_to_the_named_lane' `
+        ((Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$waterLane AND kind='user_input' AND body LIKE '%water red%'").Trim() -eq '1') ''
+    Check 'addendum_records_its_reason' ((Rows "SELECT detail FROM events WHERE kind='routed_addendum' ORDER BY id DESC LIMIT 1") -match 'direct') ''
 
-    # unclear + brain-hi sure → escalated retarget
-    Dodona @("input", "routekind:unclear braintarget:WATER say hmm that colour thing") | Out-Null
+    Dodona @("input", "routekind:addendum routetarget:WATER routereason:tweak say actually make it darker") | Out-Null
+    Start-Sleep -Seconds 2
+    Check 'tweak_is_an_addendum_too' ((Rows "SELECT detail FROM events WHERE kind='routed_addendum' ORDER BY id DESC LIMIT 1") -match 'tweak') ''
+
+    # new-task → A FRESH LANE, spawned and delivered. The verdict that did not exist before:
+    # while any lane was alive, every input used to be a continuation of something.
+    $before = [int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()
+    Dodona @("input", "routekind:new-task say build the configuration dialog") | Out-Null
     Start-Sleep -Seconds 3
-    Check 'unclear_escalates_to_expensive' ((Rows "SELECT COUNT(*) FROM routing_decisions WHERE confidence='escalated'").Trim() -eq '1') ''
+    $after = [int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()
+    Check 'new_task_spawns_its_own_lane' ($after -eq $before + 1) "before=$before after=$after"
+    $newLane = (Rows "SELECT id FROM lanes WHERE role='work' ORDER BY id DESC LIMIT 1").Trim()
+    Check 'new_task_lane_gets_the_message' `
+        ((Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$newLane AND kind='user_input' AND body LIKE '%configuration dialog%'").Trim() -eq '1') ''
+    # The lane is named in code from the longest substantial word. The directive word must
+    # not BE the longest one, or the lane gets named after the test harness (it did: ROUTEKIND).
+    Check 'new_task_is_named_from_the_text' ((Rows "SELECT title FROM lanes WHERE id=$newLane").Trim() -eq 'CONFIGURATION') `
+        (Rows "SELECT title FROM lanes WHERE id=$newLane")
+    Check 'new_task_receipt_carries_its_undo' `
+        ((Rows "SELECT body FROM pane_events WHERE lane_id=$newLane AND kind='announcement' LIMIT 1") -match "lane-stop $newLane") ''
+    Check 'new_task_in_the_causal_chain' ((Rows "SELECT COUNT(*) FROM events WHERE kind='routed_new_task'").Trim() -eq '1') ''
+    # ...and it did NOT leak into the lane the operator happened to be looking at. This is the
+    # unrecoverable error, so it gets its own check.
+    Check 'new_task_never_touched_the_focused_lane' `
+        ((Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$laneId AND body LIKE '%configuration dialog%'").Trim() -eq '0') ''
 
-    # unclear + even brain-hi unsure → the OPERATOR is asked, in the dispatcher feed,
-    # while the message stays with the focused lane (ambiguity's default, never a block)
+    # unclear + brain-hi sure → the expensive tier decides, and can itself say new-task.
+    $before2 = [int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()
+    Dodona @("input", "routekind:unclear hikind:new-task say overhaul the export pipeline") | Out-Null
+    Start-Sleep -Seconds 4
+    Check 'unclear_escalates_to_the_expensive_tier' `
+        ((Rows "SELECT COUNT(*) FROM events WHERE kind='classified_escalated'").Trim() -ne '0') ''
+    Check 'escalated_new_task_spawns_a_lane' `
+        (([int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()) -eq $before2 + 1) ''
+    Check 'escalated_decision_is_recorded' `
+        ((Rows "SELECT confidence FROM routing_decisions ORDER BY id DESC LIMIT 1").Trim() -eq 'escalated') ''
+
+    # ---- DOUBLE UNCERTAINTY: hold the sentence and ask. -----------------------------------
+    # This REVERSES the old behaviour, deliberately. §4's ambiguity default was "leave it with
+    # the focused lane", written when delivery had already happened and the only question was
+    # whether to retarget. Now nothing has been said yet, and delivering to the wrong lane is
+    # the one mistake that cannot be taken back -- so the honest move is to hold and ask.
+    # Undoing a wait costs nothing; undoing a polluted context costs the lane.
+    # WORK lanes only. Asking the router or brain-hi writes a `user_input` row on THEIR lane
+    # (that is how AskAsync talks to a warm session), so an unscoped count rises by two even
+    # when nothing was delivered to any actual lane.
+    $workInputs = "SELECT COUNT(*) FROM pane_events p JOIN lanes l ON l.id=p.lane_id WHERE p.kind='user_input' AND l.role='work'"
+    $inputsBefore = [int](Rows $workInputs).Trim()
+    $lanesBefore = [int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()
     Dodona @("input", "routekind:unclear say something entirely cryptic") | Out-Null
-    Start-Sleep -Seconds 3
-    $ask = Rows "SELECT body, acked FROM pane_events WHERE body LIKE '%not sure where%' LIMIT 1"
-    Check 'double_uncertainty_asks_the_operator' (($ask -match 'stayed with') -and ($ask -match '\|0')) $ask
+    Start-Sleep -Seconds 4
+    $ask = Rows "SELECT body, acked FROM pane_events WHERE body LIKE '%new work or continues%' LIMIT 1"
+    Check 'double_uncertainty_asks_the_operator' (($ask -match 'NOT delivered') -and ($ask -match '\|0')) $ask
     Check 'clarification_in_causal_chain' ((Rows "SELECT COUNT(*) FROM events WHERE kind='routing_clarification'").Trim() -eq '1') ''
-    Check 'message_still_delivered_to_focused' ((Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$laneId AND kind='user_input' AND body LIKE '%entirely cryptic%'").Trim() -eq '1') ''
+    # THE POINT: nothing was delivered anywhere, and no lane was invented either.
+    Check 'held_input_is_delivered_nowhere' `
+        (([int](Rows $workInputs).Trim()) -eq $inputsBefore) `
+        (Rows "SELECT p.lane_id, l.role, p.body FROM pane_events p JOIN lanes l ON l.id=p.lane_id WHERE p.body LIKE '%entirely cryptic%'")
+    Check 'held_input_invents_no_lane' `
+        (([int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()) -eq $lanesBefore) ''
+    Check 'held_input_is_recorded_as_asked' `
+        ((Rows "SELECT tier FROM routing_decisions ORDER BY id DESC LIMIT 1").Trim() -eq 'ask') ''
 
     Dodona @("ui", "close") | Out-Null
     # ---- a daemon restart must ADOPT the brain, not spawn a second one ------------------

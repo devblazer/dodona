@@ -1,7 +1,7 @@
 # Dodona Workspaces & the Concierge
 
-Status: **slices 2–5 BUILT (2026-08-18); slice 1 deliberately not** — see §9 for what that
-means and why. Sections 1.1, 2.1 and 6.1 record the decisions implementation forced that the
+Status: **all five slices BUILT (2026-08-18).** Slice 1's mechanism was the operator's to
+specify and is recorded in §5.1. Sections 1.1, 2.1 and 6.1 record the decisions implementation forced that the
 planning session did not reach, with their reasons.
 
 Originally the outcome of the 2026-08-18 planning session with the operator, whose standing
@@ -336,6 +336,65 @@ current optimistic default for task-shaped input:
 - **A wrong new lane is the cheap error and is fully undoable.** `dodona lane-stop <id>`,
   nothing polluted, nothing consumed but a process spawn.
 
+### 5.1 BUILT 2026-08-18 — the mechanism, as the operator specified it
+
+The operator's rule, in their words: **favour new tasks "unless they are direct messageing to
+existing tasks, or very obvious small post work done tweaks that should not be treated as
+seperate work"**. That gives the two exceptions their names, and both are `addendum` with a
+recorded reason (`direct`, `tweak`) — same destination, distinguished because the operator named
+them separately and the distinction is worth having in the data.
+
+**The doctrine that had to change.** §4's "deliver instantly, correct behind" cannot survive
+contact with this, because correcting is exactly what is impossible: once an agent has the
+words, they cannot be unsaid. So **nothing is delivered until the cheap classifier answers**
+(the operator accepted ~1s as the honest price). Two paths stay instant and model-free:
+
+| path | decided by | why |
+|---|---|---|
+| `LANE: text` | code | the operator said where |
+| an unmistakable generic (`stop`, `no`, `try again`…) | code, whole-input match | "stop" must never be slow |
+
+Everything else waits. On double uncertainty the sentence is **held, not delivered** — which
+reverses §4's old ambiguity default of "leave it with the focused lane". That default was
+written when delivery had already happened and the only question was whether to retarget; now
+nothing has been said yet, and undoing a wait costs nothing while undoing a polluted context
+costs the lane.
+
+**Only two hard rules exist in code.** Everything else is evidence handed to the classifier as
+FACTS (§2.2 — derive in code what is not really a judgement): which lane is focused, whether
+each is working now or idle, what it last said, and whether the input refers back (*that, it,
+instead, also, still*). Three tempting hard rules were considered and rejected, two of them on
+the operator's own correction:
+
+- ~~"never spawn while the focused lane is mid-turn"~~ — **rejected.** The operator: "some mid
+  turn comments are definately meant for the lane." Mid-turn is therefore a signal *toward* the
+  lane, and the prompt says so outright: interrupting a working agent is normal and usually an
+  addendum. Making it a *block*, though, would reintroduce the unrecoverable error for genuinely
+  new work said while watching something build.
+- ~~"never spawn from short input"~~ — **rejected by the operator**: "Length of input generally
+  doesnt have bearing on new vs existing. Because a short 'add this' on an existing lane might
+  mean a new work on that workspace." No word count is given to the classifier at all. The
+  discriminator offered instead is **subject** — does the sentence concern what this lane is
+  about, or something else.
+- ~~"never spawn if it would land in the tray"~~ — moot: the grid grows now (ORCHESTRATOR-DESIGN
+  §8 as revised).
+
+Two invariants: never more than one lane per input, and every spawn announces itself carrying
+`undo: dodona lane-stop N`.
+
+**Without a classifier warm, behaviour is unchanged** — the input goes to the focused lane. That
+is deliberate: generics are already handled in code, but spawning a lane for "make it blue
+instead" would be worse than the status quo, and a system that cannot tell continuation from new
+work should not pretend it can. The four verdicts need the brain on, which is the default in
+`dodona.json`; the suites run without it, which is why every pre-existing routing check stayed
+green.
+
+**A footgun found while testing, and fixed:** the tier-0 prefix regex accepted `word:text` with
+no space, so a lane whose title collided with any `word:` prefix silently swallowed later input.
+A test directive `routekind:` became a lane named ROUTEKIND and then hijacked every subsequent
+`routekind:…` line. It now requires `LANE: text` with whitespace — which also stops a sentence
+containing `http://` being read as a target for a lane called HTTP.
+
 Design changes this implies:
 
 - The classifier verdict grows a fourth kind: `generic | addendum | new-task | unclear`
@@ -483,12 +542,9 @@ nothing in this document is background material to the slices; each slice IS one
 things decided in the planning session. Each ships alone; current two-window behavior
 keeps working throughout.
 
-1. **Lane granularity (§5)** — **NOT BUILT, deliberately.** Its mechanism is a placeholder
-   awaiting the operator's own design, so slices 2–5 shipped around it. The two code facts
-   §5 records are still true and were treated as constraints throughout: `RouteInput`'s
-   classifier has no "new lane" verdict, and a misdelivered continuation is not undoable.
-   The concierge inherits that asymmetry one level up — a rung-4 "ask" delivers nothing at
-   all, and the review-behind reports a group misroute without pretending it can retract it.
+1. **Lane granularity (§5)** — **done** (2026-08-18), mechanism specified by the operator and
+   recorded in §5.1. Four verdicts, the wait instead of optimistic delivery, hold-and-ask on
+   double uncertainty, and two hard code rules only.
 2. **Workspace identity + registry** — **done** (commit "Workspaces are named, not
    located"). Decisions in §1.1.
 3. **Concierge daemon** — **done** (commit "The concierge: one per machine"). Decisions in

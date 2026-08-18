@@ -20,10 +20,16 @@ var asCompressor = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "co
 // whatever text reaches it (the operator input is quoted inside the brain's question):
 //   brainname:X   — disagree, better_name X      brainticket:T — suggest ticket T
 //   brainlow      — answer with confidence low (forces the escalation path)
+// brain-hi also answers the ESCALATED lane-granularity question (§5), driven by:
+//   hikind:new-task|addendum|generic   hitarget:LANE   hiconf:low
+// With no hikind at all it answers unclear/low, so the ladder walks to its top rung and asks
+// the operator -- which is the branch a test most needs to be able to reach.
 var asBrain = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE")?.StartsWith("brain") == true;
 var brainIsHi = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "brain-hi";
-// router: routekind:generic|specific|unclear, routetarget:X, routeconf:low — so the full
-// escalation chain (classifier → brain-hi → operator clarification) runs model-free.
+// router: routekind:generic|addendum|new-task|unclear, routetarget:X, routereason:direct|tweak,
+// routeconf:low — so the full escalation chain (classifier → brain-hi → ask the operator) runs
+// model-free. Default is `unclear`, deliberately: an unclear verdict delivers NOTHING, so a
+// fake agent with no directive can never cause a silent wrong delivery inside a test.
 var asRouter = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "router";
 // concierge-lo / concierge-hi: the GROUP-scope ladder (WORKSPACES-CONCIERGE.md §2/§4).
 // Directives, embedded in whatever text reaches the tier (the operator's sentence is quoted
@@ -61,8 +67,17 @@ while ((line = Console.ReadLine()) is not null)
 
     if (asRouter)
     {
-        var rk = Regex.Match(text, @"routekind:(\w+)");
+        // Four verdicts (WORKSPACES-CONCIERGE.md §5): generic | addendum | new-task | unclear.
+        //   routekind:new-task     — a distinct task; the daemon spawns a lane and delivers
+        //   routekind:addendum + routetarget:LANE  — continues that lane
+        //   routereason:tweak      — the addendum reason (direct | tweak)
+        //   routeconf:low          — force the escalation path
+        // The default is deliberately `unclear`, NOT `generic`: an unclear verdict delivers
+        // nothing and asks, so a fake agent that said nothing useful can never cause a silent
+        // wrong delivery in a test. The old default of `generic` would have.
+        var rk = Regex.Match(text, @"routekind:([\w-]+)");
         var rt2 = Regex.Match(text, @"routetarget:(\w+)");
+        var rr = Regex.Match(text, @"routereason:(\w+)");
         Emit(new
         {
             type = "result",
@@ -70,9 +85,10 @@ while ((line = Console.ReadLine()) is not null)
             session_id = sessionId,
             result = JsonSerializer.Serialize(new
             {
-                kind = rk.Success ? rk.Groups[1].Value : "generic",
-                target = rt2.Success ? rt2.Groups[1].Value : "none",
+                kind = rk.Success ? rk.Groups[1].Value : "unclear",
+                target = rt2.Success ? rt2.Groups[1].Value : (string?)null,
                 confidence = text.Contains("routeconf:low") ? "low" : "high",
+                reason = rr.Success ? rr.Groups[1].Value : "fake router",
                 cleaned_text = text,
             }),
         });
@@ -162,6 +178,32 @@ while ((line = Console.ReadLine()) is not null)
     if (asBrain)
     {
         var isHi = brainIsHi;
+
+        // The escalated lane-granularity question (§5) reaches brain-hi with the four-verdict
+        // schema, not the review schema. Recognised by its own words, the same way the
+        // concierge's review question is.
+        if (isHi && text.Contains("Decide where one line of operator input belongs"))
+        {
+            var hk = Regex.Match(text, @"hikind:([\w-]+)");
+            var ht = Regex.Match(text, @"hitarget:(\w+)");
+            Emit(new
+            {
+                type = "result",
+                subtype = "success",
+                session_id = sessionId,
+                result = JsonSerializer.Serialize(new
+                {
+                    kind = hk.Success ? hk.Groups[1].Value : "unclear",
+                    target = ht.Success ? ht.Groups[1].Value : (string?)null,
+                    // No directive means genuinely unsure, so the ladder reaches its top rung
+                    // and asks the operator -- the path most worth testing.
+                    confidence = hk.Success && !text.Contains("hiconf:low") ? "high" : "low",
+                    reason = "fake brain-hi",
+                }),
+            });
+            continue;
+        }
+
         var name = Regex.Match(text, @"brainname:(\w+)");
         var tick = Regex.Match(text, @"brainticket:(\w+)");
         var low = text.Contains("brainlow") && !isHi;      // the hi tier is always sure

@@ -181,6 +181,13 @@ what is actually running, and `dodona stop-all [--lanes]` is how you stop it. Th
 operator a surprise: they closed the window, believed the machine was idle, and a daemon plus
 seventeen shims had been up for hours.
 
+**Routing waits now.** A distinct task gets its own lane (WORKSPACES-CONCIERGE.md §5.1), so
+input is no longer delivered optimistically to the focused lane: a wrong continuation cannot be
+undone, and correcting it is exactly what is impossible. Only `LANE: text` and unmistakable
+generics ("stop", "no", "try again") are decided in code and stay instant. On double uncertainty
+the sentence is HELD and you are asked — nothing is delivered. Without a warm brain, behaviour
+is unchanged (focused lane), which is why the suites are unaffected.
+
 ## 4. Never kill processes by name
 
 ```powershell

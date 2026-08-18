@@ -289,10 +289,13 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   `main_sha` is what that repository's main was when the grant happened.
 - **`token_queue`** — FIFO of tickets waiting, `repo`-scoped: the head of `engine`'s
   queue is independent of `tools`'.
-- **`routing_decisions`** — every routed input (§4): `ts, input, tier
-  (prefix|focus|classifier), target_lane, delivered_lane, confidence, retargeted,
-  undone`. `undone` is reserved for the UI's undo keystroke — free labeled data for
-  tuning the confidence threshold.
+- **`routing_decisions`** — every routed input (§4/§5): `ts, input, tier, target_lane,
+  delivered_lane, confidence, retargeted, undone`. `tier` is the VERDICT that decided it:
+  `prefix` | `generic` | `addendum` | `new-task` | `first` | `focus` | `ask`. A row with
+  `tier='ask'` and a NULL `delivered_lane` is the one to look for — the sentence was HELD and
+  the operator asked, because guessing between "new work" and "continues something" is the one
+  routing mistake that cannot be undone. `undone` is reserved for the UI's undo keystroke —
+  free labeled data for tuning the confidence threshold.
 - **`kv`** — small state: `focused_lane`, `dispatcher_lane`, `rate_limit` (the latest
   `rate_limit_event` off any lane's wire, with the timestamp it was observed — the
   authoritative 5-hour-window number the dispatcher column shows, aged honestly because
@@ -316,8 +319,10 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   `token_released`, `token_expired_reclaimed`, `claim_backstop_refused`, `landed`,
   `land_refused`, `land_inconsistent`, `verify_green`, `verify_red`, `worktree_pruned`,
   `worktree_prune_failed`, `ticket_git_failed`. Routing kinds: `classified` (with
-  latency), `routed_retarget`, `classifier_timeout`, `classifier_failed`,
-  `route_undone`. Compression kinds: `compressed` (with latency and before→after sizes),
+  latency, kind and reason), `classified_escalated` (the expensive tier was asked),
+  `routed_addendum` (with its `direct`/`tweak` reason), `routed_new_task`,
+  `routing_clarification` (held and asked — **nothing was delivered**),
+  `routed_retarget`, `classifier_timeout`, `classifier_failed`, `route_undone`. Compression kinds: `compressed` (with latency and before→after sizes),
   `compressor_timeout`, `compressor_failed`. Lifecycle kinds: `lane_stopped`,
   `lane_dormant` (its ticket landed — the agent was retired, the lane keeps the thread),
   `lane_respawned` (a fresh agent resumed the recorded session).
