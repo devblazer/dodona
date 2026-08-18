@@ -41,11 +41,21 @@ function Rows([string]$sql) {
     # a Python syntax error. Env transport has no quoting at all to collide with.
     $db = $storeDb
     $env:DODONA_TEST_SQL = $sql
+    # Pin BOTH ends of the pipe to UTF-8. A redirected child's stdio defaults to the OEM
+    # codepage (CLAUDE.md 0.2), and Python's own stdout defaults to the ANSI one -- so an
+    # em dash left the store as U+2014, went out as cp1252 0x97 and came back decoded as
+    # cp850 as an accented u. `blocked_uses_the_fixed_schema` compares against
+    # [char]0x2014 and failed for that and only that, in one shell and not another. A suite
+    # whose verdict depends on which console started it is not a suite.
+    $prevEnc = [Console]::OutputEncoding
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $env:PYTHONIOENCODING = 'utf-8'
     $o = (python -c "
 import sqlite3, os
 db = sqlite3.connect(r'$db')
 for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is None else str(x) for x in r))
 ") | Out-String
+    [Console]::OutputEncoding = $prevEnc
     Remove-Item env:DODONA_TEST_SQL -ErrorAction SilentlyContinue
     $o
 }
@@ -67,7 +77,16 @@ try {
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Start-Sleep -Milliseconds 800
 
-    Check 'store_migrated_to_v7' ((Rows "PRAGMA user_version") -match '7') (Rows "PRAGMA user_version")
+    # Assert the store migrated to whatever THIS binary declares, never a frozen literal.
+    # The old form was `-match '7'`, which went red the moment Ver.Schema became 8 (M5.1's
+    # lanes.cwd column) even though the migration was perfectly correct -- and, worse, a
+    # regex match on a bare digit would have passed for 17 or 71 too. Reading the number the
+    # binary itself reports makes this check verify the thing it is named after: that the
+    # store the daemon opened is at the shape the daemon expects.
+    $declaredSchema = ((& $dodona version --json | ConvertFrom-Json).schema)
+    Check 'store_migrated_to_declared_schema' `
+        ((Rows "PRAGMA user_version").Trim() -eq "$declaredSchema") `
+        "store=$(Rows 'PRAGMA user_version') binary=$declaredSchema"
 
     # ---- a work lane with NO compressor pool: the full text must still arrive ----
     # lane-start names the lane itself; on an empty store the first work lane is 1.

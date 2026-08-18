@@ -549,6 +549,11 @@ int Publish()
     string outDir;
 
     var prebuilt = One("exe");
+    // Snapshot what the tree looks like BEFORE the compiler runs. This is stamped into the
+    // published directory so auto-publish can ask "am I behind?" against the same measure it
+    // was built from, instead of against dodona.exe's mtime — which spans one project while
+    // the question spans three, and looped 64 times in an afternoon (Ver.WriteBuiltFrom).
+    var builtFrom = Ver.NewestSource(project);
     if (prebuilt is not null)
     {
         outDir = Path.GetDirectoryName(Path.GetFullPath(prebuilt))!;
@@ -589,6 +594,11 @@ int Publish()
 
     var newExe = Path.Combine(outDir, "dodona.exe");
     if (!File.Exists(newExe)) return Fail($"published, but {newExe} is missing");
+
+    // Only a build we performed gets a stamp. A `--exe <prebuilt>` publish did not compile
+    // anything and nobody knows what that binary was built from, so it keeps the legacy
+    // mtime comparison rather than being handed a snapshot that might be a lie.
+    if (prebuilt is null) Ver.WriteBuiltFrom(outDir, builtFrom);
 
     // Verify the build actually RUNS before anything is promoted to it. The shortcut
     // used to be repointed right here, before any swap was attempted — so a build that

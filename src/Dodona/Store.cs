@@ -202,6 +202,19 @@ sealed class Store : IDisposable, ILaneSink
                 PRAGMA user_version = 7;
                 """);
         }
+        if (v < 8)
+        {
+            // A lane now records WHERE it runs (M5.1). It never did, and `_primary` was
+            // hardcoded at both spawn and respawn — so every lane in a workspace shared the
+            // operator's live tree, and a respawned TICKET lane came back editing main's
+            // working copy while its own system prompt still told it "your worktree is the
+            // current working directory". Empty means "the workspace primary", which is
+            // exactly what every pre-M5 row was.
+            Exec("""
+                ALTER TABLE lanes ADD COLUMN cwd TEXT NOT NULL DEFAULT '';
+                PRAGMA user_version = 8;
+                """);
+        }
     }
 
     static string Now() => DateTime.UtcNow.ToString("o");
@@ -244,6 +257,10 @@ sealed class Store : IDisposable, ILaneSink
     public void LaneSession(long id, string session) => Set("UPDATE lanes SET session_id = $v WHERE id = $id;", id, session);
     public void LanePresence(long id, string presence) => Set("UPDATE lanes SET presence = $v WHERE id = $id;", id, presence);
     public void LaneRole(long id, string role) => Set("UPDATE lanes SET role = $v WHERE id = $id;", id, role);
+    /// <summary>Where this lane's child process runs. Recorded so a RESPAWN lands in the
+    /// same place the original did — a ticket lane must come back in its worktree, not in
+    /// the operator's live tree (M5.1).</summary>
+    public void LaneCwd(long id, string cwd) => Set("UPDATE lanes SET cwd = $v WHERE id = $id;", id, cwd);
     public void LaneTitle(long id, string title) => Set("UPDATE lanes SET title = $v WHERE id = $id;", id, title);
 
     public void KvSet(string key, string value)
@@ -341,7 +358,8 @@ sealed class Store : IDisposable, ILaneSink
         }
     }
 
-    public record LaneRow(long Id, string Title, string State, string Pipe, string? Session, string Presence, string Role);
+    public record LaneRow(long Id, string Title, string State, string Pipe, string? Session, string Presence, string Role,
+                          string Cwd);
 
     public List<LaneRow> LanesAll()
     {
@@ -349,11 +367,12 @@ sealed class Store : IDisposable, ILaneSink
         {
             var list = new List<LaneRow>();
             using var c = _db.CreateCommand();
-            c.CommandText = "SELECT id, title, state, pipe_name, session_id, presence, role FROM lanes ORDER BY id;";
+            c.CommandText = "SELECT id, title, state, pipe_name, session_id, presence, role, cwd FROM lanes ORDER BY id;";
             using var r = c.ExecuteReader();
             while (r.Read())
                 list.Add(new LaneRow(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3),
-                                     r.IsDBNull(4) ? null : r.GetString(4), r.GetString(5), r.GetString(6)));
+                                     r.IsDBNull(4) ? null : r.GetString(4), r.GetString(5), r.GetString(6),
+                                     r.GetString(7)));
             return list;
         }
     }

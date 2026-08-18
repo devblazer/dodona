@@ -154,6 +154,28 @@ try {
     Check 'an_unheld_legacy_store_migrates_normally' ($legacyPipe -match '"store"') $legacyPipe
 
     Dx @('concierge-stop') | Out-Null
+    # ---- provenance: only a build we PERFORMED may claim what it was built from ----------
+    # Auto-publish asks "am I behind my sources?". It used to answer by comparing the newest
+    # .cs/.xaml/.csproj across ALL THREE projects against the mtime of the ONE binary the
+    # daemon runs. Edit src\DodonaUi\MainWindow.xaml.cs, MSBuild correctly skips the
+    # up-to-date Dodona project, the publish copy preserves LastWriteTime, and dodona.exe's
+    # mtime can NEVER catch up -- so the condition stayed true forever: 64 auto-publishes and
+    # 72 daemon restarts in one afternoon, a full three-project build every ~65 seconds, four
+    # consecutive swaps reporting the byte-identical `sources 15:56:19 > image 15:55:55`.
+    # Publish now stamps `.built-from` with the snapshot it compiled, taken BEFORE the build.
+    #
+    # What is asserted here is the half a hermetic suite CAN own: a `--exe` publish compiled
+    # nothing, so it must NOT leave a stamp -- an unknown-provenance binary has to fall back
+    # to the mtime compare rather than inherit a claim about sources it never saw. The other
+    # half (a real build stamps, and the drift it answers then reads false) cannot live in a
+    # suite: publishing the real tree means running `dotnet` against this repo's own `obj/`,
+    # which the operator's live auto-publish daemon is also building into. Two builds, one
+    # obj -- and 17's "tests collide with nothing" includes the instance they are using right
+    # now. It is covered by measurement and by Ver.WriteBuiltFrom's comment instead.
+    Check 'prebuilt_publish_claims_no_provenance' `
+        (-not (Test-Path (Join-Path (Split-Path -Parent $dodona) '.built-from'))) `
+        (Split-Path -Parent $dodona)
+
     foreach ($n in 'alpha', 'beta') { Dx @('stop-daemon', '--workspace', $wsIds[$n]) | Out-Null }
 }
 finally {

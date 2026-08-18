@@ -141,6 +141,25 @@ whose daemon died on startup — the front door itself rotted, and every project
 against it (2026-08-18). The shortcut launches `DodonaUi.exe --shell` — the workspace
 shell. (The folder picker no longer exists at all, see §3.1.)
 
+**Auto-publish compares like with like, and its guard lives in the store.** It once looped
+64 times in an afternoon — 72 daemon restarts, a full three-project build every ~65 seconds,
+four consecutive swaps reporting the byte-identical `sources 15:56:19 > image 15:55:55`.
+Two independent halves, and each alone was enough:
+
+- it compared the newest source across **all three projects** against the mtime of the **one**
+  binary the daemon runs. Edit `src\DodonaUi\MainWindow.xaml.cs`, MSBuild correctly skips the
+  up-to-date Dodona project, the publish copy preserves `LastWriteTime`, and `dodona.exe`'s
+  mtime can never catch up — the condition is true forever. Publish now stamps `.built-from`
+  (the source snapshot, taken **before** compiling, so an edit landing mid-build is never
+  falsely claimed as built) and the watcher compares against that.
+- the `lastTried` guard that would have stopped it was a local. A successful auto-publish
+  hands off and **that process exits**, so the guard was reset by the very swap it triggered.
+  It is `kv.autopublish_last_tried` now: in-process state cannot guard anything that survives
+  a handoff.
+
+That is also the upstream cause of the 14 leaked BRAIN lanes below — a symptom of one restart
+per minute, not a bug of its own.
+
 Blocked swaps **arm themselves** instead of asking (`swap-answer now` forces, `hold`
 parks — holding is opt-in, waiting never is), and a schema-migrating swap **backs up the
 store and proceeds** (announced with the restore path; only downgrades refuse). §14 of
@@ -164,6 +183,34 @@ powershell ... testsrain-acceptance.ps1     # the dispatcher brain and its rout
 powershell ... tests\concierge-acceptance.ps1 # the group-scope ladder, the fence, the review-behind
 powershell ... tests\publish-acceptance.ps1   # publish targeting: --all spares foreign instances
 ```
+
+**A suite that builds the thing it tests proves nothing about the wiring.** The routing
+ladder — four verdicts, the escalation chain, the held-input rung — was fully covered and
+fully green while being **dead in production for two days**. `RouteInput` looked its
+classifier up by `role='router'`; nothing in the daemon ever created one (the warm-up and
+`brain-start` both make `brain`), and the sole producer of `router` was a manual command
+whose only caller in the entire tree was `brain-acceptance.ps1` itself. The suite stood up
+its own classifier, proved the ladder against it, and passed — while every sentence the
+operator typed fell to `no-classifier` and went to whatever lane was focused. Measured on
+their store: 14 routed inputs, all `tier=focus confidence=no-classifier`, **zero**
+`classified` events, **zero** router lanes ever created, while `dodona status` cheerfully
+printed `router: model=haiku` for a lane that had never existed.
+
+Two rules came out of it, and they generalize past routing:
+
+- **Ensure at the point of use, never look up.** A lookup that misses is indistinguishable
+  from one that was never going to hit. `EnsureRouterAsync` creates the classifier where
+  routing needs it, the way `EnsureBrainAsync` already did — after which "no classifier"
+  can only mean *switched off in config* or *the spawn failed*, and both say so out loud.
+- **Every suite must exercise at least one path the way the OPERATOR runs it** — autostart
+  on, nothing pre-built by the test. `brain-acceptance` now stops the classifier, restarts
+  the daemon with `DODONA_NO_AUTOSTART` cleared, and demands that a typed sentence produce
+  a `classified` event. Verified by reintroducing the defect: those checks go red with the
+  detail `focus|no-classifier`, the live store's exact signature.
+
+And **a silent degrade is a bug** (§0.1's standing directive covers "quietly stale"): the
+only evidence of two dead days was a status-line suffix nobody reads. The fallback now
+announces itself once per daemon and writes a `routing_unrouted` event.
 
 `ui-use` is the one that matters most for UI work: dumps and screenshots prove the UI
 *reports* correctly while the first thing a person tries is still a dead end. If you add

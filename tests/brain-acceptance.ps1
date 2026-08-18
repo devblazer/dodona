@@ -245,6 +245,62 @@ try {
         ((Rows "SELECT detail FROM events WHERE kind='reconcile_done' ORDER BY id DESC LIMIT 1") -match 'brain=\d+') `
         (Rows "SELECT detail FROM events WHERE kind='reconcile_done' ORDER BY id DESC LIMIT 1")
 
+    # ---- THE WIRING: the role the daemon CREATES must be the role routing USES -----------
+    # This is the check that was missing, and its absence cost two days of silently broken
+    # routing. RouteInput looked the classifier up by `role='router'`; nothing in the daemon
+    # ever created one. The startup warm-up and `brain-start` both make `brain`, and the only
+    # producer of `router` was the manual command -- whose only caller in the entire tree was
+    # THIS SUITE, five lines above. So the ladder was proven on a wiring the real daemon never
+    # took, and every sentence the operator typed fell to `no-classifier` and went to whatever
+    # lane happened to be focused. Measured on their store: 14 routed inputs, all
+    # `tier=focus confidence=no-classifier`, ZERO `classified` events, ZERO router lanes.
+    #
+    # So this section deliberately runs the daemon the way the OPERATOR runs it -- autostart
+    # ON -- with no classifier present, and demands that one appear and actually decide.
+    $routerLane = (Rows "SELECT id FROM lanes WHERE role='router' AND state='alive'").Trim()
+    Dodona @("lane-stop", $routerLane) | Out-Null
+    Dodona @("stop-daemon") | Out-Null
+    Start-Sleep -Seconds 1
+    Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue    # as the operator has it
+    $daemon = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws.Id -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon3.out" -RedirectStandardError "$out\daemon3.err"
+    Start-Sleep -Seconds 3
+
+    Check 'autostart_creates_a_classifier' `
+        (([int](Rows "SELECT COUNT(*) FROM lanes WHERE role='router' AND state='alive'").Trim()) -eq 1) `
+        (Rows "SELECT id, title, role, state FROM lanes WHERE role='router'")
+    Check 'autostart_records_the_classifier' `
+        ((Rows "SELECT detail FROM events WHERE kind='router_started' ORDER BY id DESC LIMIT 1").Trim() -eq 'classifier warm') `
+        (Rows "SELECT kind, detail FROM events WHERE kind LIKE 'router%' ORDER BY id DESC LIMIT 3")
+
+    # The decisive one: a real typed sentence must reach the classifier the daemon made for
+    # itself. A `classified` event can only be written from inside ClassifyAsync, so this
+    # fails the instant the create-side role and the use-side role diverge again.
+    $classifiedBefore = [int](Rows "SELECT COUNT(*) FROM events WHERE kind='classified'").Trim()
+    Dodona @("input", "routekind:generic routeconf:high say carry on then") | Out-Null
+    Start-Sleep -Seconds 3
+    Check 'typed_input_reaches_the_classifier_autostart_made' `
+        (([int](Rows "SELECT COUNT(*) FROM events WHERE kind='classified'").Trim()) -gt $classifiedBefore) `
+        (Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 3")
+    Check 'routing_did_not_fall_back_to_focus' `
+        ((Rows "SELECT confidence FROM routing_decisions ORDER BY id DESC LIMIT 1").Trim() -ne 'no-classifier') `
+        (Rows "SELECT tier, confidence, input FROM routing_decisions ORDER BY id DESC LIMIT 1")
+
+    # ...and the classifier obeys the same no-leak rule the brain does.
+    $routerNow = (Rows "SELECT id FROM lanes WHERE role='router' AND state='alive' ORDER BY id").Trim()
+    Dodona @("stop-daemon") | Out-Null
+    Start-Sleep -Seconds 1
+    $daemon = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws.Id -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon4.out" -RedirectStandardError "$out\daemon4.err"
+    Start-Sleep -Seconds 3
+    Check 'restart_adopts_the_classifier_it_already_had' `
+        ((Rows "SELECT id FROM lanes WHERE role='router' AND state='alive' ORDER BY id").Trim() -eq $routerNow) `
+        (Rows "SELECT id, role, state FROM lanes WHERE role='router'")
+    Check 'restart_does_not_leak_a_second_classifier' `
+        ((Rows "SELECT COUNT(*) FROM lanes WHERE role='router' AND state='alive'").Trim() -eq '1') `
+        (Rows "SELECT id, title, role, state FROM lanes WHERE role='router'")
+    $env:DODONA_NO_AUTOSTART = "1"
+
     Dodona @("stop-daemon") | Out-Null
 }
 finally {

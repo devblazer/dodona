@@ -35,6 +35,7 @@ out by looking at a folder.
 | UI pipe (UI alive only) | `dodona-<instance>-ui` |
 | Handoff pipe (during a swap only) | `dodona-<instance>-handoff` |
 | Published builds | `%LOCALAPPDATA%\Dodona\bin\<stamp>` (or `$env:DODONA_BIN_ROOT`) |
+| What a build was built FROM | `<build dir>\.built-from` — newest source timestamp at publish time; absent for `publish --exe`, which falls back to the exe's mtime |
 | Agent session files (Claude Code's own) | `$env:CLAUDE_CONFIG_DIR\projects\<cwd-slug>\<session-id>.jsonl` |
 
 `$env:DODONA_HOME` relocates every `%LOCALAPPDATA%\Dodona` row above (bar published
@@ -296,7 +297,10 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   the operator asked, because guessing between "new work" and "continues something" is the one
   routing mistake that cannot be undone. `undone` is reserved for the UI's undo keystroke —
   free labeled data for tuning the confidence threshold.
-- **`kv`** — small state: `focused_lane`, `dispatcher_lane`, `rate_limit` (the latest
+- **`kv`** — small state: `focused_lane`, `dispatcher_lane`, `autopublish_last_tried` (the
+  source snapshot the drift watcher last acted on — in the store precisely because a
+  successful publish REPLACES the daemon process, so an in-process guard is reset by the
+  very swap it triggered), `rate_limit` (the latest
   `rate_limit_event` off any lane's wire, with the timestamp it was observed — the
   authoritative 5-hour-window number the dispatcher column shows, aged honestly because
   it only updates when a lane takes a turn).
@@ -322,7 +326,13 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   latency, kind and reason), `classified_escalated` (the expensive tier was asked),
   `routed_addendum` (with its `direct`/`tweak` reason), `routed_new_task`,
   `routing_clarification` (held and asked — **nothing was delivered**),
-  `routed_retarget`, `classifier_timeout`, `classifier_failed`, `route_undone`. Compression kinds: `compressed` (with latency and before→after sizes),
+  `routed_retarget`, `classifier_timeout`, `classifier_failed`, `route_undone`,
+  `router_started` / `router_failed` (the classifier the daemon warms for itself), and
+  **`routing_unrouted`** — the fallback saying out loud that it has no classifier and is
+  sending everything to the focused lane. If you see that row, routing is OFF: the ladder
+  is not choosing lanes, and every `routing_decisions` row will read
+  `tier=focus confidence=no-classifier`. That was the live state for two days
+  (CLAUDE.md §3) because the classifier was looked up by a role nothing ever created. Compression kinds: `compressed` (with latency and before→after sizes),
   `compressor_timeout`, `compressor_failed`. Lifecycle kinds: `lane_stopped`,
   `lane_dormant` (its ticket landed — the agent was retired, the lane keeps the thread),
   `lane_respawned` (a fresh agent resumed the recorded session).
@@ -333,6 +343,11 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   failures and 16 wasted three-project builds in one afternoon, until the reason that
   mattered was buried under fifteen copies of itself),
   `autopublish_dirty_tree`, `autopublish_misconfigured`, `autopublish_error`.
+  `autopublish_started`'s detail now reads `sources <t> > built-from <t>`: the right-hand
+  side is the `.built-from` stamp publish leaves beside the binaries, **not** the exe's
+  mtime — comparing a three-project measure to a one-project artefact looped 64 times in an
+  afternoon. Identical timestamps in consecutive `autopublish_started` rows ARE that loop;
+  `kv.autopublish_last_tried` (which survives the handoff a swap performs) now stops it.
   Lifecycle: `utility_lane_reaped` (a brain/router/compressor whose shim is gone).
   Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
   `swap_forced`, `swap_refused`, `swap_failed`, `daemon_handoff`, `binary_gc`,

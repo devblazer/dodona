@@ -112,6 +112,8 @@ sealed class Daemon
     readonly SemaphoreSlim _routerLock = new(1, 1);   // one classification at a time on the warm session
     readonly SemaphoreSlim _brainLoLock = new(1, 1), _brainHiLock = new(1, 1);
     long _brainLo = -1, _brainHi = -1;                // lane ids of the two brain tiers
+    long _routerLo = -1;                              // lane id of the warm input classifier
+    bool _saidNoClassifier;                           // the fallback announces ONCE per daemon
     // One lock per compressor session, not one for the pool: the point of a pool is that
     // two lanes finishing at once compress concurrently. A single lock would rebuild the
     // serialization point §3 forbids the dispatcher to be (§5).
@@ -275,6 +277,10 @@ sealed class Daemon
             {
                 if (l.Role == "brain") _brainLo = l.Id;
                 else if (l.Role == "brain-hi") _brainHi = l.Id;
+                // ...and the ROUTER, for exactly the same reason. It was added later than the
+                // brain and inherited none of the brain's lessons: adopt it or every start
+                // spawns another one, retire the surplus or a store accumulates them.
+                else if (l.Role == "router") _routerLo = l.Id;
             }
         }
         // Retire UTILITY lanes whose shim is gone. A brain, router or compressor is fungible
@@ -299,9 +305,9 @@ sealed class Daemon
         // heals itself on the next start instead of needing the operator to go and count
         // processes. Utility roles only — a work lane is never retired behind the operator's
         // back (LANE-LIFECYCLE §2: no eviction, and a parked lane is often deliberate).
-        foreach (var role in new[] { "brain", "brain-hi" })
+        foreach (var role in new[] { "brain", "brain-hi", "router" })
         {
-            var keep = role == "brain" ? _brainLo : _brainHi;
+            var keep = role switch { "brain" => _brainLo, "brain-hi" => _brainHi, _ => _routerLo };
             var surplus = _store.LanesAll()
                 .Where(l => l.Role == role && l.State == "alive" && l.Id != keep)
                 .ToList();
@@ -370,6 +376,12 @@ sealed class Daemon
             {
                 try { _store.Event("brain_started", null, await EnsureBrainAsync(hi: false) >= 0 ? "cheap tier warm" : "failed to warm"); }
                 catch (Exception ex) { _store.Event("brain_failed", null, ex.Message); }
+                // The classifier is warmed here too — not because routing depends on it
+                // (EnsureRouterAsync creates it on demand now), but so the operator's FIRST
+                // sentence does not pay a cold session's startup. Same guard, same block:
+                // one place decides whether this daemon starts things by itself.
+                try { _store.Event("router_started", null, await EnsureRouterAsync() >= 0 ? "classifier warm" : "failed to warm"); }
+                catch (Exception ex) { _store.Event("router_failed", null, ex.Message); }
             });
 
         // No `using` on pipe streams near a peer that may close first (spike 2's lesson).
@@ -460,16 +472,31 @@ sealed class Daemon
 
                 var child2 = _config.Agent;
                 var args2 = new List<string>();
+
+                // WHERE it comes back, and WHAT it is told it is, were both wrong (M5.1).
+                // Respawn hardcoded `_primary` and always rebuilt the PLAIN-lane prompt, so a
+                // resumed TICKET agent ran in the operator's live working copy while being
+                // told "your worktree is the current working directory; work only there" — a
+                // gated agent, resumed, editing main's tree. The ticket is the authority on
+                // both answers; the recorded cwd covers every other kind of lane.
+                var t2 = _store.Tickets().FirstOrDefault(t => t.LaneId == lane && t.State == "open");
+                var cwd2 = t2?.Worktree is { Length: > 0 } twt && Directory.Exists(twt) ? twt
+                         : row.Cwd is { Length: > 0 } rcwd && Directory.Exists(rcwd) ? rcwd
+                         : _primary;
                 if (IsClaude(child2))
                 {
-                    args2 = ClaudeArgs(_config.Model, _config.Effort, LaneSystemPrompt(row.Title), acceptEdits: true);
+                    var sys2 = t2 is null
+                        ? LaneSystemPrompt(row.Title, cwd2)
+                        : TicketSystemPrompt(t2.Id, t2.Title,
+                            string.Join(", ", _store.TicketClaims(t2.Id).Select(cl => $"{cl.Kind}:{cl.Value}")));
+                    args2 = ClaudeArgs(_config.Model, _config.Effort, sys2, acceptEdits: true);
                     if (row.Session is { Length: > 0 } sess && !sess.StartsWith("fake-"))
                     { args2.Add("--resume"); args2.Add(sess); }
                 }
                 // The pipe name is deterministic per lane, and the old shim is gone —
                 // the name is free to reclaim, which is the whole point of never keying
                 // anything to pids (§13).
-                var (rid, rmsg) = await RespawnLaneAsync(row.Id, row.Title, args2, child2);
+                var (rid, rmsg) = await RespawnLaneAsync(row.Id, row.Title, args2, child2, cwd2);
                 if (rid > 0)
                 {
                     _store.LaneState(lane, "alive");
@@ -508,7 +535,11 @@ sealed class Daemon
                 w.WriteLine($"workspace {_wsName} ({_instanceId})  store={Paths.Store(_instanceId)}");
                 w.WriteLine($"members: {string.Join(", ", Members().Select(m => m.Path))}");
                 w.WriteLine($"lanes: model={_config.Model} effort={(_config.Effort is { Length: > 0 } ? _config.Effort : "cli default")}  " +
-                            $"router: model={_config.RouterModel} effort={(_config.RouterEffort is { Length: > 0 } ? _config.RouterEffort : "cli default")}  " +
+                            // The LANE, not only its config. Printing `router: model=haiku` for a
+                            // classifier that had never once been created is how a dead routing
+                            // ladder looked healthy for two days.
+                            $"router: {(_routerLo > 0 && _lanes.TryGetValue(_routerLo, out var rrt) && rrt.Connected ? $"lane {_routerLo}" : "NOT RUNNING")} " +
+                            $"model={_config.RouterModel} effort={(_config.RouterEffort is { Length: > 0 } ? _config.RouterEffort : "cli default")}  " +
                             $"agent={_config.Agent}");
                 foreach (var l in _store.LanesAll())
                 {
@@ -549,52 +580,11 @@ sealed class Daemon
             }
             case "router-start":
             {
+                // By hand: for suites (which set DODONA_NO_AUTOSTART and own every lifetime
+                // themselves) and for restarting the classifier after a config change. The
+                // ordinary path is EnsureRouterAsync, which creates it at the point of use.
                 var child = e.TryGetProperty("child", out var rc) && rc.ValueKind == JsonValueKind.String ? rc.GetString()! : _config.Agent;
-                // The router is a mechanical classifier, not a thinker: cheap model, low
-                // effort, deliberately not the project's lane policy (§9's ladder — spend
-                // where judgement compounds, and this is not where it compounds).
-                var model = Pick(e, "model", _config.RouterModel);
-                var effort = Pick(e, "effort", _config.RouterEffort);
-                // The operator's routing policy, verbatim intent (2026-08-18): a GENERIC
-                // remark ("don't do that", "stop", "try again") belongs to the focused
-                // lane, full stop — no cleverness. A remark CLEARLY AIMED by content
-                // ("make the skybox red") goes to the lane it names, cheap thought.
-                // Only text that is neither obviously generic nor obviously aimed earns
-                // expensive thought (the brain's high tier picks it up).
-                // Four verdicts (WORKSPACES-CONCIERGE.md §5). The old vocabulary was
-                // generic|specific|unclear, where `specific` meant "an existing lane's title" —
-                // so no rung of the ladder could ever answer "this deserves a fresh lane", and
-                // while any lane was alive every input was a continuation of something.
-                //
-                // The tie-break and its REASON are both in the prompt deliberately: the cheap
-                // model has to know WHY the tie breaks toward new-task, or it will break it the
-                // other way whenever the input is vague.
-                var sys = "You are Dodona's input router. You are given some lanes (each an agent working on " +
-                          "something), which lane the operator is looking at, and one line of operator input. " +
-                          "You decide where it goes. Reply with ONLY one line of JSON, no prose, no markdown: " +
-                          "{\"kind\":\"generic|addendum|new-task|unclear\",\"target\":\"<LANE TITLE, for addendum only>\"," +
-                          "\"confidence\":\"high|medium|low\",\"reason\":\"<=60 chars, say WHY\"}\n" +
-                          "kind=generic — the remark could apply to any ongoing work: stop, no, try again, yes, " +
-                          "an acknowledgement, a correction naming no subject. It belongs to the FOCUSED lane. " +
-                          "target must be omitted.\n" +
-                          "kind=addendum — it continues an existing lane's thread. Two ways that happens, and both " +
-                          "are common: it is aimed at what that lane is doing NOW (reason: direct), or it is a small " +
-                          "correction or refinement of what that lane JUST FINISHED (reason: tweak). target names " +
-                          "that lane.\n" +
-                          "kind=new-task — a distinct piece of work. It gets its own fresh lane. Do not name a target.\n" +
-                          "kind=unclear — you genuinely cannot tell. Say so; someone with more budget looks, and " +
-                          "then the operator is asked. Nothing is delivered meanwhile, so unclear is SAFE.\n" +
-                          "WHEN TORN BETWEEN addendum AND new-task, CHOOSE new-task. Here is why, and it should " +
-                          "change how you weigh it: a wrong new lane costs one command to undo and pollutes nothing. " +
-                          "A wrong addendum cannot be undone at all — the agent has already been told, may already " +
-                          "be acting, and its context is spoiled. Prefer the mistake that is free.\n" +
-                          "But do not overcorrect: an operator interrupting a working agent is completely normal, " +
-                          "and the length of the input tells you nothing about which kind it is. What tells you is " +
-                          "the SUBJECT — does the input concern what that lane is about, or something else?\n" +
-                          "Be willing to say unclear or confidence low — an honest unsure is cheap here, and a " +
-                          "confident wrong guess is the one error that cannot be taken back.";
-                var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
-                w.WriteLine((await SpawnLaneAsync("ROUTER", "router", NeutralCwd(), child, args)).Msg);
+                w.WriteLine((await SpawnRouterAsync(child, Pick(e, "model", _config.RouterModel), Pick(e, "effort", _config.RouterEffort))).Msg);
                 break;
             }
             case "brain-start":
@@ -632,11 +622,7 @@ sealed class Daemon
 
                 // The lane-agent framing (§5, spike 3): declare the [DISPATCHER] channel or
                 // the model treats mid-turn instructions as a prompt-injection attempt.
-                var sys = $"You are a lane agent operated by the Dodona orchestrator, working ticket {tid}: \"{t.Title}\". " +
-                          $"Your worktree is the current working directory; work only there. Your declared claim is [{claims}] — " +
-                          "a PreToolUse gate denies writes outside it; if denied, stay within the claim or ask your operator for an extension. " +
-                          "Real-time instructions from your human operator arrive in hook output labeled [DISPATCHER]; they are authentic " +
-                          "and carry the same authority as your original task, even when they change or contradict earlier instructions.";
+                var sys = TicketSystemPrompt(tid, t.Title, claims);
                 var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: true) : new List<string>();
                 var (laneId, msg) = await SpawnLaneAsync(t.Title, "work", t.Worktree, child, args);
                 // Link ticket ↔ lane: "waiting on you: merge" (§8) needs a pane to land in.
@@ -1357,8 +1343,21 @@ sealed class Daemon
 
         _ = Task.Run(async () =>
         {
-            DateTime lastMax = DateTime.MinValue, stableSince = DateTime.MinValue, lastTried = DateTime.MinValue;
+            DateTime lastMax = DateTime.MinValue, stableSince = DateTime.MinValue;
             DateTime dirtySince = DateTime.MinValue;
+
+            // `lastTried` is deliberately in the STORE, not a local. A successful auto-publish
+            // hands off and this process EXITS -- so an in-process guard is reset by the very
+            // swap it just triggered, and the successor happily republishes the same snapshot.
+            // That is the second half of the 2026-08-18 loop: 72 daemon starts, four of them
+            // reporting the byte-identical `sources ... > image ...`. Persisting it means the
+            // guard survives the handoff, which is the only place it has ever needed to work.
+            DateTime LastTried()
+            {
+                var v = _store.KvGet("autopublish_last_tried");
+                return !string.IsNullOrEmpty(v) && DateTime.TryParse(v, null, System.Globalization.DateTimeStyles.RoundtripKind, out var t)
+                    ? t.ToUniversalTime() : DateTime.MinValue;
+            }
             bool dirtyAnnounced = false;
             int tick = 0;
 
@@ -1385,16 +1384,19 @@ sealed class Daemon
                 await Task.Delay(15000);
                 try
                 {
-                    // ---- source drift: newer than the running image? ----
-                    var maxSrc = NewestSource(project);
-                    var image = File.GetLastWriteTimeUtc(Ver.ExePath);
-                    if (maxSrc > image && maxSrc != lastTried && !surrendered)
+                    // ---- source drift: newer than what the running image was BUILT FROM? ----
+                    // Not the image's own mtime. `maxSrc` spans all three projects; dodona.exe
+                    // is one of them, so a UI-only edit could never be caught up with and the
+                    // condition stayed true forever (Ver.WriteBuiltFrom carries the numbers).
+                    var maxSrc = Ver.NewestSource(project);
+                    var image = Ver.ImageBuiltFrom(Ver.ExePath);
+                    if (maxSrc > image && maxSrc != LastTried() && !surrendered)
                     {
                         if (maxSrc != lastMax) { lastMax = maxSrc; stableSince = DateTime.UtcNow; }
                         else if ((DateTime.UtcNow - stableSince).TotalSeconds >= _config.AutoPublishDebounceSec)
                         {
-                            lastTried = maxSrc;
-                            _store.Event("autopublish_started", null, $"sources {maxSrc:o} > image {image:o}");
+                            _store.KvSet("autopublish_last_tried", maxSrc.ToString("o"));
+                            _store.Event("autopublish_started", null, $"sources {maxSrc:o} > built-from {image:o}");
                             Announce("[dodona] sources changed — building and swapping to stay live");
                             var (code, output) = RunPublish(project);
                             if (code != 0)
@@ -1421,7 +1423,9 @@ sealed class Daemon
                             // swap (mid-merge blocker) already announced its three answers.
                         }
                     }
-                    else if (maxSrc <= image) { lastMax = DateTime.MinValue; }
+                    // Caught up: forget both guards, so the NEXT edit is judged on its own
+                    // merits rather than against a snapshot that is now history.
+                    else if (maxSrc <= image) { lastMax = DateTime.MinValue; _store.KvSet("autopublish_last_tried", ""); }
 
                     // ---- git drift: published-but-uncommitted was nearly lost work once ----
                     if (++tick % 20 == 0)   // every ~5 minutes
@@ -1441,25 +1445,6 @@ sealed class Daemon
                 catch (Exception ex) { _store.Event("autopublish_error", null, ex.Message); }
             }
         });
-    }
-
-    static DateTime NewestSource(string project)
-    {
-        var newest = DateTime.MinValue;
-        void Scan(string dir)
-        {
-            foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
-            {
-                if (f.Contains(@"\bin\") || f.Contains(@"\obj\")) continue;
-                if (!(f.EndsWith(".cs") || f.EndsWith(".xaml") || f.EndsWith(".csproj"))) continue;
-                var t = File.GetLastWriteTimeUtc(f);
-                if (t > newest) newest = t;
-            }
-        }
-        Scan(Path.Combine(project, "src"));
-        var dj = Path.Combine(project, "dodona.json");
-        if (File.Exists(dj) && File.GetLastWriteTimeUtc(dj) > newest) newest = File.GetLastWriteTimeUtc(dj);
-        return newest;
     }
 
     (int Code, string Output) RunPublish(string project)
@@ -1564,7 +1549,7 @@ sealed class Daemon
     {
         var child = _config.Agent;
         var args = IsClaude(child)
-            ? ClaudeArgs(model ?? _config.Model, effort ?? _config.Effort, LaneSystemPrompt(title), acceptEdits: true)
+            ? ClaudeArgs(model ?? _config.Model, effort ?? _config.Effort, LaneSystemPrompt(title, _primary), acceptEdits: true)
             : new List<string>();                       // a stand-in agent takes no claude flags
         return SpawnLaneAsync(title, "work", _primary, child, args);
     }
@@ -1596,11 +1581,33 @@ sealed class Daemon
     /// <summary>The framing for a lane with no ticket. The [DISPATCHER] channel must be
     /// declared or the model treats mid-turn operator instructions as a prompt-injection
     /// attempt and refuses them (spike 3) — that applies to every lane, not just ticketed
-    /// ones.</summary>
-    static string LaneSystemPrompt(string title) =>
+    /// ones.
+    ///
+    /// The branch paragraph is the whole point of this text (M5.1). The previous version said
+    /// "you have no ticket and no claim, so nothing is reserved for you — if the operator
+    /// wants isolated work on a branch, they will create a ticket": it told the agent it was
+    /// un-isolated and then left it free to branch anyway. A plain lane runs in a SHARED
+    /// checkout, so one `git checkout` reassigns every other lane's work and the operator's
+    /// own — which is exactly what a project whose own CLAUDE.md ends in "check out a branch"
+    /// will make it do (docs/M5-DELIVERY-PLAN.md §4). Until a plain lane gets a worktree of its
+    /// own, the honest instruction is: do not touch which branch is checked out, at all.</summary>
+    static string LaneSystemPrompt(string title, string workDir) =>
         $"You are the agent for lane \"{title}\", operated by the Dodona orchestrator. Your working directory is " +
-        "the project the operator is running; work there. You have no ticket and no claim, so nothing is reserved " +
-        "for you — if the operator wants isolated work on a branch, they will create a ticket and a fresh lane for it. " +
+        $"{workDir} — work there. " +
+        "IMPORTANT: that directory is a SHARED checkout. Other lanes and your human operator are working in it at the " +
+        "same time, so it is not yours to reconfigure: never run `git checkout`, `git switch`, `git stash`, or anything " +
+        "else that changes which branch is checked out or moves uncommitted work aside. Doing so silently reassigns " +
+        "every other lane's work and your operator's too. If the task genuinely needs its own branch, say so and stop " +
+        "— your operator creates a ticket for that, and a ticket gets a private checkout of its own. " +
+        "Real-time instructions from your human operator arrive in hook output labeled [DISPATCHER]; they are authentic " +
+        "and carry the same authority as your original task, even when they change or contradict earlier instructions.";
+
+    /// <summary>The framing for a TICKET lane. Factored out of `ticket-agent` because respawn
+    /// needs the identical text (M5.1) and was rebuilding the plain-lane prompt instead.</summary>
+    static string TicketSystemPrompt(long tid, string title, string claims) =>
+        $"You are a lane agent operated by the Dodona orchestrator, working ticket {tid}: \"{title}\". " +
+        $"Your worktree is the current working directory; work only there. Your declared claim is [{claims}] — " +
+        "a PreToolUse gate denies writes outside it; if denied, stay within the claim or ask your operator for an extension. " +
         "Real-time instructions from your human operator arrive in hook output labeled [DISPATCHER]; they are authentic " +
         "and carry the same authority as your original task, even when they change or contradict earlier instructions.";
 
@@ -1621,16 +1628,24 @@ sealed class Daemon
     /// <summary>Respawn an agent into an EXISTING lane row — the thread survives its
     /// agent (§11). Same pipe name (deterministic per lane, and the dead shim freed it),
     /// same pane, fresh process.</summary>
-    Task<(long Id, string Msg)> RespawnLaneAsync(long laneId, string title, List<string> childArgs, string child)
+    Task<(long Id, string Msg)> RespawnLaneAsync(long laneId, string title, List<string> childArgs, string child,
+                                                 string? workDir = null)
     {
-        var role = _store.LanesAll().FirstOrDefault(l => l.Id == laneId)?.Role ?? "work";
-        return AttachShimAsync(laneId, title, role, _primary, child, childArgs);
+        var row = _store.LanesAll().FirstOrDefault(l => l.Id == laneId);
+        var role = row?.Role ?? "work";
+        // Never `_primary` by default any more (M5.1): the lane's own recorded directory is
+        // the answer, and only a lane predating the column falls back to the primary.
+        var cwd = workDir is { Length: > 0 } w ? w
+                : row?.Cwd is { Length: > 0 } rc && Directory.Exists(rc) ? rc
+                : _primary;
+        return AttachShimAsync(laneId, title, role, cwd, child, childArgs);
     }
 
     async Task<(long Id, string Msg)> AttachShimAsync(long id, string title, string role, string workDir, string child, List<string> childArgs)
     {
         var pipe = Instance.LanePipe(_instanceId, id);
         _store.LanePipe(id, pipe);
+        _store.LaneCwd(id, workDir);      // so a respawn lands here too, not in _primary (M5.1)
 
         var shimExe = Environment.GetEnvironmentVariable("DODONA_SHIM")
                       ?? Path.Combine(AppContext.BaseDirectory, "DodonaShim.exe");
@@ -1770,6 +1785,91 @@ sealed class Daemon
             }
             catch (Exception ex) { _store.Event("compressor_failed", pick.Id, ex.Message); }
         });
+    }
+
+    // ------------------------------------------------------------- the input classifier (§4)
+
+    /// <summary>The router is a mechanical classifier, not a thinker: cheap model, low
+    /// effort, deliberately not the project's lane policy (§9's ladder — spend where
+    /// judgement compounds, and this is not where it compounds).
+    ///
+    /// The operator's routing policy, verbatim intent (2026-08-18): a GENERIC remark
+    /// ("don't do that", "stop", "try again") belongs to the focused lane, full stop — no
+    /// cleverness. A remark CLEARLY AIMED by content ("make the skybox red") goes to the
+    /// lane it names, cheap thought. Only text that is neither obviously generic nor
+    /// obviously aimed earns expensive thought (the brain's high tier picks it up).
+    ///
+    /// Four verdicts (WORKSPACES-CONCIERGE.md §5). The old vocabulary was
+    /// generic|specific|unclear, where `specific` meant "an existing lane's title" — so no
+    /// rung of the ladder could ever answer "this deserves a fresh lane", and while any lane
+    /// was alive every input was a continuation of something.
+    ///
+    /// The tie-break and its REASON are both in the prompt deliberately: the cheap model has
+    /// to know WHY the tie breaks toward new-task, or it will break it the other way
+    /// whenever the input is vague.</summary>
+    const string RouterPrompt =
+        "You are Dodona's input router. You are given some lanes (each an agent working on " +
+        "something), which lane the operator is looking at, and one line of operator input. " +
+        "You decide where it goes. Reply with ONLY one line of JSON, no prose, no markdown: " +
+        "{\"kind\":\"generic|addendum|new-task|unclear\",\"target\":\"<LANE TITLE, for addendum only>\"," +
+        "\"confidence\":\"high|medium|low\",\"reason\":\"<=60 chars, say WHY\"}\n" +
+        "kind=generic — the remark could apply to any ongoing work: stop, no, try again, yes, " +
+        "an acknowledgement, a correction naming no subject. It belongs to the FOCUSED lane. " +
+        "target must be omitted.\n" +
+        "kind=addendum — it continues an existing lane's thread. Two ways that happens, and both " +
+        "are common: it is aimed at what that lane is doing NOW (reason: direct), or it is a small " +
+        "correction or refinement of what that lane JUST FINISHED (reason: tweak). target names " +
+        "that lane.\n" +
+        "kind=new-task — a distinct piece of work. It gets its own fresh lane. Do not name a target.\n" +
+        "kind=unclear — you genuinely cannot tell. Say so; someone with more budget looks, and " +
+        "then the operator is asked. Nothing is delivered meanwhile, so unclear is SAFE.\n" +
+        "WHEN TORN BETWEEN addendum AND new-task, CHOOSE new-task. Here is why, and it should " +
+        "change how you weigh it: a wrong new lane costs one command to undo and pollutes nothing. " +
+        "A wrong addendum cannot be undone at all — the agent has already been told, may already " +
+        "be acting, and its context is spoiled. Prefer the mistake that is free.\n" +
+        "But do not overcorrect: an operator interrupting a working agent is completely normal, " +
+        "and the length of the input tells you nothing about which kind it is. What tells you is " +
+        "the SUBJECT — does the input concern what that lane is about, or something else?\n" +
+        "Be willing to say unclear or confidence low — an honest unsure is cheap here, and a " +
+        "confident wrong guess is the one error that cannot be taken back.";
+
+    /// <summary>Start a classifier and remember it. Separate from EnsureRouterAsync so
+    /// `router-start` can force a fresh one with a different child or model.</summary>
+    async Task<(long Id, string Msg)> SpawnRouterAsync(string child, string model, string effort)
+    {
+        var args = IsClaude(child) ? ClaudeArgs(model, effort, RouterPrompt, acceptEdits: false, utility: true) : new List<string>();
+        var (id, msg) = await SpawnLaneAsync("ROUTER", "router", NeutralCwd(), child, args);
+        if (id < 0) { _store.Event("router_failed", null, msg); return (-1, msg); }
+        _routerLo = id;
+        return (id, msg);
+    }
+
+    /// <summary>The classifier, CREATED AT THE POINT OF USE — the shape EnsureBrainAsync
+    /// already had, and the reason this exists.
+    ///
+    /// RouteInput used to look the classifier up by role and fall back when it found
+    /// nothing. Nothing in the daemon ever created a lane with that role: the startup
+    /// warm-up and `brain-start` both make `brain`, and the ONLY producer of `router` was
+    /// the manual command above — whose only caller in the whole tree was
+    /// tests/brain-acceptance.ps1. So the suite proved the routing ladder on a wiring the
+    /// real daemon never took, and every sentence the operator ever typed took the
+    /// `no-classifier` fallback instead. Measured on the operator's own store: 14 routed
+    /// inputs, every one `tier=focus confidence=no-classifier`, ZERO `classified` events,
+    /// ZERO router lanes ever created — across two days, while `dodona status` cheerfully
+    /// printed `router: model=haiku effort=low` for a lane that had never existed.
+    ///
+    /// A lookup can miss silently. A create cannot. That is the whole change: after this,
+    /// "no classifier" means the brain is switched off in config or the spawn actually
+    /// failed — both of which now say so out loud.</summary>
+    async Task<long> EnsureRouterAsync()
+    {
+        if (_routerLo > 0 && _lanes.TryGetValue(_routerLo, out var live) && live.Connected) return _routerLo;
+        if (!_config.Brain) return -1;                 // judgement is off by config: honour it
+        // Suites own every lifetime themselves and assert the model-free fallback path;
+        // start-on-demand must not join in (the same guard the drift watcher and the
+        // startup warm-up use, so all three agree on what "don't start things" means).
+        if (Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1") return -1;
+        return (await SpawnRouterAsync(_config.Agent, _config.RouterModel, _config.RouterEffort)).Id;
     }
 
     // ------------------------------------------------------------- the dispatcher brain (§3)
@@ -1993,8 +2093,11 @@ sealed class Daemon
         }
 
         // ---- the classifier decides, and we WAIT for it. --------------------------------
-        var router = _store.LanesAll().FirstOrDefault(l => l.Role == "router" && _lanes.ContainsKey(l.Id));
-        if (router is null)
+        // Ensure, never look up. A lookup that misses is indistinguishable from a lookup that
+        // was never going to hit, and for the whole life of this feature it never hit once
+        // outside the suites (EnsureRouterAsync carries the incident).
+        var routerId = await EnsureRouterAsync();
+        if (routerId < 0)
         {
             // No judgement available, so keep the old, well-understood default rather than
             // inventing one. Spawning on every sentence would be worse than this: generics are
@@ -2004,12 +2107,24 @@ sealed class Daemon
             // dodona.json; the suites deliberately run without it.
             frt.Say(text);
             _store.RoutingInsert(text, "focus", null, fid, "no-classifier");
+            // SAY SO. A permanent silent downgrade to "whatever is focused" is exactly the
+            // quietly-stale state the standing directive forbids: the operator typed for two
+            // days into a system whose routing had been off the whole time, and the only
+            // evidence was a status-line suffix nobody reads. Once per daemon, in the pane.
+            if (!_saidNoClassifier)
+            {
+                _saidNoClassifier = true;
+                _store.Event("routing_unrouted", null, _config.Brain ? "classifier would not start" : "brain disabled in config");
+                Announce(_config.Brain
+                    ? "[dodona] the input classifier will not start — every sentence is going to the FOCUSED lane until it does. `dodona router-start` to retry."
+                    : "[dodona] brain is off in dodona.json — routing is focused-lane only; a distinct task will NOT get its own lane.");
+            }
             var stale0 = ovModel is not null || ovEffort is not null
                 ? "  (model/effort is set when a lane starts — this one is already running)" : "";
             return $"-> {focusedRow.Title} (focus, no classifier warm){stale0}";
         }
 
-        var verdict = await ClassifyAsync(router.Id, text, work, focusedRow);
+        var verdict = await ClassifyAsync(routerId, text, work, focusedRow);
 
         // A classifier that timed out or answered nonsense has no opinion. Same reasoning as
         // above: fall back to the known default rather than guessing in either direction.

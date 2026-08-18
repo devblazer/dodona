@@ -84,6 +84,19 @@ try {
     $tail = Dodona @("tail", "$water", "10")
     Check 'focus_message_delivered' ($tail -match 'make the waves taller') $tail
 
+    # ---- and falling back SAYS SO. A silent permanent downgrade to "whatever is focused" is
+    # how the routing ladder stayed dead for two days on the operator's instance: the only
+    # evidence was a status-line suffix, and they typed into it believing lanes were being
+    # chosen. Never hung, halted, stuck or outdated (CLAUDE.md 0.1) covers "quietly degraded".
+    $unrouted = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+for r in db.execute('SELECT kind, detail FROM events'): print(r)
+") | Out-String
+    Check 'unrouted_fallback_is_announced' `
+        ([bool]($unrouted -match "routing_unrouted.*(classifier|brain)")) `
+        (($unrouted -split "`r?`n" | Where-Object { $_ -match 'routing_unrouted' }) -join ' ')
+
     # ---- a stale focus is not a dead end: pick a live lane and say so (§11) ----
     # (was: assert an error. Refusing to route a sentence because the focused lane no
     # longer exists is the machine asking permission to do the obvious thing.)
