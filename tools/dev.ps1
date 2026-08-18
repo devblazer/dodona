@@ -67,27 +67,31 @@ function Blockers {
         })
 }
 
-# Clear them the SANCTIONED way: ask the daemon to stop itself. `stop-all` without --lanes
-# leaves the agents up, which is the design (they survive their daemon behind their shims).
+# Report what is running from the build output. It reports; it does NOT stop anything, and
+# must not.
 #
-# Deliberately NOT pre-emptive about the rest. A process running from the build output only
-# blocks a build if MSBuild actually needs to overwrite the file it holds -- three shims
-# holding DodonaShim.exe did not stop a build that only had to replace dodona.exe. So this
-# clears the daemons, and then THE BUILD IS THE ORACLE: if it fails on a lock, Do-Build
-# names the exact holder. Predicting a block and killing 24 agents to be safe is how you
-# murder someone's live session (CLAUDE.md section 4).
-function ClearBlockers {
+# It used to run `dodona stop-all` whenever a daemon was among them. That was a machine-wide
+# daemon kill wearing the word "clear": StopAll stops every registered workspace daemon, the
+# concierge, AND every unregistered dodona-*-ctl pipe on the machine
+# (src/Dodona/Program.cs:528-536). DODONA_HOME scopes the registry but NOT the OS pipe
+# namespace, so another agent's DODONA_HOME-isolated suite daemons died with it -- fired by
+# the command CLAUDE.md section 1 tells every agent to run BEFORE STARTING WORK. `publish
+# --all` was deliberately narrowed to registry scope for exactly this reason, and
+# tests/publish-acceptance.ps1 proves it; stop-all has no suite at all. Narrowing it here
+# would only relocate the blast radius, so the call is deleted rather than scoped.
+#
+# Nothing is lost by not clearing. A process running from the build output only blocks a
+# build if MSBuild actually needs to overwrite the file it holds -- three shims holding
+# DodonaShim.exe did not stop a build that only had to replace dodona.exe. THE BUILD IS THE
+# ORACLE: if it fails on a lock, Do-Build names the exact holder and the one command that
+# frees it. Predicting a block and killing 24 agents to be safe is how you murder someone's
+# live session (CLAUDE.md section 4).
+function ReportBlockers {
     $b = Blockers
     if ($b.Count -eq 0) { Say "blockers: none"; return }
 
-    Say "in the build output: $($b.Count) process(es)"
+    Say "in the build output: $($b.Count) process(es) -- may or may not block, the build decides"
     foreach ($p in $b) { Say "  pid $($p.Id)  $($p.ProcessName)  $($p.Path)" }
-
-    if (@($b | Where-Object { $_.ProcessName -eq 'dodona' }).Count -gt 0 -and (Test-Path $dodona)) {
-        Say "clearing daemons: dodona stop-all (lane agents keep running, by design)"
-        try { & $dodona stop-all 2>&1 | ForEach-Object { Say "  $_" } } catch { Say "  stop-all failed: $_" }
-        Start-Sleep -Seconds 2
-    }
 }
 
 # ---------------------------------------------------------------- verbs
@@ -104,7 +108,8 @@ function Do-Check {
         $fromOut = @(Blockers | Where-Object { $_.ProcessName -eq 'dodona' })
         if ($fromOut.Count -gt 0) {
             Say "NOTE: a daemon is running from src\...\bin. That is what blocks builds, and it"
-            Say "      is invisible after the window closes. `dev build` clears it for you."
+            Say "      is invisible after the window closes. Nothing here stops it for you --"
+            Say "      dev build NAMES the holder; stopping it is your explicit call."
         }
     }
     $b = Blockers
@@ -116,13 +121,13 @@ function Do-Check {
     $dirty = @(git -C $repo status --porcelain)
     Say "working tree: $(if ($dirty.Count -eq 0) { 'clean' } else { "$($dirty.Count) change(s)" })"
     Say ""
-    Say "verdict: run `dev build` -- it clears what it can and names any real holder exactly."
+    Say "verdict: run `dev build` -- it names any real holder exactly, and stops nothing itself."
     Say "log: $log"
 }
 
 function Do-Build {
     Say "== build =="
-    ClearBlockers
+    ReportBlockers
     Say "building Dodona.sln -c Release ..."
     $out = & dotnet build "$repo\Dodona.sln" -c Release 2>&1
     Add-Content -Path $log -Value $out -Encoding utf8
@@ -256,7 +261,7 @@ function Do-Ship {
     Do-Build
     Do-Suites
     Say "== publish =="
-    ClearBlockers
+    ReportBlockers
     $o = & $dodona publish --project $repo --all 2>&1
     Add-Content -Path $log -Value $o -Encoding utf8
     $o | Select-Object -Last 12 | ForEach-Object { Say "  $_" }
@@ -269,7 +274,7 @@ function Do-Help {
     Say "dev.ps1 -- the only door for mechanical work here (CLAUDE.md 0.3 / 1)"
     Say ""
     Say "  check                    can this tree build? what is in the way? seconds."
-    Say "  build                    clear blockers, then build. only real errors reach you."
+    Say "  build                    build. names any holder of the output; stops nothing itself."
     Say "  test <suite> [...]       run named suite(s). isolated, self-cleaning."
     Say "  suites                   run all $((AllSuites).Count). end of a change, once."
     Say "  prove <suite> <check>    demand a new check FAILS against HEAD. do this BEFORE"

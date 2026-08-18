@@ -9,10 +9,12 @@ spikes/spike3/workspace/
 .dodona/
 .cmp3/
 
-# Per-workspace daemon logs from the workspace suite: the filename carries a GENERATED
-# workspace id, so every run would add new files forever rather than overwrite last run's.
-# The suite's other artifacts are tracked on purpose (they are what you read after a
-# failure); these are not, because they are unbounded.
-tests/*-output/daemon-*.out
-tests/*-output/daemon-*.err
+# Every suite writes here, and every suite wipes its own directory at start. 80 of these
+# files (1.94 MB of .out/.err/.png/.json/SQLite .db) were tracked, and NO suite ever reads
+# one back -- they were write-only, rewritten by every run. What that cost was legibility:
+# they were 48 of the 49 lines in `git status`, so "what did I change" had no answer, which
+# is how one session's Store.cs/Ver.cs/Daemon.cs work was swept into another session's
+# commit (f9aaf25, whose own message admits the carry). Untracked 2026-08-18. This line
+# supersedes the narrower daemon-*.out/.err pair that used to live here.
+tests/*-output/
 .claude/worktrees/

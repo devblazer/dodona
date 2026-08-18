@@ -1,9 +1,0 @@
-﻿{
-    "daemon1_killed_mid_turn":  "pid 43788, ~1s into a 6s turn",
-    "shim_alive_no_daemon":  "PASS",
-    "agent_alive_no_daemon":  "PASS",
-    "orphaned_result_landed":  "PASS",
-    "landed_exactly_once":  "PASS",
-    "session_id_recorded":  "PASS",
-    "same_agent_answers_daemon2":  "PASS"
-}

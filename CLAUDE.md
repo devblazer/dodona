@@ -112,7 +112,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | verb | what it is for |
 |---|---|
 | `check` | Can this tree build? What is in the way? Seconds. **Run it before starting work, not after.** |
-| `build` | Clears what blocks a build, then builds. Only *real* compile errors reach you. |
+| `build` | Builds. Only *real* compile errors reach you; a locked output is named, never mistaken for one. |
 | `test <suite>...` | One or more named suites. |
 | `suites` | All eleven. A **gate before committing**, never a loop — it is twenty minutes. |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. |
@@ -125,8 +125,9 @@ compile.
 Why the wrapper is mandatory rather than convenient: the raw commands hand you the wrong
 diagnosis. `dotnet build` reports a locked output file as `Build FAILED` with ten screens of
 MSB3026 retries, which reads as "your code is broken" when it means "a daemon you cannot see
-is holding a file". The wrapper clears the holder, and when it cannot, it names the pid and
-the one command that will — on line one, not at minute forty. Every run logs to
+is holding a file". The wrapper names the pid and the one command that frees it — on line
+one, not at minute forty. It stops nothing on your behalf: `stop-all` is machine-wide, so
+clearing a holder is always your explicit call (Phase 0, 2026-08-18). Every run logs to
 `.dodona\dev-logs`.
 
 **An edit that has not been built is a claim, not a change.** That has not softened; the

@@ -1,4 +1,0 @@
-2026-08-18T16:24:27.0646714Z  system      init session=fake-c553b8f1028543b4bba9a705896946ed
-2026-08-18T16:24:27.2660129Z  user_input  sleep:6 then say SURVIVED-7c5308
-2026-08-18T16:24:27.2912873Z  agent_line  working on: sleep:6 then say SURVIVED-7c5308
-2026-08-18T16:24:33.3158492Z  result      SURVIVED-7c5308

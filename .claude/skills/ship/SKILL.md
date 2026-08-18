@@ -55,9 +55,22 @@ CLAUDE.md ("Windows & PS 5.1 traps").
 ## 3. Commit
 
 ```powershell
-git add -A ; git status --short   # review what is staged — a git add -A once committed a live SQLite store
+git status --short                # FIRST: read the tree. Decide what is yours before staging anything.
+git add -- <path> [<path>...]     # explicit pathspecs, one at a time. Never `add -A`, `add .` or `commit -a`.
+git status --short                # confirm: staged = exactly your paths, nothing else
 git commit -F <message-file>      # -F, not -m: inline messages with quotes break PS 5.1
 ```
+
+**`git add -A` is banned here, and this is not caution — it is the literal mechanism of a
+real loss.** Two sessions share this checkout, so staging the whole tree stages the other
+session's uncommitted work. `f9aaf25` says so in its own message: *"Carries M5.1's lanes.cwd
+migration and its Ver.Schema bump to 8, which were in the working tree from another lane."*
+Its author reviewed the staged list *after* staging, which is exactly this line's shape:
+review that follows the irreversible act is not a control. Review first, then stage what you
+recognise.
+
+A file you did not put there is not yours to commit, even when it looks finished. Say so in
+your report and leave it in the tree — an orphan needs a decision, not a drive-by.
 
 The message says what changed, **why**, and names any incident or gotcha discovered —
 commit messages are this project's history of record (there is no other memory).
