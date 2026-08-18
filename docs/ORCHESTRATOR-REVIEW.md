@@ -431,9 +431,23 @@ with no repository at all, and `repo-init` creates one when a ticket first needs
   as tier 0, and let the dispatcher's opinion arrive behind it as a visible, undoable
   correction — renaming a lane or promoting it to a ticket after the fact, rather than
   making the operator wait on a model before anything happens.
-- **Older carried items**: the selective-compression pool (§2.2), settings-merge for
-  repositories carrying their own tracked `.claude/`, and `publish --all` verified against
-  more than one live instance.
+- **Older carried items** *(status 2026-08-18)*: the selective-compression pool — **DONE**
+  (schema v7; warm pool, fixed schema, every failure leaves the full text standing);
+  settings-merge for tracked `.claude/` — **DONE** by construction (the gate now deploys
+  to `settings.local.json`, which Claude merges over the repo's own settings, so the
+  tracked file is never touched and the repo's hooks keep running); the short unique
+  label — **DONE** for panes (repo tag, multi-repo workspaces only) and for windows
+  (shortest-unique-suffix against the picker's known projects); the quota indicator —
+  **DONE** (rate_limit_event off the wire into kv, aged honestly, amber past the CLI's own
+  threshold); lane lifecycle §3–§5 — **DONE** (land retires the agent, lanes go dormant,
+  `lane-respawn`/wake resumes the session, badge deferral, liveness clock).
+
+  Still genuinely carried: **the dispatcher session** (the big one — needs the operator's
+  input on prompt and policy, and real-model quota to develop against), and
+  **`publish --all` against multiple live instances** — deliberately untested, because
+  `--all` enumerates every ctl pipe on the machine and a test would therefore hot-swap
+  the operator's live instances; it needs an instance-scoping story before it can have a
+  suite.
 
 ### A testing lesson worth keeping
 

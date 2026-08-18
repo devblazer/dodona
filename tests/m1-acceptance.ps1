@@ -41,7 +41,12 @@ try {
     $t1 = Dodona @("ticket-create", "--title", "WATER", "--claim", "subtree:src/water")
     Check 'ticket1_created' ($t1 -match 'ticket 1 branch ticket/1') $t1
     Check 'worktree1_exists' (Test-Path "$root\.dodona\wt\t1\src\water\sim.cs")
-    Check 'gate_deployed' ((Test-Path "$root\.dodona\wt\t1\.claude\settings.json") -and (Test-Path "$root\.dodona\wt\t1\dodona-gate.ps1"))
+    # settings.LOCAL.json: merged over any tracked project settings.json, so a repo with
+    # its own .claude/ keeps its hooks and never sees a dirty tracked file in the worktree
+    Check 'gate_deployed' ((Test-Path "$root\.dodona\wt\t1\.claude\settings.local.json") -and (Test-Path "$root\.dodona\wt\t1\dodona-gate.ps1"))
+    # and a repo's own tracked settings must be untouched by gate deployment
+    Check 'tracked_settings_untouched' (-not (Test-Path "$root\.dodona\wt\t1\.claude\settings.json") -or
+        ((git -C "$root\.dodona\wt\t1" status --porcelain ".claude/settings.json" | Out-String).Trim() -eq ''))
 
     # ---- 2. overlapping claim refused at plan time (§6) ----
     $t2bad = Dodona @("ticket-create", "--title", "WATER2", "--claim", "path:src/water/sim.cs")

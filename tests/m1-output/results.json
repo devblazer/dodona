@@ -2,6 +2,7 @@
     "ticket1_created":  "PASS",
     "worktree1_exists":  "PASS",
     "gate_deployed":  "PASS",
+    "tracked_settings_untouched":  "PASS",
     "overlap_refused_at_plan_time":  "PASS",
     "disjoint_parallel":  "PASS",
     "gate_allows_inside_claim":  "PASS",

@@ -30,7 +30,9 @@ public partial class MainWindow : Window
         _instanceId = instanceId;
         InitializeComponent();
         DataContext = _vm;
-        _vm.ProjectName = Path.GetFileName(root.TrimEnd('\\', '/')) is { Length: > 0 } n ? n : root;
+        // The shortest suffix unique among the projects the picker knows: `dodona` stays
+        // `dodona`, but two folders both named `src` become `client/src` and `proj/src`.
+        _vm.ProjectName = Labels.For(root, ProjectStore.Load().Select(p => p.Path).Append(root));
         _vm.ProjectPath = root;
         Title = $"Dodona — {_vm.ProjectName}";
 

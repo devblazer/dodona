@@ -1569,16 +1569,23 @@ sealed class Daemon
         // shared info/exclude (applies to every worktree) so `git add -A` by an agent
         // can never commit them — a ticket-1 gate landing on main conflicts with every
         // other ticket's gate on rebase. (Found by the M1 acceptance test.)
-        // M2 note: repos with their OWN tracked .claude/ need merge, not exclusion.
         // The exclude file belongs to the TICKET'S repository, not the workspace.
+        //
+        // The gate lives in settings.LOCAL.json, and that is the whole answer to "what
+        // about a repo with its own tracked .claude/": Claude Code merges local settings
+        // over project settings, so the repo's tracked settings.json is never touched,
+        // never shows as modified in the worktree, and its own hooks keep running
+        // alongside the gate. Writing settings.json here used to OVERWRITE the tracked
+        // file in the working copy — info/exclude does not untrack anything, so the
+        // agent saw a dirty file it did not change and the repo lost its hooks.
         var exclude = Path.Combine(repo.Path, ".git", "info", "exclude");
         Directory.CreateDirectory(Path.GetDirectoryName(exclude)!);
         var marker = "# dodona-gate deployment files";
         if (!File.Exists(exclude) || !File.ReadAllText(exclude).Contains(marker))
-            File.AppendAllText(exclude, $"\n{marker}\n.claude/\ndodona-gate.ps1\n.dodona-bypass.log\n");
+            File.AppendAllText(exclude, $"\n{marker}\n.claude/settings.local.json\ndodona-gate.ps1\n.dodona-bypass.log\n");
 
         Directory.CreateDirectory(Path.Combine(worktree, ".claude"));
-        File.WriteAllText(Path.Combine(worktree, ".claude", "settings.json"), """
+        File.WriteAllText(Path.Combine(worktree, ".claude", "settings.local.json"), """
             {
               "hooks": {
                 "PreToolUse": [
