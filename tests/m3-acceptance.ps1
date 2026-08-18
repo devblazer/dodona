@@ -129,6 +129,50 @@ print(db.execute('SELECT undone FROM routing_decisions ORDER BY id DESC LIMIT 1'
 ") | Out-String
     Check 'undo_route_retracts' ($tail -match 'Disregard' -and $undone.Trim() -eq '1') "undone=$($undone.Trim()) tail=$tail"
 
+    # ---- M5.1: a respawned TICKET lane comes back in its WORKTREE ----
+    # This is the bug that made the whole M5 plan urgent. RespawnLaneAsync hardcoded
+    # `_primary` and always rebuilt the PLAIN-lane system prompt, so a ticket agent that was
+    # respawned -- by `lane-respawn`, or by the wake path after a night -- came back running
+    # in the operator's live working copy while still being told "your worktree is the
+    # current working directory; work only there". A gated agent, resumed, editing main's
+    # tree.
+    #
+    # Two things this check learned the hard way, both of which made the FIRST draft of it
+    # pass against the unfixed binary:
+    #   1. `lane-respawn` REFUSES a lane whose agent is still connected, so the naive version
+    #      respawned nothing and then happily asserted on the ORIGINAL ticket-agent spawn
+    #      event -- whose cwd is the worktree either way. Stop the agent first.
+    #   2. Asserting only on "the newest shim_spawned row" cannot tell a fresh spawn from an
+    #      old one. Capture the row id first and require a NEWER one, or the check cannot fail.
+    # Placed BEFORE the land below on purpose: landing prunes the worktree, after which
+    # falling back to the primary is the only correct answer, so the open-ticket window is
+    # the only place the interesting claim exists at all.
+    $spawnsBefore = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+r = db.execute('SELECT MAX(id) FROM events WHERE kind=? AND lane_id=?', ('shim_spawned', $waterLane)).fetchone()
+print(0 if r is None or r[0] is None else r[0])
+") | Out-String
+    Dodona @("lane-stop", "$waterLane") | Out-Null
+    Start-Sleep -Milliseconds 900
+    Dodona @("lane-respawn", "$waterLane") | Out-Null
+    Start-Sleep -Milliseconds 1200
+    $spawn = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+r = db.execute('SELECT id, detail FROM events WHERE kind=? AND lane_id=? ORDER BY id DESC LIMIT 1', ('shim_spawned', $waterLane)).fetchone()
+print('|' if r is None else str(r[0]) + '|' + r[1])
+") | Out-String
+    $spawnId = [int]($spawn.Trim() -split '\|', 2)[0]
+    $spawnDetail = ($spawn.Trim() -split '\|', 2)[1]
+    Check 'respawn_actually_respawned' `
+        ($spawnId -gt [int]$spawnsBefore.Trim()) "before=$($spawnsBefore.Trim()) after=$spawnId"
+    $wantCwd = "cwd=$root\.dodona\wt\t1"
+    Check 'respawned_ticket_lane_returns_to_its_worktree' `
+        ($spawnDetail.EndsWith($wantCwd)) "want '$wantCwd' got '$spawnDetail'"
+    Check 'respawned_ticket_lane_is_not_in_the_live_tree' `
+        (-not $spawnDetail.EndsWith("cwd=$root")) $spawnDetail
+
     # ---- landing retires the agent, the lane survives, wake resumes it ----
     # (docs/LANE-LIFECYCLE.md §3: the prune deletes the directory the agent stands in, so
     # an agent left running there was the most confusing state the system could be in.)
