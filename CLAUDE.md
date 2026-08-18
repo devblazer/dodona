@@ -23,7 +23,7 @@ If you learn something load-bearing mid-task, put it in one of those places *in 
 commit as the work*. A lesson that lives anywhere else is a lesson the next session
 re-learns the expensive way.
 
-### 0.0 Work in a tree of your own — and the repo now refuses otherwise
+### 0.0 Work in a tree of your own — and git refuses commits from the shared one
 
 **The shared checkout is a source of truth, not a workspace.** Every session works in its own
 git worktree:
@@ -33,31 +33,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 worktree <name
 # -> .claude\worktrees\<name>, its own bin and obj, cd there and work
 ```
 
-This is **enforced in two layers**, not requested (RECOVERY-PHASES §5 D-7 — and the reason it
-is not merely written here is that a written rule is exactly what D-6 forbids):
-
-- **layer 1** — a `PreToolUse` hook refuses any Edit/Write into the main checkout, and its
-  refusal prints the `dev worktree` command. Registered in the tracked `.claude/settings.json`.
-- **layer 2** — `.git/hooks/pre-commit` aborts any commit made *from* the main checkout. Git
-  runs it itself, so it catches what layer 1 cannot see: a heredoc, `sed`, a shell redirect.
-  `tools/dev.ps1` reinstalls it on every run — never edit `.git/hooks/pre-commit` by hand,
-  edit `.claude/hooks/pre-commit` and let the next `dev` command deploy it.
-
 Why, in one line: `f9aaf25` committed another lane's `lanes.cwd` migration along with its own
-routing fix, because both sat in one working tree and `git add` cannot tell whose edit is
-whose.
+routing fix, because both sat in one working tree and `git add` cannot tell whose edit is whose.
 
-**The one override, and it is a choice rather than a wall** (§0.1): `DODONA_ALLOW_MAIN_TREE=1`
-lifts both layers, for when the shared checkout genuinely is the right place — a release
-commit, installing the hooks themselves.
+**One lock, at the moment that matters.** A `pre-commit` hook aborts any commit made *from* the
+shared checkout. Git runs it itself, so no tool choice evades it — a heredoc, `sed` and a shell
+redirect are all caught, because they all have to reach a commit eventually.
+`DODONA_ALLOW_MAIN_TREE=1` lifts it for a deliberate exception, such as a release commit.
 
-**The limit, stated plainly:** this binds AGENTS — the Edit/Write/Bash tools and `git
-commit` — not a human with a text editor, and not a process that writes files by some other
-route. The incident was agent-caused, so that is the right scope; it is a scope, not a
-guarantee. `dev gate` asserts both layers are still alive, because an enforcement that quietly
-stops enforcing is the failure mode this project keeps paying for (§3's dead routing ladder,
-and layer 1 itself spent part of the session it was written in unparseable and therefore
-denying nothing).
+`.githooks/pre-commit` is the tracked, reviewable source; **`tools/dev.ps1` copies it into
+`.git/hooks/` on every run**, because `.git` is never cloned and an install step someone must
+remember is not enforcement. Never edit the copy — edit `.githooks/pre-commit` and let the next
+`dev` command deploy it. **Do not switch this to `core.hooksPath`**: it was tried, and a commit
+from the shared checkout then succeeded, because a tracked hooks directory only exists on
+branches that carry it — so it silently vanishes on every other branch and on every historical
+commit you check out while bisecting. The copy is branch-independent, which is the property that
+matters.
+
+**There were two locks, and the second one was deleted — measured, not argued.** A `PreToolUse`
+hook also refused Edit/Write into the shared checkout. It cost **255 ms on every edit** (136 ms
+of that is merely starting PowerShell), and a sibling hook banning `git add -A` cost the same on
+**every shell command**: a permanent tax on all work, for rules that should fire approximately
+never. It could not see a shell redirect either, so it was never a guarantee. And what it
+guarded is now structural — once each session has its own tree, a broad `git add` can only
+sweep up that session's own files, so the `f9aaf25` mechanism is prevented by the separation
+itself. Do not reintroduce a per-edit hook for this; the commit-time refusal is the boundary.
+
+**The limit, stated plainly:** this binds anything that reaches a **commit**, which is every
+agent and every human alike — but it does not stop a stray edit before then. That is deliberate:
+the edit is recoverable, the commit is what carried someone else's work into history. `dev gate`
+asserts the hook is both present and wired, because an enforcement that quietly stops enforcing
+is the failure this project keeps paying for (§3's dead routing ladder, and the first version of
+this very lock, which spent part of the session it was written in unable to parse — denying
+nothing while looking installed).
 
 ## 0.1 How the operator works (previously unwritten)
 

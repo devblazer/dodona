@@ -1,17 +1,33 @@
 #!/bin/sh
 # Dodona enforcement layer 2: git itself refuses a commit made from the SHARED CHECKOUT.
 #
-# Source of truth for this file is .claude/hooks/pre-commit (tracked). tools/dev.ps1 copies
-# it into the repository's .git/hooks/ on every run, because .git/hooks is not versioned and
-# an install step someone has to remember is not enforcement (CLAUDE.md 0.3 / D-6). That is
-# the same reason DeployGate writes .git/info/exclude rather than asking.
+# This file is the tracked, reviewable SOURCE. tools/dev.ps1 copies it into the repository's
+# common .git/hooks on every run, because .git/hooks is not versioned and an install step
+# someone has to remember is not enforcement (CLAUDE.md 0.3 / D-6). Same move DeployGate makes
+# with .git/info/exclude: deploy it, do not ask.
 #
-# WHY A SECOND LAYER. Layer 1 (.claude/hooks/no-main-tree.ps1) is a PreToolUse hook, so it
-# binds the Edit/Write tools and nothing else: a heredoc, sed, or a shell redirect writes
-# into the shared checkout without ever consulting it. Git runs THIS with no agent
-# cooperation at all, at the boundary where the damage actually became permanent -- f9aaf25
-# was a COMMIT that carried another lane's work, not an edit. Gate plus backstop, the same
-# pair as the claim gate and the merge-time diff (design 6).
+# `git config core.hooksPath .githooks` looks like the better answer and was implemented, then
+# MEASURED FAILING: a commit from the shared checkout succeeded against it. The hooks directory
+# is TRACKED, so it only exists on branches and commits that carry it -- every other branch, and
+# every historical commit you check out while bisecting, silently has no hook at all. A lock
+# that disappears when you change branches is worse than a copy in .git. The copy is
+# branch-independent, which is the property that matters here.
+#
+# WHY THIS IS THE ONLY LOCK. There was a second: a PreToolUse hook refusing Edit/Write into
+# the shared checkout, plus a sibling refusing `git add -A`. Both were removed, on measurement
+# rather than argument. They cost 255 ms on EVERY edit and EVERY shell command (136 ms of that
+# is merely starting PowerShell) -- a permanent tax on all work for rules that should fire
+# approximately never -- and they could not see a heredoc, sed or a redirect anyway, so they
+# were never a guarantee.
+#
+# What they guarded is now structural: once every session works in its OWN worktree, a broad
+# `git add` can only stage that session's own files. The mechanism behind f9aaf25 -- two
+# sessions sharing one working tree, `git add` unable to tell whose edit was whose -- is
+# prevented by the separation itself.
+#
+# So: CLAUDE.md 0.0 says where to work, and THIS refuses the one act that makes a mistake
+# permanent. Git runs it with no agent cooperation, no choice of tool evades it, and it costs
+# about 40 ms once per commit.
 #
 # THE TEST, same stateless one as layer 1: git leaves `.git` as a FILE in a worktree and a
 # DIRECTORY in the main checkout. No registry, no lock, nothing that can go stale or jam.

@@ -1,6 +1,6 @@
 using System.IO;                 // explicit: this file also compiles into the WPF project,
                                  // whose implicit usings are narrower than the console one's
-using System.Reflection;         // AssemblyInformationalVersionAttribute -- the build's provenance
+using System.Reflection;         // AssemblyMetadataAttribute -- the build's provenance
 
 namespace Dodona;
 
@@ -130,45 +130,42 @@ static class Ver
     /// image that cannot say what it was built from now says so out loud instead, and the
     /// watcher refuses to guess.
     ///
-    /// Format, after the '+' of InformationalVersion. Written by <see cref="Stamp"/> and read
-    /// here, so the two can never drift apart:
-    /// <code>
-    ///   c=&lt;sha&gt;~d=&lt;0|1&gt;~m=&lt;mainSha&gt;~b=&lt;branch&gt;
-    /// </code>
-    /// TILDE, and not a comma, MEASURED THE HARD WAY: the dotnet CLI splits a <c>-p:k=v</c>
-    /// value on commas, so a comma-separated stamp arrived as <c>c=&lt;sha&gt;</c> with
-    /// everything after the first comma silently dropped -- trial detection and the main
-    /// baseline both gone, with no error anywhere. Git forbids <c>~</c> in a ref name
-    /// (git-check-ref-format), so it cannot collide with a branch either, which is what lets
-    /// <c>b=</c> sit LAST and run to the end of the string.
+    /// Each fact is its OWN named assembly-metadata entry, written by Directory.Build.props
+    /// from properties publish passes in. Nothing else writes those keys, each value is one
+    /// plain token, and there is no combined string -- so there is no format and no parser.
+    /// Directory.Build.props records what the first attempt (sharing
+    /// AssemblyInformationalVersion with the SDK) cost, and why this shape has none of it.
     ///
-    /// A build with no <c>c=</c> has NO Dodona provenance, and every consumer must treat that
-    /// as "unknown", never as "behind". That check is deliberately for OUR marker rather than
-    /// merely for a non-empty suffix: the .NET SDK puts a bare commit SHA there by itself, and
-    /// mistaking it for provenance would look like an answer while saying nothing about which
-    /// branch, which baseline, or whether the tree was clean.
+    /// A build with no <c>DodonaCommit</c> has NO provenance -- a plain <c>dev build</c>, or
+    /// <c>publish --exe</c> of a prebuilt binary. Every consumer must treat that as "unknown",
+    /// never as "behind": the old code silently DEGRADED to an mtime compare in exactly that
+    /// case, which is the loop-prone bug wearing a fallback.
     /// </summary>
-    public static string Provenance { get; } = ReadProvenance();
+    static readonly Dictionary<string, string> _meta = ReadMetadata();
+
+    /// <summary>Human-readable dump of what this build knows about itself; empty when nothing.</summary>
+    public static string Provenance =>
+        Commit.Length == 0 ? "" : $"commit={Commit} main={MainBaseline} dirty={(Dirty ? "1" : "0")} branch={Branch}";
 
     /// <summary>The commit this build was made from; empty when unknown.</summary>
-    public static string Commit => Field("c");
+    public static string Commit => Meta("DodonaCommit");
 
     /// <summary>Where <c>main</c> stood when this build was made. For a main build that is the
     /// same as <see cref="Commit"/>; for a TRIAL it is the baseline the trial was cut against,
     /// which is what lets "the next commit to main replaces the trial" (P2.5) work without any
     /// remembered state: the binary carries its own baseline, so nothing survives a handoff
     /// wrongly and nothing has to be reset.</summary>
-    public static string MainBaseline => Field("m") is { Length: > 0 } m ? m : Commit;
+    public static string MainBaseline => Meta("DodonaMainSha") is { Length: > 0 } m ? m : Commit;
 
     /// <summary>The branch this build was made from; empty when unknown.</summary>
-    public static string Branch => Field("b");
+    public static string Branch => Meta("DodonaBranch");
 
     /// <summary>Was the tree dirty when this was built? Then the SHA does not fully describe
     /// the binary, and saying <c>build=&lt;sha&gt;</c> alone would be a small lie.</summary>
-    public static bool Dirty => Field("d") == "1";
+    public static bool Dirty => Meta("DodonaDirty") == "1";
 
     /// <summary>A build whose commit is not <c>main</c> -- a deliberate trial (P2.5/D-1).</summary>
-    public static bool IsTrial => Commit.Length > 0 && Field("m") is { Length: > 0 } m && m != Commit;
+    public static bool IsTrial => Commit.Length > 0 && Meta("DodonaMainSha") is { Length: > 0 } m && m != Commit;
 
     /// <summary>True when this image cannot say what commit it came from.</summary>
     public static bool NoProvenance => Commit.Length == 0;
@@ -190,40 +187,19 @@ static class Ver
 
     public static string Short(string sha) => sha.Length >= 12 ? sha.Substring(0, 12) : sha;
 
-    /// <summary>Build the provenance value publish stamps in. Lives beside the reader on
-    /// purpose: both sides of this question need the identical definition, which is the one
-    /// thing the old mtime comparison never had.</summary>
-    public static string Stamp(string commit, string mainSha, string branch, bool dirty) =>
-        $"c={commit}~d={(dirty ? "1" : "0")}~m={mainSha}~b={branch}";
-
-    static string ReadProvenance()
+    static Dictionary<string, string> ReadMetadata()
     {
+        var d = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {
-            var iv = typeof(Ver).Assembly
-                .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-            if (string.IsNullOrEmpty(iv)) return "";
-            var plus = iv.IndexOf('+');
-            var suffix = plus >= 0 && plus + 1 < iv.Length ? iv.Substring(plus + 1) : "";
-            // Only OUR stamp counts. The SDK writes a bare SHA here on its own.
-            return suffix.StartsWith("c=", StringComparison.Ordinal) ? suffix : "";
+            foreach (var a in typeof(Ver).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>())
+                if (a.Key is { Length: > 0 } k && a.Value is { Length: > 0 } v) d[k] = v;
         }
-        catch { return ""; }      // an unreadable attribute is "unknown", never a crash
+        catch { /* an unreadable attribute is "unknown", never a crash */ }
+        return d;
     }
 
-    /// <summary>Pull one field out of the provenance string. <c>b</c> runs to the end.</summary>
-    static string Field(string key)
-    {
-        var prov = Provenance;
-        if (prov.Length == 0) return "";
-        var needle = key + "=";
-        var i = prov.StartsWith(needle, StringComparison.Ordinal) ? 0 : prov.IndexOf("~" + needle, StringComparison.Ordinal);
-        if (i < 0) return "";
-        var from = (i == 0 ? 0 : i + 1) + needle.Length;
-        if (key == "b") return prov.Substring(from);          // b= runs to the end: git forbids ~ in a ref
-        var sep = prov.IndexOf('~', from);
-        return sep < 0 ? prov.Substring(from) : prov.Substring(from, sep - from);
-    }
+    static string Meta(string key) => _meta.TryGetValue(key, out var v) ? v : "";
 
     static string Compute()
     {

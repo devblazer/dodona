@@ -120,8 +120,8 @@ commit instead of a timestamp.
 
 | item | what |
 |---|---|
-| P2.1 | ~~CLAUDE.md §0 names worktrees the **only** supported way to run two sessions.~~ **SUPERSEDED BY §5 D-7**: naming it in prose is the shape D-6 forbids. Implemented instead as two enforcement layers — a `PreToolUse` hook that refuses writes to the main checkout, and a `pre-commit` hook that refuses commits from it — plus `dev worktree <name>` and one deliberate override. |
-| P2.2 | `PreToolUse` hook in `.claude/settings.json` denying `git add -A`, `git add .`, `git commit -a`, with a message naming the substitute. The repo already knows how to write this file — `DeployGate` generates one at [Daemon.cs:2457](../src/Dodona/Daemon.cs#L2457) — and CLAUDE.md §7 records the measurement that PreToolUse hooks still fire under `bypassPermissions`. |
+| P2.1 | ~~CLAUDE.md §0 names worktrees the **only** supported way to run two sessions.~~ **SUPERSEDED BY §5 D-7**: naming it in prose is the shape D-6 forbids. Implemented as a tracked `pre-commit` hook that refuses commits from the shared checkout, plus `dev worktree <name>` and one deliberate override. A per-edit `PreToolUse` hook was tried and removed — 255 ms on every operation for a rule the tree separation already makes structural. |
+| P2.2 | ~~`PreToolUse` hook denying `git add -A`, `git add .`, `git commit -a`.~~ **DROPPED, see §5 D-7**: with one tree per session a broad `git add` can only stage your own files, so the hook taxed every shell command (255 ms) to prevent something the separation already prevents. `/ship` uses explicit pathspecs (P0.4), and that remains the house rule. |
 
 ### 2b — `main` is the only thing that publishes itself
 
@@ -357,32 +357,49 @@ Recorded with the reason, in the style of `docs/LANE-LIFECYCLE.md` §2.
   outcome: *"passes against HEAD because HEAD already contains the change"*, distinct from
   *"vacuous"*.
 
-- **D-7. Per-session trees are ENFORCED, not documented.** *(operator + session, 2026-08-18)*
+- **D-7. Per-session trees are enforced AT THE COMMIT, not at the edit.** *(operator + session,
+  2026-08-18, revised 2026-08-19)*
   P2.1 as written said CLAUDE.md §0 would name worktrees "the only supported way to run two
-  sessions". That is a documentation line, which is precisely the shape **D-6** forbids — and
-  the failure it guards has already happened once: `f9aaf25` carried another lane's
-  `lanes.cwd` migration and `Ver.cs` edits into an unrelated routing fix, because two sessions
-  shared one checkout and `git add` cannot tell whose edit is whose. A sentence would not have
-  stopped that. So P2.1 is superseded by **two layers**, the same doctrine as the claim gate
-  plus the merge backstop (design §6):
+  sessions". That is a documentation line, the shape **D-6** forbids — and the failure it guards
+  already happened: `f9aaf25` carried another lane's `lanes.cwd` migration and `Ver.cs` edits
+  into an unrelated routing fix, because two sessions shared one checkout. So P2.1 is superseded
+  by enforcement: **a `pre-commit` hook refuses any commit whose worktree is the main checkout.**
+  `.githooks/pre-commit` is the tracked, reviewable source and `tools/dev.ps1` copies it into
+  `.git/hooks/` on every run, since `.git` is never cloned. `dev worktree <name>` makes compliance five seconds, and
+  `DODONA_ALLOW_MAIN_TREE=1` is the deliberate override — an enforcement with no escape is a new
+  way to be stuck (CLAUDE.md §0.1).
 
-  1. **layer 1** — a `PreToolUse` hook (`.claude/hooks/no-main-tree.ps1`, registered in the
-     tracked `.claude/settings.json`) denies any Edit/Write whose target is inside the main
-     checkout. One stateless test: git leaves `.git` a **FILE** in a worktree and a
-     **DIRECTORY** in the main checkout — no registry, no lock, nothing that can go stale.
-  2. **layer 2** — `.git/hooks/pre-commit` aborts any commit whose worktree is the main
-     checkout. Git runs it with no agent cooperation, at the boundary where the damage becomes
-     permanent. `tools/dev.ps1` installs it on **every** run, the way `DeployGate` deploys to
-     `.git/info/exclude`, because an install step someone must remember is not enforcement.
+  **The first attempt had a second layer and it was wrong, which is recorded here so it is not
+  re-proposed.** A `PreToolUse` hook refused Edit/Write into the shared checkout, and a sibling
+  refused `git add -A`. Measured: **255 ms per edit** and 255 ms per **shell command** (136 ms of
+  which is just PowerShell starting) — a permanent tax on every operation for rules that should
+  fire almost never. It also could not see a heredoc, `sed` or a redirect, so it was never a
+  guarantee. Decisive argument: **once each session has its own tree, a broad `git add` can only
+  stage that session's own files** — the `f9aaf25` mechanism is prevented by the separation, not
+  by intercepting edits. One lock, at the boundary where a mistake becomes permanent, for 40 ms
+  once per commit.
 
-  `dev worktree <name>` makes compliance five seconds, and layer 1's refusal names that exact
-  command. `DODONA_ALLOW_MAIN_TREE=1` is the one deliberate override, named in both refusals:
-  an enforcement with no escape is a new way to be stuck, which is the standing directive
-  (CLAUDE.md §0.1) violated in a fresh costume.
+  **`core.hooksPath` was tried instead of the copy, and measured failing** — recorded because it
+  is the obvious-looking improvement and will be proposed again. Pointing git at the tracked
+  `.githooks/` makes the enforcing file reviewable and versioned instead of a copy inside `.git`,
+  which is a real gain. But a commit from the shared checkout then **succeeded**: a tracked hooks
+  directory exists only on branches and commits that carry it, so it silently disappears on every
+  other branch and on every historical commit checked out while bisecting — which this phase's
+  provenance work exists to enable. The copy in `.git/hooks` is branch-independent, and that is
+  the property the lock depends on. The cost is real and accepted: the file doing the enforcing
+  lives where nobody diffs it, and a pre-existing foreign hook can only be warned about. `dev
+  gate` compares the deployed copy byte for byte against the tracked source and asserts
+  `core.hooksPath` is unset, because "a file exists" passed through both failures.
 
-  **The scope, stated rather than papered over:** this binds AGENTS — the Edit/Write/Bash
-  tools and `git commit` — not a human with a text editor. The incident was agent-caused, so
-  that is the right scope, but it is a scope and not a guarantee.
+  **A hook that must be reliable should be a compiled subcommand, not a script.** Recorded as
+  the direction for the claim gate (design §6), which is load-bearing and cannot be deleted: a
+  syntax error in a generated `.ps1` is a silent runtime no-op, where the same mistake in
+  `dodona.exe` is a loud build failure. It is also one process instead of two — the claim gate
+  currently spawns PowerShell, which then spawns `dodona claim-check` anyway.
+
+  **The scope, stated rather than papered over:** this binds anything that reaches a commit,
+  agent or human, but it does not stop an edit before then. The edit is recoverable; the commit
+  is what put another lane's work into history.
 
 - **D-6. A documented warning is not a fix.** Reason: CLAUDE.md §3.1 documented "a daemon
   outlives its window and the operator believes the machine is idle", and the identical

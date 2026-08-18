@@ -107,25 +107,11 @@ function ReportBlockers {
     foreach ($p in $b) { Say "  pid $($p.Id)  $($p.ProcessName)  $($p.Path)" }
 }
 
-# ---------------------------------------------------------------- enforcement layer 2
+# ---------------------------------------------------------------- the commit guard
 
-# Install .claude/hooks/pre-commit into the repository's real hooks directory.
-#
-# Runs on EVERY dev invocation, on purpose. .git/hooks is not versioned, so a tracked hook
-# file is inert until something copies it -- and an install step a person has to remember is
-# not enforcement, it is a documented warning wearing a filename (CLAUDE.md 0.3, D-6). This
-# is the same move DeployGate makes with .git/info/exclude: deploy it, do not ask.
-#
-# PER-REPOSITORY, never `git config --global core.hooksPath`. All 11 suites build temp repos
-# and run `git commit -m init` inside them, and every one of those is a main checkout -- a
-# global install would refuse all of them and turn the whole suite red. Checked before
-# writing this.
-#
-# Quiet when already correct: a line on every `dev check` would be noise, and noise is how a
-# real line gets skipped.
-# The MAIN checkout, whichever tree is asking. $repo is $PSScriptRoot's parent, which inside
-# a worktree is the WORKTREE -- so anything that must be repo-wide (where worktrees live, what
-# the shared checkout IS) has to come from the git COMMON dir instead.
+# The MAIN checkout, whichever tree is asking. $repo is $PSScriptRoot's parent, which inside a
+# worktree is the WORKTREE -- so anything that must be repo-wide (where worktrees live, what the
+# shared checkout IS) has to come from the git COMMON dir instead.
 function MainCheckout {
     $common = (& git -C $repo rev-parse --git-common-dir 2>$null)
     if ($LASTEXITCODE -ne 0 -or -not $common) { return $null }
@@ -133,59 +119,55 @@ function MainCheckout {
     return (Split-Path -Parent ([System.IO.Path]::GetFullPath($common)))
 }
 
-# Every hook script must PARSE. This is not a nicety: a .ps1 that fails to parse runs nothing,
-# emits a parse error, and exits non-zero -- which for a PreToolUse hook means it denies
-# NOTHING while still sitting there looking installed. It happened while writing layer 1: one
-# line of the refusal text ended in a backtick, PowerShell's escape character, which swallowed
-# the here-string terminator. The hook was dead and the only symptom was a parse error nobody
-# was reading (CLAUDE.md 0.2, and section 3's rule that a silent degrade is a bug).
-function Test-HookParses([string]$file) {
-    $e = $null
-    $null = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$e)
-    if ($e -and $e.Count -gt 0) { return $e[0].Message }
-    return $null
-}
-
+# Deploy .githooks\pre-commit into the repository's real hooks directory, so committing from the
+# shared checkout is refused (D-7).
+#
+# Runs on EVERY dev invocation, on purpose. .git\hooks is not versioned, so a tracked hook file
+# is inert until something copies it, and an install step a person has to remember is not
+# enforcement (CLAUDE.md 0.3, D-6). Same move DeployGate makes with .git\info\exclude.
+#
+# WHY A COPY AND NOT core.hooksPath, WHICH WAS TRIED AND MEASURED FAILING. Pointing git at the
+# tracked directory is git's own mechanism and looks obviously better -- the hook is then a
+# reviewable versioned file rather than a copy inside .git. It was implemented, and then a commit
+# from the shared checkout SUCCEEDED against it. The reason is the whole objection to it: the
+# hooks directory is TRACKED, so it exists only on branches and commits that carry it. Any other
+# branch, and every historical commit checked out while bisecting -- which this phase's
+# commit-provenance work exists to make possible -- silently has no hook at all.
+#
+# So .githooks\pre-commit stays the tracked, reviewable SOURCE and this deploys it into the
+# common .git\hooks, which is branch-independent. Any leftover core.hooksPath is cleared, because
+# git honours that setting and would ignore the copy.
+#
+# Quiet when already correct: a line on every `dev check` would be noise, and noise is how a real
+# line gets skipped.
 function Install-Hooks {
-    $marker = 'Dodona enforcement layer 2'
-    $src = "$repo\.claude\hooks\pre-commit"
-
-    # Layer 1's scripts are registered in .claude/settings.json and run by the harness, not by
-    # this script -- so this is the only place that ever looks at them. Check them here.
-    foreach ($h in @(Get-ChildItem "$repo\.claude\hooks\*.ps1" -ErrorAction SilentlyContinue)) {
-        $err = Test-HookParses $h.FullName
-        if ($err) {
-            Say "WARNING: $($h.Name) DOES NOT PARSE -- it is enforcing nothing: $err"
-        }
-    }
-
+    $src = "$repo\.githooks\pre-commit"
     if (-not (Test-Path $src)) { return }        # a checkout that predates the hook
 
-    # A worktree's hooks live in the COMMON dir, shared with the main checkout -- which is
-    # exactly what we want: one install covers every session's worktree. If the repo sets
-    # core.hooksPath, .git\hooks is ignored by git, so installing there would be a silent
-    # no-op. Follow the setting instead of quietly doing nothing.
-    $hooksPath = (& git -C $repo config --get core.hooksPath 2>$null)
-    if ($LASTEXITCODE -eq 0 -and $hooksPath) {
-        $dir = if ([System.IO.Path]::IsPathRooted($hooksPath)) { $hooksPath } else { Join-Path $repo $hooksPath }
-    }
-    else {
-        $common = (& git -C $repo rev-parse --git-common-dir 2>$null)
-        if ($LASTEXITCODE -ne 0 -or -not $common) { return }
-        if (-not [System.IO.Path]::IsPathRooted($common)) { $common = Join-Path $repo $common }
-        $dir = Join-Path $common 'hooks'
+    $hp = (& git -C $repo config --get core.hooksPath 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $hp) {
+        & git -C $repo config --unset core.hooksPath 2>&1 | ForEach-Object { Add-Content -Path $log -Value $_ -Encoding utf8 }
+        Say "cleared core.hooksPath ('$hp') -- it vanishes on any branch without that directory"
     }
 
+    # A worktree's hooks live in the COMMON dir, shared with the main checkout, which is exactly
+    # what we want: one install covers every session's worktree.
+    $common = (& git -C $repo rev-parse --git-common-dir 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $common) { return }
+    if (-not [System.IO.Path]::IsPathRooted($common)) { $common = Join-Path $repo $common }
+    $dir = Join-Path $common 'hooks'
     $dst = Join-Path $dir 'pre-commit'
+
+    $marker = 'Dodona enforcement'
     $want = [System.IO.File]::ReadAllText($src)
     if (Test-Path $dst) {
         $have = [System.IO.File]::ReadAllText($dst)
         if ($have -eq $want) { return }                                  # already current
         if ($have -notmatch [regex]::Escape($marker)) {
-            # Never clobber somebody else's hook silently. Say it every run: an unenforced
-            # layer 2 that nobody mentions is the silent degrade CLAUDE.md 3 calls a bug.
-            Say "WARNING: $dst exists and is not Dodona's -- layer 2 is NOT installed."
-            Say "         Merge .claude\hooks\pre-commit into it by hand, or move it aside."
+            # Never clobber somebody else's hook silently, and say it EVERY run: an unenforced
+            # lock nobody mentions is the silent degrade CLAUDE.md section 3 calls a bug.
+            Say "WARNING: $dst exists and is not Dodona's -- commits from the shared checkout are NOT refused."
+            Say "         Merge .githooks\pre-commit into it by hand, or move it aside."
             return
         }
     }
@@ -195,7 +177,7 @@ function Install-Hooks {
     $w.NewLine = "`n"
     $w.Write($want.Replace("`r`n", "`n"))
     $w.Close()
-    Say "installed enforcement layer 2: $dst"
+    Say "deployed the commit guard: $dst"
 }
 
 # ---------------------------------------------------------------- verbs
@@ -617,121 +599,34 @@ function Do-Gate {
         }
     }
 
-    # ENFORCEMENT IS ALIVE. Not one of RECOVERY-PHASES section 2's eight rows -- it is Phase
-    # 2a's own guard against the failure that phase is built on: an enforcement that stops
-    # enforcing without saying so. The routing ladder was fully covered, fully green and DEAD
-    # IN PRODUCTION for two days (CLAUDE.md section 3), and layer 1 spent part of this session
-    # in exactly that state: a backtick swallowed a here-string terminator, the hook stopped
-    # parsing, and it denied nothing while still being registered. So the gate asks the hook
-    # the real question, through the real code path, and demands both answers.
-    $hook = "$repo\.claude\hooks\no-main-tree.ps1"
-    $main = MainCheckout
-    if (-not (Test-Path $hook) -or -not $main) {
-        Say "  FAIL  D-7 layer 1 hook not found ($hook)"
-        $bad++
-    }
-    else {
-        $perr = Test-HookParses $hook
-        if ($perr) {
-            Say "  FAIL  D-7 layer 1 does not parse, so it denies nothing: $perr"
-            $bad++
-        }
-        else {
-            # A real worktree is needed for the counter-case, because the test walks up to the
-            # nearest .git and a made-up path would walk up into the main checkout and be
-            # refused -- which would look like a pass for the wrong reason. --no-checkout keeps
-            # it instant: the .git FILE is all this needs.
-            $wtL = Join-Path $env:TEMP ("dodona-gate-l1-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
-            $madeL = $false
-            try {
-                & git -C $repo worktree add --detach --no-checkout $wtL HEAD 2>&1 | ForEach-Object { Add-Content -Path $log -Value $_ -Encoding utf8 }
-                $madeL = ($LASTEXITCODE -eq 0)
-
-                function Ask-Hook([string]$path) {
-                    $payload = @{ tool_name = 'Edit'; tool_input = @{ file_path = $path } } | ConvertTo-Json -Compress -Depth 5
-                    return ($payload | & powershell -NoProfile -ExecutionPolicy Bypass -File $hook 2>&1 | Out-String)
-                }
-
-                $denied = Ask-Hook (Join-Path $main 'src\Dodona\Ver.cs')
-                $allowed = if ($madeL) { Ask-Hook (Join-Path $wtL 'src\Dodona\Ver.cs') } else { 'NO WORKTREE' }
-
-                $okDeny = $denied -match '"permissionDecision"\s*:\s*"deny"'
-                $okAllow = $madeL -and ($allowed.Trim().Length -eq 0)
-                if ($okDeny -and $okAllow) {
-                    Say "  PASS  D-7  layer 1 refuses a write to the shared checkout, allows one in a worktree"
-                }
-                else {
-                    Say "  FAIL  D-7  layer 1 is not enforcing:"
-                    if (-not $okDeny) { Say "          shared checkout was NOT denied; hook said: $($denied.Trim())" }
-                    if (-not $okAllow) { Say "          worktree was NOT allowed; hook said: $($allowed.Trim())" }
-                    $bad++
-                }
-            }
-            finally {
-                if ($madeL) { & git -C $repo worktree remove --force $wtL 2>&1 | ForEach-Object { Add-Content -Path $log -Value $_ -Encoding utf8 } }
-            }
-        }
-    }
-
-    # Layer 2 is installed and is the file this repo ships. Install-Hooks writes it on every
-    # dev run, so this asserts that the write actually happened -- and catches the one case it
-    # deliberately refuses to touch: somebody else's pre-commit hook already sitting there.
-    $l2 = if (MainCheckout) { Join-Path (MainCheckout) '.git\hooks\pre-commit' } else { $null }
-    $l2src = "$repo\.claude\hooks\pre-commit"
-    if ($l2 -and (Test-Path $l2) -and (Test-Path $l2src) -and
-        ([System.IO.File]::ReadAllText($l2).Replace("`r`n", "`n") -eq [System.IO.File]::ReadAllText($l2src).Replace("`r`n", "`n"))) {
-        Say "  PASS  D-7  layer 2 (git pre-commit) is installed and current"
-    }
-    else {
-        Say "  FAIL  D-7  layer 2 is not installed or differs from .claude\hooks\pre-commit"
-        $bad++
-    }
-
-    # I2: what the app reports it is running must be a COMMIT THIS REPO HAS. Before Phase 2b
-    # `status` printed a timestamp mapping to nothing, so "which code is live?" had no
-    # answer -- you could not bisect it, diff it, or check it against git log.
+    # ENFORCEMENT IS ALIVE. Not one of RECOVERY-PHASES section 2's eight rows -- it is Phase 2a's
+    # own guard against the failure that phase is built on: an enforcement that stops enforcing
+    # without saying so. The routing ladder was fully covered, fully green and DEAD IN PRODUCTION
+    # for two days (CLAUDE.md section 3). This lock has already failed twice in one session, both
+    # times looking installed: once unable to parse (a stray backtick), once pointed at a
+    # directory that did not exist on the branch being committed from.
     #
-    # `git cat-file -t` is the load-bearing half: it demands the SHA RESOLVES to a commit
-    # here. Comparing the value to itself, or matching it against a hex pattern, would pass
-    # for any 40 characters and prove nothing.
-    #
-    # The INSTALLED app is what is asked, resolved the way Ver.BinRoot does -- not this
-    # worktree's build output, which is exactly the distinction Phase 1 landed. With nothing
-    # installed there is nothing to assert and it says so instead of printing a green line.
-    $binRoot = Join-Path $env:LOCALAPPDATA 'Dodona\bin'
-    $installed = if (Test-Path $binRoot) {
-        @(Get-ChildItem $binRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+    # So it is asserted BYTE FOR BYTE against the tracked source, and core.hooksPath is asserted
+    # ABSENT. "Does a file exist" would have passed happily through both failures.
+    $src = "$repo\.githooks\pre-commit"
+    $common = (& git -C $repo rev-parse --git-common-dir 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $common) {
+        if (-not [System.IO.Path]::IsPathRooted($common)) { $common = Join-Path $repo $common }
+        $dst = Join-Path (Join-Path $common 'hooks') 'pre-commit'
     }
-    else { @() }
-    if ($installed.Count -eq 0) {
-        Say "  n/a   I2  nothing is installed in $binRoot, so the live build's commit was NOT checked"
-        Say "            (run dev ship, then re-run gate to assert this row)"
+    else { $dst = $null }
+    $hp = (& git -C $repo config --get core.hooksPath 2>$null)
+    $hpSet = ($LASTEXITCODE -eq 0 -and $hp)
+    $deployed = $dst -and (Test-Path $dst) -and (Test-Path $src) -and
+                ([System.IO.File]::ReadAllText($dst).Replace("`r`n", "`n") -eq [System.IO.File]::ReadAllText($src).Replace("`r`n", "`n"))
+    if ($deployed -and -not $hpSet) {
+        Say "  PASS  D-7  the commit guard is deployed and current, and nothing overrides it"
     }
     else {
-        $exe = Join-Path $installed[-1].FullName 'dodona.exe'
-        $vjRaw = & $exe version --json 2>&1 | Out-String
-        # ConvertFrom-Json on a single OBJECT is one pipeline item, which is safe -- the
-        # CLAUDE.md 0.2 trap is arrays, and this is not one.
-        $vj = $null
-        try { $vj = $vjRaw | ConvertFrom-Json } catch { }
-        $sha = if ($vj) { [string]$vj.commit } else { '' }
-        if (-not $sha) {
-            # A build with no provenance is a REAL state, not a failure of this check: a
-            # dev-built or --exe-published image knows no commit and says so. It is reported
-            # as n/a rather than FAIL, because the row asks "is the reported SHA real", and
-            # there is no reported SHA to judge.
-            Say "  n/a   I2  the installed build carries no commit provenance, so there is no SHA to check"
-            Say "            ($exe -- publish from a git checkout to give it one)"
-        }
-        elseif ((& git -C $repo cat-file -t $sha 2>$null) -eq 'commit') {
-            $subject = (& git -C $repo log -1 --format='%h %s' $sha 2>$null)
-            Say "  PASS  I2  the installed build's commit is a commit git log knows: $subject"
-        }
-        else {
-            Say "  FAIL  I2  the installed build reports commit $sha, which this repo does not have"
-            Say "            ($exe)"
-            $bad++
-        }
+        Say "  FAIL  D-7  commits from the shared checkout are NOT being refused:"
+        if (-not $deployed) { Say "          $dst is missing or differs from .githooks\pre-commit" }
+        if ($hpSet) { Say "          core.hooksPath is set to '$hp', so git ignores the deployed hook" }
+        $bad++
     }
 
     Say ""
@@ -746,7 +641,7 @@ function Do-Gate {
               else { "GATE SELF-TEST FAILED -- $bad problem(s)" })
     }
     else {
-        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 7 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
+        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 6 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
     }
     Say "log: $log"
     if ($bad -gt 0) { exit 1 }

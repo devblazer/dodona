@@ -1357,24 +1357,54 @@ sealed class Daemon
         if (!_config.AutoPublish) return;
         if (Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1") return;   // suites own their lifetime
 
-        // A build that cannot say what commit it came from cannot ask the exact question, and it
-        // must NOT fall back to guessing. The old code degraded to the image's own mtime in
-        // exactly this case -- the loop-prone comparison wearing a fallback -- and
-        // `publish --exe <prebuilt>` hit it every single time. So: say it once, out loud, and
-        // stop. That is a silent degrade made loud (CLAUDE.md §3), not a new way to be stuck:
-        // any publish from a git checkout arms it, and the announcement names the command.
+        // A build that cannot say what commit it came from cannot ask the exact question, and
+        // it must NOT fall back to guessing -- the old code degraded to the image's own mtime in
+        // exactly this case, which is the loop-prone comparison wearing a fallback.
         //
-        // ASKED FIRST, before any project guard. This is a property of the RUNNING IMAGE and
-        // depends on no directory, so gating it behind "is the project a git repo?" made it
-        // unreachable in most of the ways you actually meet it (found by a suite check that
-        // could never have gone green).
+        // BUT PARKING HERE WAS WRONG TOO, and it is the operator's standing directive that says
+        // so: never hung, halted, stuck or outdated, and when you add a wait, name the thing
+        // that un-sticks it -- a condition, never a person (CLAUDE.md 0.1). The first version
+        // announced "I am not watching" and stopped, which left auto-publish silently OFF until
+        // somebody read a line in the feed. That happened for real: the very first publish of
+        // this feature was performed by the PREVIOUS binary, which had no stamping code, so the
+        // installed build came out unlabelled and its watcher declined. Nobody would have known.
+        //
+        // THIS IS A BOOTSTRAP, and a bootstrap is exactly the shape that should arm itself: the
+        // action is bounded (one publish), reversible (a failed build changes nothing), and it
+        // can only ever publish MAIN, which is the one thing this daemon is already allowed to
+        // publish. So: do it once, say what was done, and if the result STILL carries no
+        // provenance, surrender loudly rather than trying again -- an unstamped build that
+        // republishes itself is the 64-iteration loop with a new cause.
         if (Ver.NoProvenance)
         {
             _store.Event("autopublish_no_provenance", null, $"build {Ver.Build} exe {Ver.ExePath}");
-            Announce("[dodona] auto-publish is ON but this build carries no commit provenance, so it cannot tell " +
-                     "whether main has moved — it is NOT watching. Publish once from a git checkout to arm it: " +
-                     "dodona publish --project <dir>");
-            return;
+            if (_store.KvGet("autopublish_bootstrap_tried") == "1")
+            {
+                _store.Event("autopublish_surrendered", null, "bootstrap publish did not produce a stamped build");
+                Announce("[dodona] auto-publish is ON, but the build it produced STILL carries no commit stamp, so " +
+                         "it has stopped trying. The live app will not follow main until this is fixed. " +
+                         "(A build made by `dev build`, or published with --exe, cannot be stamped.)");
+                return;
+            }
+            _store.KvSet("autopublish_bootstrap_tried", "1");
+            Announce("[dodona] this build carries no commit stamp (it was built before stamping existed, or with " +
+                     "--exe), so it cannot tell whether main has moved. Publishing main ONCE to arm itself — " +
+                     "nothing else changes, and a failed build changes nothing at all.");
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    var boot = string.IsNullOrEmpty(_config.AutoPublishProject) ? _primary : _config.AutoPublishProject;
+                    if (string.IsNullOrWhiteSpace(boot) || !Path.IsPathRooted(boot) || !Git.IsRepo(boot)) return;
+                    var (bc, bout) = Git.Run(boot, "rev-parse", ConfigFor(".").Main);
+                    if (bc != 0 || bout.Trim().Length != 40) return;
+                    var (code, output) = RunPublish(Path.GetFullPath(boot), bout.Trim());
+                    if (code != 0)
+                        _store.Event("autopublish_failed", null, $"bootstrap publish: {Truncate(output, 800)}");
+                }
+                catch (Exception ex) { _store.Event("autopublish_error", null, $"bootstrap: {ex.Message}"); }
+            });
+            return;     // a successful bootstrap hands off and this process exits
         }
 
         var project = string.IsNullOrEmpty(_config.AutoPublishProject) ? _primary : _config.AutoPublishProject;
@@ -1410,6 +1440,11 @@ sealed class Daemon
             Announce($"[dodona] autoPublish is on, but {project} is not a git repository — nothing is being watched");
             return;
         }
+
+        // We know our own commit, so any previous bootstrap succeeded. Clearing this is what
+        // keeps the guard from outliving the problem: it is a one-shot for THIS situation, not a
+        // permanent mark against the workspace.
+        if (_store.KvGet("autopublish_bootstrap_tried") == "1") _store.KvSet("autopublish_bootstrap_tried", "");
 
         var mainBranch = ConfigFor(".").Main;
         _store.Event("autopublish_watching", null,

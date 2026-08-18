@@ -525,15 +525,41 @@ int StopAll()
         stopped++;
     }
 
+    // ---- daemons this registry does not own are NAMED, not stopped (invariant I6) --------
+    // This used to stop them, with a comment admitting they might belong to "another
+    // DODONA_HOME". That is not a footnote, it is the whole problem: DODONA_HOME scopes the
+    // REGISTRY but not the OS pipe namespace, so every suite's isolated daemons are visible
+    // here and were being swept up by a command whose blast radius read as "my stuff".
+    //
+    // Measured, on this session: a proof script called `stop-all` during cleanup while an
+    // acceptance run was going in another shell. It killed that run's daemons; the suite then
+    // waited on a pipe that would never answer and sat there for twenty minutes with an empty
+    // log. `publish --all` was narrowed to registry scope for exactly this reason and
+    // tests/publish-acceptance.ps1 proves it; stop-all was the last machine-wide sweep left.
+    //
+    // So the default is now the same promise publish makes: a live daemon belonging to no
+    // registered workspace is never a target. They are still LISTED, because a cleanup that
+    // hides what it can see is its own trap, and `--orphans` stops them when that is genuinely
+    // what you want. Naming the flag in the output keeps it a choice you make rather than a
+    // wall you hit (CLAUDE.md 0.1).
     var unregistered = live.Where(p => !all.Select(w => Instance.CtlPipe(w.Id))
         .Append(Instance.CtlPipe(Instance.ConciergeId)).Contains(p, StringComparer.OrdinalIgnoreCase)).ToList();
-    foreach (var p in unregistered)
+    if (unregistered.Count > 0)
     {
-        // Still stopped — it is running on this machine and the operator asked for quiet —
-        // but named, so "I stopped something I could not identify" is never silent.
-        Console.WriteLine($"— stopping unregistered instance on {p} (pre-workspace, or another DODONA_HOME)");
-        Client(new { cmd = "stop-daemon" }, p);
-        stopped++;
+        if (opts.ContainsKey("orphans"))
+            foreach (var p in unregistered)
+            {
+                Console.WriteLine($"— stopping unregistered instance on {p} (--orphans)");
+                Client(new { cmd = "stop-daemon" }, p);
+                stopped++;
+            }
+        else
+        {
+            Console.WriteLine($"{unregistered.Count} live daemon(s) belong to no workspace in this registry and were LEFT ALONE:");
+            foreach (var p in unregistered) Console.WriteLine($"    {p}");
+            Console.WriteLine("  They may be another DODONA_HOME's (a test run, or another agent's session).");
+            Console.WriteLine("  `dodona stop-all --orphans` stops them too, if you are sure they are yours.");
+        }
     }
 
     if (!opts.ContainsKey("lanes"))
@@ -652,7 +678,7 @@ int Publish()
     if (branch is "HEAD" or "") branch = head == mainSha && mainSha.Length > 0 ? mainBranch : "detached";
     var (sc, sout) = Git.Run(project, "status", "--porcelain");
     var dirty = sc == 0 && sout.Trim().Length > 0;
-    var provenance = head.Length > 0 ? Ver.Stamp(head, mainSha.Length > 0 ? mainSha : head, branch, dirty) : "";
+    var haveProvenance = head.Length == 40;
 
     if (prebuilt is not null)
     {
@@ -686,18 +712,20 @@ int Publish()
             foreach (var a in new[] { "publish", proj, "-c", "Release", "-o", outDir, "--nologo", "-v", "q",
                                       $"-p:BaseOutputPath={scratchBin}\\" })
                 psi.ArgumentList.Add(a);
-            // The commit goes INTO the assembly, so the binary can always answer what it was
-            // built from -- no side file to lose, and no silent degrade to an mtime compare
-            // when it is missing. Deliberately not passed when git could not answer: an
-            // unknown provenance must stay unknown rather than become a plausible lie.
-            if (provenance.Length > 0)
+            // The commit goes INTO the assembly, as FIELDS WE NAMED (Directory.Build.props),
+            // so the binary can always answer what it was built from with no side file to lose
+            // and no shared string to parse. One plain value per property: the dotnet CLI
+            // splits a -p: value on commas, which silently ate a combined stamp on the first
+            // attempt. Deliberately not passed when git could not answer -- an unknown
+            // provenance must stay unknown rather than become a plausible lie.
+            if (haveProvenance)
             {
-                psi.ArgumentList.Add($"-p:InformationalVersion=1.0.0+{provenance}");
-                // Or the SDK appends ".<SourceRevisionId>" to what we just set, which it does
-                // by default in a git checkout. Measured: the stamp came back as
-                // "c=<sha>.<sha>". Harmless to the parser, but it makes the field a lie about
-                // its own format, and the next reader deserves better than that.
-                psi.ArgumentList.Add("-p:IncludeSourceRevisionInInformationalVersion=false");
+                psi.ArgumentList.Add($"-p:DodonaCommit={head}");
+                psi.ArgumentList.Add($"-p:DodonaMainSha={(mainSha.Length == 40 ? mainSha : head)}");
+                psi.ArgumentList.Add($"-p:DodonaDirty={(dirty ? "1" : "0")}");
+                // Branch is cosmetic -- "is this main?" is decided by comparing the two SHAs, so
+                // a branch name mangled by the CLI's comma handling can never change a decision.
+                if (!branch.Contains(',')) psi.ArgumentList.Add($"-p:DodonaBranch={branch}");
             }
             using var p = System.Diagnostics.Process.Start(psi)!;
             p.WaitForExit();
@@ -708,7 +736,7 @@ int Publish()
     var newExe = Path.Combine(outDir, "dodona.exe");
     if (!File.Exists(newExe)) return Fail($"published, but {newExe} is missing");
 
-    if (prebuilt is null && provenance.Length > 0)
+    if (prebuilt is null && haveProvenance)
         Console.WriteLine(head == mainSha
             ? $"provenance: {mainBranch}@{Ver.Short(head)}{(dirty ? " +uncommitted-changes" : "")}"
             : $"provenance: TRIAL {branch}@{Ver.Short(head)}{(dirty ? " +uncommitted-changes" : "")} " +
@@ -1090,6 +1118,9 @@ static void Help() => Console.WriteLine("""
       dodona token-request <ticket> [--lease sec] | token-renew | token-release | token-status
       dodona land <ticket>
     hot swap (§13/§14 — nothing interrupted, no session lost):
+      dodona stop-all [--lanes] [--orphans]
+              --orphans also stops live daemons this registry does not own (another
+              DODONA_HOME's test run, say). Without it they are listed and left alone.
       dodona publish [--project <dir>] [--exe <prebuilt>] [--mode now] [--shortcut]
               [--workspace <name>]...  swap exactly these  [--concierge]  and the concierge
               [--all]                  every LIVE registered workspace, plus the concierge

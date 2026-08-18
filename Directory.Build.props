@@ -1,0 +1,44 @@
+<Project>
+
+  <!-- WHERE A BUILD'S COMMIT COMES FROM (RECOVERY-PHASES P2.6).
+
+       These become [assembly: AssemblyMetadata("DodonaCommit", "...")] on every project that
+       compiles Ver.cs, and Ver reads them back at runtime. FIELDS WE NAMED, holding ONE plain
+       value each.
+
+       THE FIRST ATTEMPT PUT THIS IN AssemblyInformationalVersion, WHICH WAS A MISTAKE. Both
+       of its failures came from sharing a field the toolchain also writes:
+
+         1. the value was one comma separated string, and the dotnet CLI SPLITS the value of a
+            command line property on commas. It arrived truncated at the first comma, losing
+            the main baseline and the trial flag, with no error anywhere.
+         2. the SDK appends its own SourceRevisionId to InformationalVersion in a git checkout,
+            so the value came back with extra text glued on. The SDK also writes a bare commit
+            SHA there by itself, which any "is it non empty?" test would have believed.
+
+       Separate named keys have none of that: nothing else writes them, there is no shared
+       string to compose, and there is no format to parse, so there is no parser to get wrong.
+
+       A build with no DodonaCommit has NO provenance: a plain "dev build", or a publish of an
+       already built binary, which compiled nothing and so knows nothing. Every consumer must
+       treat that as "unknown" and never as "behind". The old code silently degraded to an
+       mtime compare in exactly that case, which is the loop prone bug wearing a fallback.
+
+       XML COMMENTS CANNOT CONTAIN A DOUBLE DASH, which is why this file spells flags out in
+       words. MSBuild refuses to load the whole file otherwise, and every project in the tree
+       then fails with MSB4024 rather than anything mentioning this file's real subject. -->
+
+  <ItemGroup Condition="'$(DodonaCommit)' != ''">
+    <AssemblyMetadata Include="DodonaCommit" Value="$(DodonaCommit)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(DodonaMainSha)' != ''">
+    <AssemblyMetadata Include="DodonaMainSha" Value="$(DodonaMainSha)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(DodonaDirty)' != ''">
+    <AssemblyMetadata Include="DodonaDirty" Value="$(DodonaDirty)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(DodonaBranch)' != ''">
+    <AssemblyMetadata Include="DodonaBranch" Value="$(DodonaBranch)" />
+  </ItemGroup>
+
+</Project>
