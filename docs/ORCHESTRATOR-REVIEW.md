@@ -468,3 +468,43 @@ latency number in the doc. The quota governor (§2.6) isn't polish; it's what ke
 six-lane fleet from being dead by Tuesday. Design tickets small, default lanes to Sonnet,
 and spend Opus/Fable where judgment compounds — the same §9 discipline, applied to the
 platform's own budget.
+
+### Carried into M5, added 2026-08-18: delivery is not always a local merge
+
+Found by the operator asking a question the design had no answer for: *"from the Dodona
+interface I say work on project A and start ticket X — project A's CLAUDE.md has standing
+instructions that end in checking out a branch. What happens?"* Tracing it exposed four
+things, in ascending order of how much they cost to fix.
+
+1. **A lane has no working directory.** This is the prerequisite for everything else.
+   `lanes` has no `cwd` and no repo column, `SpawnAgentLaneAsync` hardcodes `_primary`, and
+   `RespawnLaneAsync` hardcodes it too — so a plain lane runs in the operator's live tree,
+   every lane in a workspace shares that one tree, and "work on project A" has no mechanism
+   for putting the lane in A's folder at all. A project skill that then runs `checkout -b`
+   switches the branch under the operator, under every other lane, and under the
+   auto-publish watcher.
+2. **`RespawnLaneAsync` is a live bug**, not just a gap: a TICKET lane that is respawned
+   (`lane-respawn`, or the wake path) comes back with `cwd = _primary` while its system
+   prompt still tells it *"your worktree is the current working directory; work only
+   there"*. A gated ticket agent, resumed, editing main's tree.
+3. **`LaneSystemPrompt` makes it worse, not better.** It currently says *"you have no
+   ticket and no claim, so nothing is reserved for you — if the operator wants isolated
+   work on a branch, they will create a ticket"*. It tells the agent it is un-isolated and
+   then leaves it free to branch. Isolation has to be bound to the LANE (a worktree at
+   spawn, adopted later by `ticket-create`), not to the ticket, because the branch ceremony
+   arrives from the project's own instructions long after Dodona has decided anything.
+4. **Delivery is a per-repo mode** (design §7.1) and the **worktree compatibility
+   contract** (§7.2) — the substance, written up there rather than duplicated here.
+
+What survives all of this untouched: worktree isolation, claims + the gate, the diff
+backstop (a base-ref diff needs no merge), the store/feed/UI, lanes and dormancy,
+publish/hot-swap. What is dead weight in `delivery: pr`: the merge token, the FIFO, the
+fence, the ff-only land, post-land verify. What is new: one ticket state (`in-review`), an
+observer that arms itself, a PR-state-based reaper, the branch lock, a `Bash` matcher on
+the deployed gate, and the lane `cwd`. A milestone, not a redesign.
+
+**The honest strategic consequence:** for a `delivery: pr` repo Dodona is not a merge
+coordinator at all — the forge already serializes merges, with CI and required reviews,
+better than a local token can. It is a parallel-lane orchestrator with claim-based
+collision avoidance. That is a narrower role than §7 assumes, and worth saying out loud
+before building against the wrong one.

@@ -289,11 +289,107 @@ it — an unapproved ticket can never block the queue head) or `merge: auto` for
 do not care to review. `merge: auto` requires a green verify run inside the token window,
 post-rebase — never the agent's self-assessment.
 
-At the git layer the token is **enforced**: each worktree's permission policy (§11)
-denies `git push` and merges into main. Landing exists only as the daemon's `land_ticket`
-tool, which checks the token.
+At the git layer, in `delivery: local-merge` (§7.1), the token is what an agent must hold
+to reach main at all — landing exists only as the daemon's `land_ticket`, which checks it.
+An earlier revision of this section said each worktree's permission policy *denies `git
+push` and merges into main*. That deny was **never implemented** (the deployed gate hooks
+`Edit|Write|MultiEdit|NotebookEdit` only), and it must not be, because a `delivery: pr`
+repo reaches main precisely by pushing. §7.1 replaces it.
 
 **General pattern: code hands out permission, agents do the work.**
+
+### 7.1 Delivery is a per-repo mode: who merges, and when the ticket ends
+
+Recorded 2026-08-18, after the operator asked what happens to a work repo whose own
+CLAUDE.md and skills own the ticket process end to end — branch off `develop`, push, open a
+PR, a human reviews, the forge merges. Everything above assumes **Dodona performs the
+merge**. For those repos it never does, and the whole token/FIFO/fence tier has no job: the
+forge already serializes merges, with CI and required reviews, strictly better than a local
+token can.
+
+So delivery is one per-repo axis in that repo's `dodona.json` (`Config.For` already falls
+back per-repository, so this needs no new plumbing):
+
+- **`delivery: local-merge`** (the default; everything above) — Dodona names the branch,
+  holds the token, executes the ff-only land, runs post-land verify, prunes.
+- **`delivery: pr`** — Dodona provides *isolation only*. It never merges, never deletes a
+  branch, never requests a token. The project's skills own branch naming, push, and the PR.
+
+**Isolation and ceremony are separable, and that is the whole design.** The worktree is
+isolation — it is what stops two lanes fighting over one index, and it costs the project
+nothing: `push`, `pull --rebase` and `gh pr create` all work from a worktree, because push
+is repo-level and the remote cannot tell. Branch naming, base ref, PR and merge are
+ceremony, and ceremony belongs to the project.
+
+Consequences for `delivery: pr`, each a real behaviour change:
+
+- **The worktree is created detached** — no `-b`. Dodona must not pre-name a branch that
+  the project's convention will name (`feature/ABC-123`); it **learns** the name afterwards
+  (`rev-parse --abbrev-ref HEAD` → `TicketSetGit`). The worktree DIRECTORY keeps its short
+  opaque `t<N>`: directory name and branch name are independent, nothing outside Dodona
+  ever sees the directory, and short paths are a Windows `MAX_PATH` margin once an
+  enterprise repo's `node_modules` sits under it.
+- **The end of the agent is not the end of the ticket.** States become
+  `open | in-review | landed | abandoned`. With the PR open the agent retires and the lane
+  goes dormant, but **the worktree survives** — a review comment three days later needs
+  that exact branch back. Today's `land` force-removes it, which is backwards.
+- **Landed is observed, not performed**, and per §11's never-ask rule the observer arms
+  itself instead of waiting for someone to type `dodona land`.
+- **Never test merged-ness by ancestry.** After a squash-merge the branch is *not* an
+  ancestor of main, so `git branch --merged` says no forever and every worktree would be
+  held for ever. Key on PR state (`gh pr view --json state`) or `git cherry`.
+- **The claim gate and the diff backstop are unaffected** — a base-ref diff needs no merge,
+  so §6 layer 2 keeps working without a land.
+
+### 7.2 The worktree compatibility contract for project-owned skills
+
+A skill written for a normal clone says things like "switch to develop, pull, cut your
+branch". Sorted by what that actually does inside a worktree:
+
+- **Fine**: `commit`, `fetch`, `push -u origin HEAD`, `pull --rebase`, `gh pr create`,
+  `checkout -b <new>`, `reset --hard` (scoped to this worktree).
+- **Fails loudly, therefore safe**: `checkout develop` while develop is checked out in
+  another worktree — `fatal: 'develop' is already checked out at ...`. Likewise `branch -d`
+  of a branch held elsewhere. The agent sees an error and adapts.
+- **Succeeds and silently does the wrong thing — the entire problem**: `checkout main` when
+  main is checked out *nowhere* else, so the worktree wanders off its branch and the
+  recorded branch goes stale; **`git stash`**, because the stash is a single shared ref in
+  the common dir, so two lanes interleave one stack and `pop` takes another lane's work;
+  and anything treating `.git` as a directory, since in a worktree it is a file.
+
+Four defences, cheapest first:
+
+1. **A branch lock: Dodona holds every shared branch itself.** Git refuses to check out a
+   branch that is already checked out in another worktree, so one sentinel worktree per
+   protected branch (`main`, `develop`, `release/*`) makes the worst silent case LOUD:
+   `checkout develop` inside a lane worktree becomes `fatal: already checked out at ...`.
+   Create it with `git worktree add --no-checkout` — that sets HEAD to the branch without
+   populating any files, so the lock costs near-zero disk even on a large enterprise repo.
+   The operator asked whether a lane should instead REFUSE TO START unless the project is
+   on main (2026-08-18). Same instinct, weaker mechanism: it makes safety depend on where
+   the operator happens to have their own checkout, and it lapses silently the moment they
+   switch branches for their own reasons. The lock does not. And per §11 a missing lock is
+   CREATED and announced at lane start, never a refusal to start — an invariant that
+   establishes itself, not a human who has to be on the right branch.
+2. **Enforcement, not instruction** (CLAUDE.md §0: advisory gets skipped): extend the
+   deployed gate's matcher to `Bash`, inspect `tool_input.command`, and deny with a
+   **rewrite** rather than a refusal. The predicate is not "no branch but main" — a lane
+   MUST be able to cut `feature/ABC-123`, that IS the PR flow. It is: **allow `checkout -b`
+   / `switch -c` (creating your own branch), deny checking out a branch that already
+   exists**, and deny `git stash`. Each deny hands back the substitution that satisfies the
+   skill's intent — *"you are already on `feature/X` in a dedicated worktree, skip the
+   checkout"*; *"refresh without a checkout: `git fetch origin && git rebase
+   origin/develop`"*; *"commit WIP to your own branch instead of stashing"*. A deny that
+   says what to do instead keeps the project's own skill running rather than stranding it.
+3. **Drift detection** for what slips: record the branch on first observation, re-read it
+   at each turn-final (one git call), announce and badge on unexpected change.
+4. **`DODONA_WORKTREE=1` plus the branch in the shim environment** (`AttachShimAsync`
+   already injects two such vars) so a skill the operator *does* own can make its
+   switch-and-pull step conditional instead of being denied.
+
+Defence 4 is insurance, never a prerequisite: Dodona must be safe against an **unmodified**
+skill, because most repos are not the operator's to edit, and any skill can be changed by
+someone else next week.
 
 ---
 

@@ -285,6 +285,37 @@ correctness incident, not a flaky test.
 publish → verify-the-swap path. Use it rather than improvising the sequence; when the
 delivery process changes, change the skill in the same commit.
 
+## 5.2 A project's git process may not be Dodona's — and worktrees have sharp edges
+
+Some repos own their ticket lifecycle in their own CLAUDE.md and skills: branch off
+`develop` with a naming convention, push, open a PR, a human reviews, the forge merges.
+Dodona's §7 assumes the opposite (it performs an ff-only local merge itself), so this is a
+per-repo mode — `"delivery": "pr" | "local-merge"` in that repo's `dodona.json`. Read
+`docs/ORCHESTRATOR-DESIGN.md` §7.1 and §7.2 before touching any of it; the traps below are
+the short version, and each one is a way to lose someone's work silently.
+
+- **A worktree's directory name and its branch name are unrelated.** `t7` can hold
+  `feature/ABC-123`. Nothing outside Dodona sees the directory, so never rename a worktree
+  to match a branch — short paths are a Windows `MAX_PATH` margin once an enterprise repo's
+  `node_modules` sits under it.
+- **`git stash` is repo-global**, one shared ref in the common dir. Two lanes stashing
+  interleave one stack and `pop` takes the other lane's work. Commit WIP to your own branch
+  instead — always, everywhere in this codebase.
+- **`.git` in a worktree is a FILE**, not a directory. Anything doing `test -d .git` or
+  reading `.git/HEAD` by hand breaks.
+- **`checkout <existing-branch>` inside a worktree is the silent killer**: it fails loudly
+  if that branch is checked out elsewhere, but SUCCEEDS if it is not — and the worktree then
+  wanders off its branch while Dodona's recorded branch goes stale. The defence is a
+  **branch lock**: a `git worktree add --no-checkout` sentinel per shared branch, which
+  costs no disk and makes git refuse. Never make this depend on the operator being on main.
+- Cutting a NEW branch (`checkout -b`, `switch -c`) is fine and necessary — that is the PR
+  flow. The rule is "no checking out branches that already exist", never "no branch but
+  main".
+- **A lane currently has no working directory of its own** (no `cwd` column; `_primary` is
+  hardcoded in `SpawnAgentLaneAsync` and `RespawnLaneAsync`). Until that lands, assume any
+  lane you start is running in the operator's live tree and can switch their branch out from
+  under them. Do not add anything that checks out a branch on that path.
+
 ## 6. Where things are written down
 
 - `docs/ORCHESTRATOR-DESIGN.md` — **the authority.** Every `§n` in this codebase (§8
