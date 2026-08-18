@@ -1,4 +1,4 @@
-using System.IO.Pipes;
+﻿using System.IO.Pipes;
 using System.Text.Json;
 using Dodona;
 
@@ -762,13 +762,22 @@ void Shortcut(string outDir)
 // what it is actually showing. Same line protocol, different pipe.
 int Ui()
 {
-    if (pos.Count == 0) return Fail("ui verb required: dump | screenshot | pose <name> | overlay <PANE|off> | update <exe> | close");
+    if (pos.Count == 0) return Fail("ui verb required: dump | screenshot | pose <name> | overlay <PANE|off> | " +
+                                    "type <text> | compose <text> | key <enter|shift+enter> | input-resize <dy|reset> | " +
+                                    "workspace <name> | update <exe> | close");
     return pos[0] switch
     {
         "dump" => Client(new { verb = "dump" }, UiPipeName()),
         "screenshot" => Client(new { verb = "screenshot", @out = Path.GetFullPath(One("out") ?? "dodona-ui.png"), pane = One("pane") }, UiPipeName()),
         "pose" => pos.Count > 1 ? Client(new { verb = "pose", name = pos[1] }, UiPipeName()) : Fail("ui pose <name|live>"),
         "type" => pos.Count > 1 ? Client(new { verb = "type", text = string.Join(" ", pos.Skip(1)) }, UiPipeName()) : Fail("ui type <text>"),
+        // The multiline box, driven without focus: `compose` types characters and does NOT
+        // send, `key` presses the one key that means two things. Together they are how a test
+        // (or an agent) writes a two-line prompt the way a person does — `type` alone always
+        // submits, so it could never leave two lines sitting in the box.
+        "compose" => pos.Count > 1 ? Client(new { verb = "compose", text = string.Join(" ", pos.Skip(1)) }, UiPipeName()) : Fail("ui compose <text>"),
+        "key" => pos.Count > 1 ? Client(new { verb = "key", key = pos[1] }, UiPipeName()) : Fail("ui key <enter|shift+enter>"),
+        "input-resize" => pos.Count > 1 ? UiResize(pos[1]) : Fail("ui input-resize <dy|reset>"),
         // Give a band the grid — the same code path a click takes, without needing focus.
         "workspace" => pos.Count > 1 ? Client(new { verb = "workspace", workspace = pos[1] }, UiPipeName()) : Fail("ui workspace <name|id>"),
         "overlay" => pos.Count > 1 ? Client(new { verb = "overlay", pane = pos[1] }, UiPipeName()) : Fail("ui overlay <PANE|off>"),
@@ -776,6 +785,16 @@ int Ui()
         "close" => Client(new { verb = "close" }, UiPipeName()),
         _ => Fail($"unknown ui verb: {pos[0]}"),
     };
+}
+
+// The grip, without a mouse: `dy` pixels taller (negative shorter), `reset` hands the box
+// back to fitting its own text — the same ResizeInput a drag and a double-click call.
+int UiResize(string arg)
+{
+    if (arg.Equals("reset", StringComparison.OrdinalIgnoreCase)) return Client(new { verb = "input-resize", reset = true }, UiPipeName());
+    if (!double.TryParse(arg, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var dy))
+        return Fail("ui input-resize <dy|reset>");
+    return Client(new { verb = "input-resize", dy }, UiPipeName());
 }
 
 // ---------------------------------------------------------------- client role
@@ -948,6 +967,10 @@ static void Help() => Console.WriteLine("""
       dodona brain-start [--hi]             (warm the dispatcher brain; hi = expensive tier)
     ui (§8/§17 — talks to the DodonaUi process, not the daemon):
       dodona ui type <text>                 (submit through the same path as Enter — no focus)
+      the box is multiline: Enter sends, Shift+Enter is a new line, and the grip drags it taller
+      dodona ui compose <text>              (type WITHOUT sending — characters, no Enter)
+      dodona ui key <enter|shift+enter>     (the keystroke itself, through the real handler)
+      dodona ui input-resize <dy|reset>     (the resize grip: +px taller, reset = fit the text)
       DodonaUi.exe --test-window            (off-screen, never activates: for tests/agents)
       dodona ui dump | ui screenshot [--pane <PANE>] --out <png> | ui pose <name|live>
       dodona ui workspace <name|id>         (give a band the grid — the same path a click takes)

@@ -466,7 +466,18 @@ dodona ui screenshot [--pane WATER] --out <png>  # self-rendered, always 1600x90
 dodona ui pose <full|badges|blocked|feed|empty-slot|tray|overlay|long>  # deterministic fixtures
 dodona ui pose live                              # resume store polling
 dodona ui overlay <PANE|off> | dodona ui close
+dodona ui compose "<text>"                       # type into the dispatcher box, NO send
+dodona ui key <enter|shift+enter>                # Enter sends; Shift+Enter is a new line
+dodona ui input-resize <dy|reset>                # the resize grip, without a mouse
 ```
+
+The dispatcher box is **multiline**: it auto-grows to 200px as lines arrive, the grip above
+it drags further (capped at 60% of the window — the feed absorbs it, so the window itself
+never moves), and double-clicking the grip refits it to the text. `ui dump` reports it under
+`input`: `text`, `lines` (LOGICAL lines, not wrapped rows), `height`, `sized` (the operator
+overruled the auto-fit), `hint` (the placeholder is showing). A newline reaches the agent
+intact because `Say` serializes the whole message to ONE json line — the shim's stdin
+protocol is line-delimited and would otherwise have cut the prompt in half.
 
 Most "does the UI show X" questions are text questions — ask `ui dump` and read JSON.
 Screenshots are for layout and visual judgment only. `pose long` is the one to reach for

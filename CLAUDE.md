@@ -181,6 +181,22 @@ still work. Test windows popping up and stealing the operator's keyboard mid-wor
 priority complaint; `SendKeys` is banned for the same reason (it needs focus) — drive
 input with `dodona ui type "<text>"`, which submits through the same code path as Enter.
 
+**The box is multiline**: Enter sends, **Shift+Enter is a new line**, it grows itself as
+lines arrive, and the grip above it drags it taller (the feed gives up the pixels, so the
+window never moves). Three more focus-free verbs exist for the same reason `type` does —
+each lands in the method the mouse or keyboard lands in:
+
+```powershell
+dodona ui compose "<text>"          # type WITHOUT sending — `type` always submits
+dodona ui key shift+enter | enter   # the keystroke, through the real PreviewKeyDown path
+dodona ui input-resize <dy|reset>   # the grip: +px taller, reset = fit the text
+```
+
+`ui dump` gained an `input` key (`text`, `lines`, `height`, `sized`, `hint`) — `lines` is
+LOGICAL lines, not wrapped rows. Note §0.2's WPF trap is load-bearing here: with
+`AcceptsReturn` the TextBox class handler eats Enter before an instance `KeyDown`, so the
+handler is `PreviewKeyDown` and `tests/ui-use-acceptance.ps1` now proves Enter still sends.
+
 Poses are deterministic fixtures (`full`, `badges`, `blocked`, `feed`, `collapsed`,
 `tray`, `overlay`, `long`, `two`, `twelve`, `bands`, `merged-feed`, `boot-zero`). `--pose` needs a `--root`
 or `--shell`; a bare launch (no `--root`, no `--workspace`) is the shell.

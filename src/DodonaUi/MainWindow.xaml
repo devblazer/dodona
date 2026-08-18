@@ -1,4 +1,4 @@
-<Window x:Class="DodonaUi.MainWindow"
+﻿<Window x:Class="DodonaUi.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Dodona" Width="1600" Height="900"
@@ -356,13 +356,43 @@
                 <!-- wraps: a status line that matters is usually the one too long to fit -->
                 <TextBlock Grid.Row="3" Text="{Binding Status}" FontSize="11" Foreground="#FF6FA8DC" Margin="4,4,0,4"
                            TextWrapping="Wrap" MaxHeight="60"/>
+                <!-- ══ the dispatcher box: multiline, because a prompt is often a paragraph ══
+                     Enter sends, Shift+Enter is a newline, and the grip drags it taller. It
+                     grows on its own up to InputAutoCap as lines arrive; the FEED gives up the
+                     pixels (its row is the only star-sized one), so a tall box never pushes
+                     anything off the bottom of the window. -->
                 <Grid Grid.Row="4">
-                    <TextBox x:Name="InputBox" FontSize="13" Padding="6,4" Background="#FF262A30"
-                             Foreground="#FFD8DCE0" BorderBrush="#FF3A3E44" CaretBrush="#FFD8DCE0"
-                             KeyDown="Input_KeyDown" TextChanged="Input_TextChanged"/>
-                    <TextBlock x:Name="InputHint" IsHitTestVisible="False" Margin="8,0,0,0" FontSize="12"
-                               Foreground="#FF5A6069" VerticalAlignment="Center"
-                               Text="Say what you want done — Enter"/>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Thumb x:Name="InputGrip" Grid.Row="0" Cursor="SizeNS"
+                           AutomationProperties.Name="resize-input"
+                           ToolTip="Drag to resize — double-click to fit the text"
+                           DragDelta="InputGrip_DragDelta" MouseDoubleClick="InputGrip_Reset">
+                        <Thumb.Template>
+                            <ControlTemplate TargetType="Thumb">
+                                <!-- Transparent, not null: a null Background is not hit-testable,
+                                     so the whole strip would look draggable and not be. -->
+                                <Border Background="Transparent" Padding="0,3">
+                                    <Rectangle Height="2" Width="46" RadiusX="1" RadiusY="1"
+                                               Fill="#FF3A3E44" HorizontalAlignment="Center"/>
+                                </Border>
+                            </ControlTemplate>
+                        </Thumb.Template>
+                    </Thumb>
+                    <Grid Grid.Row="1">
+                        <TextBox x:Name="InputBox" FontSize="13" Padding="6,4" Background="#FF262A30"
+                                 Foreground="#FFD8DCE0" BorderBrush="#FF3A3E44" CaretBrush="#FFD8DCE0"
+                                 AcceptsReturn="True" TextWrapping="Wrap" MinHeight="26" MaxHeight="200"
+                                 VerticalScrollBarVisibility="Auto"
+                                 PreviewKeyDown="Input_PreviewKeyDown" TextChanged="Input_TextChanged"/>
+                        <!-- Top, not Center: the placeholder belongs on the first line of a box
+                             that may be ten lines tall. -->
+                        <TextBlock x:Name="InputHint" IsHitTestVisible="False" Margin="8,5,0,0" FontSize="12"
+                                   Foreground="#FF5A6069" VerticalAlignment="Top"
+                                   Text="Say what you want done — Enter sends, Shift+Enter for a new line"/>
+                    </Grid>
                 </Grid>
             </Grid>
         </Grid>

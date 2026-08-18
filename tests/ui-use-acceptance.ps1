@@ -1,4 +1,4 @@
-# UI USE acceptance: drive the real UI the way a person does — focus the dispatcher box,
+﻿# UI USE acceptance: drive the real UI the way a person does — focus the dispatcher box,
 # type a sentence, press Enter — and assert what the operator actually gets.
 #
 # This test exists because everything else asserted on `ui dump` and screenshots, which
@@ -55,6 +55,21 @@ function TypeInDispatcher([string]$text) {
     if ($r -notmatch 'typed') { throw "ui type refused: $r" }
 }
 
+# The window this suite owns, never someone else's. A `-like "Dodona*"` lookup is not
+# specific enough: the operator's own editor window is titled "Dodona - ..." too, and the
+# first version of the grip check found THAT window (which has no grip) and failed. The
+# title's second half is the workspace name, which is this root's leaf.
+function UiWindow([string]$nameLike = "Dodona*$(Split-Path $root -Leaf)") {
+    $all = $AE::RootElement.FindAll('Children',
+        (New-Object System.Windows.Automation.PropertyCondition $AE::ControlTypeProperty, ([System.Windows.Automation.ControlType]::Window)))
+    foreach ($w in $all) { if ($w.Current.Name -like $nameLike) { return $w } }
+    return $null
+}
+function ByName($win, [string]$name) {
+    if (-not $win) { return $null }
+    $win.FindFirst('Descendants', (New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::NameProperty), $name))
+}
+
 $daemon = $null
 $uiProc = $null
 # The multi-workspace shell section starts a SECOND workspace daemon and a second UI; both
@@ -108,6 +123,70 @@ try {
     $lanes = @($d.slots | Where-Object { -not $_.empty })
     Check 'second_sentence_reuses_the_lane' ($lanes.Count -eq 1) "$($lanes.Count) lanes"
     Check 'second_message_delivered' ((($lanes[0].lines) -join '|') -match 'make it resizable') ''
+
+    # ---- the box is MULTILINE: Shift+Enter is a newline, Enter still sends -------------
+    # A prompt is often a paragraph, and the old box swallowed the second sentence you tried
+    # to write. Driven the way a person drives it: characters, a Shift+Enter, more characters,
+    # Enter. `ui compose` + `ui key` land in the same ComposeInput/InputKey the keyboard lands
+    # in (MainWindow.Input_PreviewKeyDown), so this covers the real affordance — including the
+    # trap that made PreviewKeyDown necessary: with AcceptsReturn the TextBox class handler
+    # eats Enter before an instance KeyDown, and the box goes silently deaf (CLAUDE.md §0.2).
+    function InputRows() {
+        [int]((python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+print(db.execute('''SELECT COUNT(*) FROM pane_events WHERE kind='user_input' ''').fetchone()[0])
+") | Out-String).Trim()
+    }
+    $inputsBefore = InputRows
+
+    Dodona @('ui', 'compose', 'say make the toolbar roomier') | Out-Null
+    Dodona @('ui', 'key', 'shift+enter') | Out-Null
+    Dodona @('ui', 'compose', 'and keep the send key') | Out-Null
+    Start-Sleep -Milliseconds 400
+    $d = Dump
+    Check 'shift_enter_makes_a_second_line' ($d.input.lines -eq 2) ($d.input | ConvertTo-Json -Compress)
+    Check 'shift_enter_sends_nothing' ($d.input.text -match 'roomier' -and $d.input.text -match 'send key') ($d.input | ConvertTo-Json -Compress)
+    $inputsMid = InputRows
+    Check 'shift_enter_delivered_nothing_anywhere' ($inputsMid -eq $inputsBefore) "before=$inputsBefore mid=$inputsMid"
+    # the box grew itself to hold the second line — no typing into a one-line slot
+    Check 'the_box_grows_with_the_text' ($d.input.height -ge 38) "height=$($d.input.height)"
+
+    # the grip is a real affordance, not only a verb
+    $grip = ByName (UiWindow) 'resize-input'
+    Check 'resize_grip_exists' ($null -ne $grip) ''
+
+    # ...and it resizes. Dragging UP grows the box; the FEED gives up the pixels, so the
+    # WINDOW never changes size and nothing is pushed off the bottom of it.
+    $hFit = $d.input.height
+    $winH = $d.window.h
+    Dodona @('ui', 'input-resize', '70') | Out-Null
+    Start-Sleep -Milliseconds 300
+    $d = Dump
+    Check 'the_box_drags_taller' ($d.input.height -ge $hFit + 50 -and $d.input.sized -eq $true) "fit=$hFit dragged=$($d.input.height)"
+    Check 'a_taller_box_never_resizes_the_window' ($d.window.h -eq $winH) "was=$winH now=$($d.window.h)"
+    Dodona @('ui', 'input-resize', 'reset') | Out-Null
+    Start-Sleep -Milliseconds 300
+    $d = Dump
+    Check 'double_click_refits_the_box' ($d.input.height -le $hFit + 2 -and $d.input.sized -eq $false) "fit=$hFit after=$($d.input.height)"
+    Check 'resizing_kept_the_draft' ($d.input.text -match 'roomier') $d.input.text
+
+    # Enter sends the WHOLE paragraph, newline intact all the way to the agent's stdin: Say
+    # serializes it to ONE json line, so the shim's line protocol cannot split it in half.
+    Dodona @('ui', 'key', 'enter') | Out-Null
+    Start-Sleep -Seconds 3
+    $d = Dump
+    Check 'enter_still_sends' ($d.input.text -eq '' -and $d.input.lines -eq 1) ($d.input | ConvertTo-Json -Compress)
+    Check 'the_hint_comes_back_when_the_box_empties' ($d.input.hint -eq $true) ($d.input | ConvertTo-Json -Compress)
+    # chr(10), never a backslash escape: this string survives a shell, a here-string and a
+    # regex on its way here, and every one of those layers has an opinion about backslashes.
+    $body = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+r = db.execute('''SELECT body FROM pane_events WHERE kind='user_input' ORDER BY id DESC LIMIT 1''').fetchone()
+print(r[0].replace(chr(10), '<NL>') if r else 'none')
+") | Out-String
+    Check 'the_newline_survived_to_the_agent' ($body -match 'roomier<NL>and keep the send key') $body
 
     # ---- the undo actually works ----
     if ($announced[0].body -match 'lane-stop (\d+)') { $laneId = $Matches[1] }
@@ -235,12 +314,7 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     Check 'three_lanes_divide_into_two_columns' ($d.columns -eq 2) "columns=$($d.columns)"
 
     # ---- the collapse control is a real button, and it collapses ---------------------------
-    $win3 = $null
-    $all3 = $AE::RootElement.FindAll('Children',
-        (New-Object System.Windows.Automation.PropertyCondition $AE::ControlTypeProperty, ([System.Windows.Automation.ControlType]::Window)))
-    foreach ($w in $all3) { if ($w.Current.Name -like "Dodona*") { $win3 = $w; break } }
-    $collapseBtn = if ($win3) { $win3.FindFirst('Descendants',
-        (New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::NameProperty), 'collapse-lane')) } else { $null }
+    $collapseBtn = ByName (UiWindow) 'collapse-lane'
     Check 'collapse_button_exists' ($null -ne $collapseBtn) ''
     if ($collapseBtn) {
         ($collapseBtn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()

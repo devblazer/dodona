@@ -1,10 +1,11 @@
-using System.IO;
+﻿using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Dodona;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;   // Thumb's DragDeltaEventArgs — the resize grip
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -146,6 +147,29 @@ public partial class MainWindow : Window
                 SubmitInput();
                 return "typed";
             }
+            // The three verbs the multiline box needs, each landing in the SAME method the
+            // mouse or keyboard lands in: `compose` types without sending, `key` is Enter or
+            // Shift+Enter, `input-resize` is the grip. A parallel test-only path would prove
+            // nothing about the affordance a person touches.
+            case "compose":
+                ComposeInput(e.GetProperty("text").GetString() ?? "");
+                return "composed";
+            case "key":
+            {
+                var k = (e.GetProperty("key").GetString() ?? "").Replace(" ", "").ToLowerInvariant();
+                return k switch
+                {
+                    "enter" or "return" => InputKey(false),
+                    "shift+enter" or "shift+return" => InputKey(true),
+                    _ => $"error: unknown key '{k}' (enter | shift+enter)",
+                };
+            }
+            case "input-resize":
+            {
+                var reset = e.TryGetProperty("reset", out var rs) && rs.ValueKind == JsonValueKind.True;
+                var h = ResizeInput(reset ? null : e.GetProperty("dy").GetDouble());
+                return $"input height {h:0}";
+            }
             // Clicking a band, without a mouse and without focus. Same reasoning as `type`:
             // it goes through EXACTLY the code path a click takes (FocusWorkspace), so a test
             // drives the real affordance rather than a parallel one — and a band is a Border,
@@ -208,6 +232,17 @@ public partial class MainWindow : Window
             { id = f.Id, lane = f.LaneTitle, body = f.Body, acked = f.Acked, workspace = f.Workspace, concierge = f.IsConcierge }).ToList(),
             toasts = _vm.Toasts.Select(t => new { ts = t.Ts, lane = t.Lane, reason = t.Reason }).ToList(),
             status = _vm.Status,
+            // The dispatcher box testifies too, now that it has more than one state to be in:
+            // `lines` is LOGICAL lines (Shift+Enter presses + 1, not wrapped display rows),
+            // `sized` says the operator overruled the auto-fit with the grip.
+            input = new
+            {
+                text = InputBox.Text,
+                lines = InputBox.Text.Split('\n').Length,
+                height = (int)Math.Round(InputBox.ActualHeight),
+                sized = !double.IsNaN(InputBox.Height),
+                hint = InputHint.Visibility == Visibility.Visible,
+            },
         };
         return JsonSerializer.Serialize(dump);
     }
@@ -423,10 +458,82 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
-    void Input_KeyDown(object sender, KeyEventArgs e)
+    /// <summary>PREVIEWKeyDown, and that is not a style preference: with
+    /// AcceptsReturn="True" the TextBox's own class handler consumes Enter to insert the
+    /// newline BEFORE any instance KeyDown handler runs, so the box goes quietly deaf and
+    /// Enter stops sending. That exact trap already cost this project a round (CLAUDE.md
+    /// §0.2) — a lane rewrote this box, could not build it, and shipped the bug.</summary>
+    void Input_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Enter) return;
-        SubmitInput();
+        InputKey((e.KeyboardDevice.Modifiers & ModifierKeys.Shift) != 0);
+        // Handled either way. Letting a Shift+Enter through after InputKey already
+        // inserted the newline would insert a SECOND one.
+        e.Handled = true;
+    }
+
+    /// <summary>The two things Enter can mean, in one place so the `ui key` verb drives
+    /// byte-for-byte the code a keystroke does (§17 — the same reasoning as `ui type`).
+    /// Shift+Enter is a newline because a prompt is often a paragraph; bare Enter sends,
+    /// because that is the muscle memory the box already had.</summary>
+    public string InputKey(bool shift)
+    {
+        if (!shift) { SubmitInput(); return "submitted"; }
+        var at = InputBox.SelectionStart;
+        InputBox.SelectedText = "\n";      // replaces a selection, exactly like a typed character
+        InputBox.CaretIndex = at + 1;
+        // Past the auto-grow cap the box scrolls, and a caret you cannot see is a box you
+        // are typing into blind.
+        var line = InputBox.GetLineIndexFromCharacterIndex(InputBox.CaretIndex);
+        if (line >= 0) InputBox.ScrollToLine(line);
+        return "newline";
+    }
+
+    /// <summary>Typing characters with no Enter — what a person does between keystrokes.
+    /// `ui type` cannot stand in for this because `type` submits, so no test could ever
+    /// get two lines INTO the box to prove Shift+Enter left them there.</summary>
+    public void ComposeInput(string text)
+    {
+        var at = InputBox.SelectionStart;
+        InputBox.SelectedText = text;
+        InputBox.CaretIndex = at + text.Length;
+    }
+
+    // Auto-grow stops here; a deliberate drag may go further, because the operator asking
+    // for more room has said something the default cannot know.
+    const double InputAutoCap = 200;
+
+    void InputGrip_DragDelta(object sender, DragDeltaEventArgs e) => ResizeInput(-e.VerticalChange);
+
+    void InputGrip_Reset(object sender, MouseButtonEventArgs e)
+    {
+        ResizeInput(null);
+        e.Handled = true;
+    }
+
+    /// <summary>Resize the dispatcher box: <paramref name="dy"/> pixels taller (negative
+    /// shorter), or null to hand it back to fitting its own text. Dragging UP grows it,
+    /// which is why the grip negates. The feed absorbs the change (its row is the only
+    /// star-sized one) and the cap keeps something of it on screen — a box that could eat
+    /// the whole window would be a way to lose the work you were watching.</summary>
+    public double ResizeInput(double? dy)
+    {
+        if (dy is null)
+        {
+            InputBox.Height = double.NaN;
+            InputBox.MaxHeight = InputAutoCap;
+        }
+        else
+        {
+            var from = double.IsNaN(InputBox.Height) ? InputBox.ActualHeight : InputBox.Height;
+            var want = Math.Max(InputBox.MinHeight, from + dy.Value);
+            // The drag overrules the auto cap — otherwise the grip stops dead at 200px with
+            // nothing to explain why. It never overrules the window.
+            InputBox.MaxHeight = Math.Max(InputAutoCap, want);
+            InputBox.Height = Math.Min(want, Math.Max(InputBox.MinHeight, ActualHeight * 0.6));
+        }
+        InputBox.UpdateLayout();
+        return InputBox.ActualHeight;
     }
 
     /// <summary>The one path from the box to the daemon — Enter and the `ui type` verb
