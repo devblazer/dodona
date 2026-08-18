@@ -4,6 +4,16 @@
   "model": "opus",
   "effort": "high",
 
+  "autoPublish": true,
+  "//autoPublish": [
+    "The daemon watches this source tree and publishes + swaps ITSELF when the sources",
+    "are newer than the image it is running (debounced until the tree goes quiet).",
+    "Operator's standing order: live updates are not sometimes. A failed build changes",
+    "nothing and announces loudly; a parked swap offers the usual three answers; a",
+    "30-minute dirty tree gets one announcement, because published-but-uncommitted",
+    "nearly lost a feature once."
+  ],
+
   "compressors": 2,
   "//compressors": [
     "Selective compression (§5): warm Haiku sessions that turn each turn-final into one",

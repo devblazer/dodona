@@ -26,7 +26,16 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
                      // inside seven deliberately model-free suites.
                      int Compressors = 0,
                      PolicyRule[]? Policy = null, string[]? AllowedTools = null,
-                     string PermissionMode = "bypassPermissions")
+                     string PermissionMode = "bypassPermissions",
+                     // Live updates are not sometimes (operator's standing order): when the
+                     // sources are newer than the running image, the daemon publishes and
+                     // swaps ITSELF. Every M4 guard applies — a build that fails, or a
+                     // successor that never answers, leaves the running system untouched
+                     // and announces why. autoPublishProject defaults to the root; the
+                     // debounce waits for the tree to go quiet so half-saved edits are
+                     // never built.
+                     bool AutoPublish = false, string? AutoPublishProject = null,
+                     int AutoPublishDebounceSec = 45)
 {
     public PolicyRule[] Rules => Policy ?? Dodona.Policy.Default;
 
@@ -76,7 +85,9 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
             Str("routerModel", "haiku"), Str("routerEffort", "low"),
             Str("compressorModel", "haiku"), Str("compressorEffort", "low"), Num("compressors", 2),
             policy, allowed,
-            Str("permissionMode", "bypassPermissions"));
+            Str("permissionMode", "bypassPermissions"),
+            d.RootElement.TryGetProperty("autoPublish", out var ap) && ap.ValueKind == JsonValueKind.True,
+            Str("autoPublishProject", ""), Num("autoPublishDebounceSec", 45));
     }
 }
 
@@ -205,6 +216,7 @@ sealed class Daemon
             GcOldBuilds();
         }
         StartSwapTicker();
+        StartDriftWatcher();
 
         // Warm the compressor pool at daemon start (§5) — a pool that has to be summoned
         // by hand after every restart is a pool that is cold exactly when the first turn
@@ -1048,6 +1060,122 @@ sealed class Daemon
             catch { /* next tick */ }
         }
     });
+
+    /// <summary>
+    /// Live updates are not sometimes. The daemon watches its own source tree, and when
+    /// the sources are newer than the image it is running, it publishes and swaps ITSELF —
+    /// no person and no agent has to remember to. This exists because "work done but not
+    /// live" blocked the operator three separate times in one day (edited-not-built,
+    /// built-not-published, published-not-committed), and instructions in CLAUDE.md are
+    /// advisory while a watcher is not — the same reasoning as the claim gate (§6).
+    ///
+    /// Safety is inherited, not added: the publish it runs goes through the ordinary M4
+    /// path, so a build that fails changes nothing and is announced; a successor that
+    /// never answers leaves this daemon running; a mid-merge lane blocks the swap with
+    /// the usual three answers. The debounce waits for the tree to go quiet so a
+    /// half-saved edit is never built.
+    /// </summary>
+    void StartDriftWatcher()
+    {
+        if (!_config.AutoPublish) return;
+        if (Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1") return;   // suites own their lifetime
+        var project = string.IsNullOrEmpty(_config.AutoPublishProject) ? _root : Path.GetFullPath(_config.AutoPublishProject);
+        if (!File.Exists(Path.Combine(project, "src", "Dodona", "Dodona.csproj")))
+        {
+            _store.Event("autopublish_misconfigured", null, $"{project} is not a Dodona source tree");
+            Announce($"[dodona] autoPublish is on, but {project} has no src/Dodona — nothing is being watched");
+            return;
+        }
+        _store.Event("autopublish_watching", null, $"{project} (debounce {_config.AutoPublishDebounceSec}s)");
+
+        _ = Task.Run(async () =>
+        {
+            DateTime lastMax = DateTime.MinValue, stableSince = DateTime.MinValue, lastTried = DateTime.MinValue;
+            DateTime dirtySince = DateTime.MinValue;
+            bool dirtyAnnounced = false;
+            int tick = 0;
+
+            while (true)
+            {
+                await Task.Delay(15000);
+                try
+                {
+                    // ---- source drift: newer than the running image? ----
+                    var maxSrc = NewestSource(project);
+                    var image = File.GetLastWriteTimeUtc(Ver.ExePath);
+                    if (maxSrc > image && maxSrc != lastTried)
+                    {
+                        if (maxSrc != lastMax) { lastMax = maxSrc; stableSince = DateTime.UtcNow; }
+                        else if ((DateTime.UtcNow - stableSince).TotalSeconds >= _config.AutoPublishDebounceSec)
+                        {
+                            lastTried = maxSrc;
+                            _store.Event("autopublish_started", null, $"sources {maxSrc:o} > image {image:o}");
+                            Announce("[dodona] sources changed — building and swapping to stay live");
+                            var (code, output) = RunPublish(project);
+                            if (code != 0)
+                            {
+                                var reason = output.Split('\n').LastOrDefault(l => l.Contains("error", StringComparison.OrdinalIgnoreCase))
+                                             ?? output.Split('\n').LastOrDefault(l => l.Trim().Length > 0) ?? "unknown";
+                                _store.Event("autopublish_failed", null, Truncate(output, 800));
+                                Announce($"[dodona] auto-publish FAILED — the live app is now BEHIND the sources: {Truncate(reason.Trim(), 160)}");
+                            }
+                            // success: the swap arrives through our own control pipe and this
+                            // daemon exits mid-handoff — nothing more to do here. A parked
+                            // swap (mid-merge blocker) already announced its three answers.
+                        }
+                    }
+                    else if (maxSrc <= image) { lastMax = DateTime.MinValue; }
+
+                    // ---- git drift: published-but-uncommitted was nearly lost work once ----
+                    if (++tick % 20 == 0)   // every ~5 minutes
+                    {
+                        var (gc, gout) = Git.Run(project, "status", "--porcelain");
+                        var dirty = gc == 0 && gout.Trim().Length > 0;
+                        if (!dirty) { dirtySince = DateTime.MinValue; dirtyAnnounced = false; }
+                        else if (dirtySince == DateTime.MinValue) dirtySince = DateTime.UtcNow;
+                        else if (!dirtyAnnounced && (DateTime.UtcNow - dirtySince).TotalMinutes >= 30)
+                        {
+                            dirtyAnnounced = true;
+                            _store.Event("autopublish_dirty_tree", null, Truncate(gout, 400));
+                            Announce("[dodona] the working tree has been dirty for 30m — the live app runs work git does not have; commit it");
+                        }
+                    }
+                }
+                catch (Exception ex) { _store.Event("autopublish_error", null, ex.Message); }
+            }
+        });
+    }
+
+    static DateTime NewestSource(string project)
+    {
+        var newest = DateTime.MinValue;
+        void Scan(string dir)
+        {
+            foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+            {
+                if (f.Contains(@"\bin\") || f.Contains(@"\obj\")) continue;
+                if (!(f.EndsWith(".cs") || f.EndsWith(".xaml") || f.EndsWith(".csproj"))) continue;
+                var t = File.GetLastWriteTimeUtc(f);
+                if (t > newest) newest = t;
+            }
+        }
+        Scan(Path.Combine(project, "src"));
+        var dj = Path.Combine(project, "dodona.json");
+        if (File.Exists(dj) && File.GetLastWriteTimeUtc(dj) > newest) newest = File.GetLastWriteTimeUtc(dj);
+        return newest;
+    }
+
+    (int Code, string Output) RunPublish(string project)
+    {
+        var psi = new ProcessStartInfo(Ver.ExePath)
+        { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = _root };
+        foreach (var a in new[] { "publish", "--project", project, "--root", _root }) psi.ArgumentList.Add(a);
+        using var p = Process.Start(psi)!;
+        var errT = Task.Run(() => p.StandardError.ReadToEnd());
+        var so = p.StandardOutput.ReadToEnd();
+        if (!p.WaitForExit(600000)) { try { p.Kill(entireProcessTree: true); } catch { } return (-1, "publish timed out after 10 minutes"); }
+        return (p.ExitCode, so + "\n" + errT.Result);
+    }
 
     /// <summary>Old binary directories are garbage once no instance runs them (§13). A
     /// running image is locked by Windows, which makes "is anyone using it?" a question

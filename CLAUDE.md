@@ -25,7 +25,20 @@ most expensive mistake in this project's history — twice:
 If you cannot build — permission denied, a lock, anything — **say so as the headline of
 your reply**, not as a footnote. An unbuilt change is not a deliverable.
 
-## 2. Completed work gets published
+## 2. Completed work gets published — and the daemon now enforces this itself
+
+**This rule is no longer only yours to remember.** With `"autoPublish": true` in
+`dodona.json` (on, for this repo), the daemon watches the source tree and publishes +
+swaps itself when the sources are newer than the image it runs. It waits for the tree to
+go quiet first, a failed build changes nothing and is announced loudly, and a 30-minute
+dirty tree gets one announcement — because edited-not-built, built-not-published and
+published-not-committed each blocked the operator once in a single day, and an instruction
+in this file is advisory while a watcher is not (the claim-gate reasoning, §6).
+
+What that leaves for YOU: still build before reporting (rule 1 — the watcher publishing
+your broken edit produces a loud failure with your name on it), still commit (the watcher
+nags, it does not commit for you), and still run publish yourself when the operator asks
+or when you want the swap *now* rather than a debounce later.
 
 **Finishing a piece of work — or being asked to publish — means running publish.** Not
 "mention that it could be published", not leaving it built-but-installed-nowhere. The

@@ -170,6 +170,9 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   `compressor_timeout`, `compressor_failed`. Lifecycle kinds: `lane_stopped`,
   `lane_dormant` (its ticket landed — the agent was retired, the lane keeps the thread),
   `lane_respawned` (a fresh agent resumed the recorded session).
+  Auto-publish kinds: `autopublish_watching`, `autopublish_started`,
+  `autopublish_failed` (the live app is now BEHIND the sources — fix the build),
+  `autopublish_dirty_tree`, `autopublish_misconfigured`, `autopublish_error`.
   Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
   `swap_forced`, `swap_refused`, `swap_failed`, `daemon_handoff`, `binary_gc`,
   `binary_gc_skipped`. **If a state change happened with no event row naming why, that
