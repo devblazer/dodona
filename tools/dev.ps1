@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('check', 'build', 'test', 'suites', 'prove', 'ship', 'help')]
+    [ValidateSet('check', 'build', 'test', 'suites', 'prove', 'gate', 'ship', 'help')]
     [string]$Verb,
 
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
@@ -257,6 +257,101 @@ function Do-Prove {
     Say "log: $log"
 }
 
+# gate: the standing pre-commit assertion (RECOVERY-PHASES section 2). It ASSERTS the
+# invariants rather than describing them -- a rule that only exists as prose is a rule that
+# gets skipped, which is the entire argument of CLAUDE.md 0.3.
+#
+# It runs the full suites itself, because both assertions below are about what a suite RUN
+# leaves behind, and there is nothing to measure without one. That makes gate the slow verb
+# on purpose: iterate with `dev test <suite>`, gate once before committing.
+#
+# IT HOLDS ONLY WHAT IS TRUE TODAY. The table in RECOVERY-PHASES section 2 has eight rows;
+# Phase 1 earns two of them. The other six are printed as "not yet", named with the phase
+# that will earn them, because a gate that silently covered a third of its table would be
+# exactly the green check nobody has seen fail.
+function Do-Gate {
+    # A named suite (or several) runs the gate's MACHINERY over less than everything. It
+    # exists so the gate can be proven without waiting 5.5 minutes -- the same reason
+    # `dev test <suite>` exists next to `dev suites`, and the same doctrine: iterate fast,
+    # gate slow. It says PARTIAL on every line that could otherwise be misread as a pass,
+    # because a gate that reports a full verdict after a third of the work is precisely the
+    # green check nobody has seen fail (CLAUDE.md 0.3).
+    $suites = if ($Rest -and $Rest.Count -gt 0) { $Rest } else { AllSuites }
+    $partial = @($suites).Count -ne (AllSuites).Count
+    Say $(if ($partial) { "== gate: PARTIAL ($($suites -join ', ')) -- a SELF-TEST of the gate, NOT a gate ==" } else { "== gate ==" })
+    $bad = 0
+
+    # I5 is measured as a DIFFERENCE, and RECOVERY-PHASES' wording ("git status --porcelain
+    # is empty after a full suite run") cannot be taken literally: you run gate BEFORE a
+    # commit, so the tree always holds the very change you are gating, and a literal
+    # emptiness check would fail every honest use. What I5 actually means -- and what
+    # P0.3 untracked tests\*-output\ to make measurable -- is that THE SUITE RUN ITSELF adds
+    # nothing to the tree. So: snapshot, run, compare.
+    $before = @(git -C $repo status --porcelain)
+    Say "working tree before: $($before.Count) change(s)"
+
+    Say ""
+    Say "-- suites ($(@($suites).Count) of $((AllSuites).Count)) --"
+    foreach ($n in $suites) {
+        $r = Run-Suite $n
+        Say "$($n.PadRight(12)) $($r.Tally)"
+        foreach ($f in $r.Fails) { Say "  $f"; $bad++ }
+    }
+
+    Say ""
+    Say "-- assertions --"
+
+    # The label follows what ACTUALLY ran. Saying "after a full suite run" under `dev gate m1`
+    # would be a small lie in the one place that exists to stop small lies.
+    $ran = if ($partial) { "after $($suites -join ', ')" } else { "after a full suite run" }
+
+    # I1: nothing executes from a build output. Asserted AFTER the suites, which is the only
+    # moment that proves anything: before Phase 1 this printed three pids at exactly this
+    # point, and every one of them would silently block the next build.
+    $b = Blockers
+    if ($b.Count -eq 0) {
+        Say "  PASS  I1  nothing runs from src\...\bin $ran"
+    }
+    else {
+        Say "  FAIL  I1  $($b.Count) process(es) left in the build output:"
+        foreach ($p in $b) { Say "          pid $($p.Id)  $($p.ProcessName)  $($p.Path)" }
+        $bad++
+    }
+
+    # I5: the working tree contains only source.
+    $after = @(git -C $repo status --porcelain)
+    $added = @(Compare-Object -ReferenceObject $before -DifferenceObject $after |
+        Where-Object { $_.SideIndicator -eq '=>' } | ForEach-Object { $_.InputObject })
+    if ($added.Count -eq 0) {
+        Say "  PASS  I5  the run added nothing to git status $ran ($($after.Count) change(s), unchanged)"
+    }
+    else {
+        Say "  FAIL  I5  the run dirtied the tree with $($added.Count) path(s), $ran :"
+        foreach ($a in $added) { Say "          $a" }
+        $bad++
+    }
+
+    Say ""
+    Say "-- not covered yet (RECOVERY-PHASES section 2), so this gate does NOT mean these hold --"
+    Say "  not yet -- phase 2   two agents run dev build concurrently and both succeed        (I2)"
+    Say "  not yet -- phase 2   dev suites green while the live app runs, app untouched       (I1, I2)"
+    Say "  not yet -- phase 2   dodona status build SHA is a commit that git log knows        (I2)"
+    Say "  not yet -- phase 3   live lane pipes == the lane count dodona ps reports           (I3)"
+    Say "  not yet -- phase 4   a full suite run finishes under 60 s                          (I7)"
+    Say "  not yet -- phase 5   repo lint clean: no control bytes, every named test path real (I8)"
+
+    Say ""
+    if ($partial) {
+        Say $(if ($bad -eq 0) { "GATE SELF-TEST PASSED -- machinery works. THIS IS NOT A GATE: only $($suites -join ', ') ran." }
+              else { "GATE SELF-TEST FAILED -- $bad problem(s)" })
+    }
+    else {
+        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 2 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
+    }
+    Say "log: $log"
+    if ($bad -gt 0) { exit 1 }
+}
+
 function Do-Ship {
     Do-Build
     Do-Suites
@@ -279,6 +374,10 @@ function Do-Help {
     Say "  suites                   run all $((AllSuites).Count). end of a change, once."
     Say "  prove <suite> <check>    demand a new check FAILS against HEAD. do this BEFORE"
     Say "                           believing any new check."
+    Say "  gate [suite...]          the pre-commit gate: suites, then ASSERT the invariants"
+    Say "                           Phase 1 earns. Names the six it does not cover yet."
+    Say "                           With suite names: a PARTIAL self-test of the gate itself,"
+    Say "                           seconds instead of minutes. Never a gate verdict."
     Say "  ship                     build + suites + publish."
     Say ""
     Say "Every run logs to .dodona\dev-logs. A blocked run stops on line one, not minute forty."
@@ -290,6 +389,7 @@ switch ($Verb) {
     'test' { Do-Test }
     'suites' { Do-Suites }
     'prove' { Do-Prove }
+    'gate' { Do-Gate }
     'ship' { Do-Ship }
     'help' { Do-Help }
 }

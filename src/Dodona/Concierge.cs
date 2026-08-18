@@ -442,9 +442,18 @@ sealed class Concierge
     /// the child cannot re-resolve to something else.</summary>
     async Task<bool> WakeAsync(string wsId, string name)
     {
+        var exe = Environment.ProcessPath ?? "dodona.exe";
+        if (Ver.IsSourceTreeBuildOutput(exe))
+        {
+            // The THIRD spawn site (RECOVERY-PHASES P1.2 names two). A concierge running from
+            // a build output would propagate that path to every workspace daemon it wakes, so
+            // the guard would keep a hole reachable by one deliberate `dodona concierge`.
+            _store.Event("wake_failed", null, $"{wsId}: {Ver.BuildOutputRefusal(exe, "a daemon")}");
+            Announce($"[dodona] cannot wake workspace {name} — this build runs from a source tree build output; publish first");
+            return false;
+        }
         try
         {
-            var exe = Environment.ProcessPath ?? "dodona.exe";
             var psi = new ProcessStartInfo(exe)
             {
                 UseShellExecute = true,                        // detach: it must outlive us

@@ -9,9 +9,13 @@ $repo = Split-Path -Parent $PSScriptRoot
 # Isolated workspace registry + store tree for this suite: never touch the
 # operator's own workspaces (§17, and CLAUDE.md §4's reasoning one level up).
 $dodonaHome = Use-IsolatedDodonaHome 'm2live'
-$dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
-$fake = "$repo\src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.exe"
-$env:DODONA_SHIM = "$repo\src\DodonaShim\bin\Release\net8.0\DodonaShim.exe"
+# The binaries under test are a COPY, in this run's own DODONA_HOME -- nothing here executes
+# out of src\...\bin, so a leaked daemon can never hold the file the compiler must overwrite
+# (docs/INVESTIGATION-2026-08-18.md RC3; tests/_workspace.ps1 Use-TestBinaries has the why).
+$bin = Use-TestBinaries $repo
+$dodona = "$bin\dodona.exe"
+$fake = "$bin\DodonaFakeAgent.exe"
+$env:DODONA_SHIM = "$bin\DodonaShim.exe"
 $claude = (Get-Command claude -ErrorAction SilentlyContinue).Source
 if (-not $claude) { $claude = "$env:USERPROFILE\.local\bin\claude.exe" }
 $out = Join-Path $PSScriptRoot 'm2-live-output'
@@ -114,6 +118,11 @@ finally {
     }
     # shims own the claude processes; killing shims orphans claude children - kill by session file cwd
     Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
+    # Did this suite leak a process into the build output? (RECOVERY-PHASES P1.3) Last in the
+    # finally, so the suite's own cleanup has already run and this reports only what survived
+    # it. It reports; it never kills -- a check that killed what it found would hide the leak
+    # it exists to expose.
+    Assert-NoBuildOutputProcesses $repo $results
 }
 
 $results | ConvertTo-Json | Set-Content "$out\results.json" -Encoding utf8

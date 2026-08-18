@@ -78,8 +78,17 @@ commit messages are this project's history of record (there is no other memory).
 ## 4. Publish
 
 ```powershell
-.\src\Dodona\bin\Release\net8.0\dodona.exe publish --project . --all
+# Resolve the INSTALLED binary the way Ver.BinRoot does, newest build wins.
+$dodona = Join-Path (Get-ChildItem "$env:LOCALAPPDATA\Dodona\bin" -Directory |
+    Sort-Object Name | Select-Object -Last 1).FullName 'dodona.exe'
+& $dodona publish --project . --all
 ```
+
+Run the **installed** binary, never `.\src\Dodona\bin\Release\net8.0\dodona.exe` — which is
+what this step said until 2026-08-18, and is how a daemon ends up holding the compiler's own
+output file. The binary now refuses to autostart from a source-tree build output. If nothing
+is installed yet, `powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 ship`
+bootstraps it.
 
 This builds into a fresh versioned dir, hot-swaps every running daemon without
 interrupting agents mid-turn (M4), updates any live UI, and re-points the desktop
@@ -90,9 +99,15 @@ its own; shipping means *now*, not after a debounce.
 
 ```powershell
 $env:DODONA_NO_AUTOSTART = "1"
-.\src\Dodona\bin\Release\net8.0\dodona.exe status --root .
+# Resolve the INSTALLED binary the way Ver.BinRoot does, newest build wins.
+$dodona = Join-Path (Get-ChildItem "$env:LOCALAPPDATA\Dodona\bin" -Directory |
+    Sort-Object Name | Select-Object -Last 1).FullName 'dodona.exe'
+& $dodona status --root .
 $env:DODONA_NO_AUTOSTART = $null
 ```
+
+`$dodona` is re-resolved here rather than reused from step 4: publish has just created a NEW
+versioned directory, so the newest one is now the build you are verifying.
 
 The reported `build=` must be the one just published. Only now is the work "done".
 

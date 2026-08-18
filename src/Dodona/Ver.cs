@@ -34,6 +34,71 @@ static class Ver
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Dodona", "bin");
 
 
+    // ------------------------------------------------- a build output is not an installation
+
+    /// <summary>
+    /// Is this image a SOURCE TREE build output - the <c>...\src\&lt;project&gt;\bin\...</c> shape?
+    ///
+    /// A daemon started from one holds the very file MSBuild must overwrite, and it outlives
+    /// the window that started it, so the block is invisible: on 2026-08-18 four of them
+    /// turned a fifteen-minute change into an hour, reported as "Build FAILED" when what it
+    /// meant was "an invisible daemon holds a file" (docs/INVESTIGATION-2026-08-18.md RC3).
+    ///
+    /// The test is the <b>src+bin shape</b>, deliberately NOT "any path containing \bin\",
+    /// and that distinction is load-bearing - the two places a daemon SHOULD run from both
+    /// contain a \bin\, so keying on that alone would refuse both and take the whole system
+    /// down with it. Deliberately ALLOWED:
+    ///
+    ///   %LOCALAPPDATA%\Dodona\bin\&lt;stamp&gt;   the installed app (<see cref="BinRoot"/>);
+    ///                                       its `bin` sits under `Dodona`, under `Local` -
+    ///                                       no `src` two components up, so it never matches
+    ///   $DODONA_HOME\bin                    the suites' own copy of the binaries
+    ///                                       (tests/_workspace.ps1, Use-TestBinaries)
+    ///
+    /// Refused: <c>...\src\Dodona\bin\Release\net8.0</c> and its siblings - including inside a
+    /// lane worktree (<c>...\.dodona\wt\t7\src\...\bin\...</c>), which is a source tree like
+    /// any other.
+    /// </summary>
+    public static bool IsSourceTreeBuildOutput(string? exePath)
+    {
+        if (string.IsNullOrEmpty(exePath)) return false;
+        try
+        {
+            var parts = Path.GetFullPath(exePath).Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                StringSplitOptions.RemoveEmptyEntries);
+            // Three CONSECUTIVE components: src / <project> / bin.
+            for (int i = 2; i < parts.Length; i++)
+                if (parts[i].Equals("bin", StringComparison.OrdinalIgnoreCase) &&
+                    parts[i - 2].Equals("src", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
+        }
+        catch { return false; }   // an unparseable path is not evidence of anything
+    }
+
+    /// <summary>Why we would not daemonize, and what to do instead. One text, because the
+    /// refusal fires from three spawn sites and whoever meets it should not have to work out
+    /// which one they hit.
+    ///
+    /// This refuses to CREATE a long-lived process, never to clean one up. <c>stop-daemon</c>,
+    /// <c>stop-all</c>, <c>ps</c>, <c>where</c>, <c>publish</c> and every other verb keep
+    /// working from any path, always - a guard standing between the operator and a cleanup is
+    /// a bug, not a safety feature (CLAUDE.md 0.1). An explicit <c>dodona daemon</c> still
+    /// runs from anywhere too; it is AUTOSTART that refuses, because autostart is the
+    /// invisible one.</summary>
+    public static string BuildOutputRefusal(string exePath, string what) =>
+        $"refusing to start {what} from a build output: {exePath}" + Environment.NewLine +
+        "  A build output is not an installation. A daemon started there holds the file the" + Environment.NewLine +
+        "  compiler must overwrite, and it outlives the window that started it, so the block" + Environment.NewLine +
+        "  is invisible (2026-08-18: four of them, one hour, reported as \"Build FAILED\")." + Environment.NewLine +
+        "  Publish, then run the published binary:" + Environment.NewLine +
+        @"    powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 ship" + Environment.NewLine +
+        $"    {Path.Combine(BinRoot, "<newest>", "dodona.exe")} ..." + Environment.NewLine +
+        "  `dodona daemon` still starts one explicitly from any path, and stop-daemon, stop-all," + Environment.NewLine +
+        "  ps, where and publish are unaffected.";
+
+
     // ---------------------------------------------------------- what a build was built FROM
 
     /// <summary>The newest source timestamp in a Dodona tree — the thing auto-publish asks

@@ -11,7 +11,17 @@ $repo = Split-Path -Parent $PSScriptRoot
 # Isolated workspace registry + store tree for this suite: never touch the
 # operator's own workspaces (§17, and CLAUDE.md §4's reasoning one level up).
 $dodonaHome = Use-IsolatedDodonaHome 'm1'
-$dodona = "$repo\src\Dodona\bin\Release\net8.0\dodona.exe"
+# The binaries under test are a COPY, in this run's own DODONA_HOME -- nothing here executes
+# out of src\...\bin, so a leaked daemon can never hold the file the compiler must overwrite
+# (docs/INVESTIGATION-2026-08-18.md RC3; tests/_workspace.ps1 Use-TestBinaries has the why).
+#
+# This suite deliberately sets NO $env:DODONA_SHIM, and that is the point rather than an
+# omission: a shim spawned without it falls back to AppContext.BaseDirectory\DodonaShim.exe,
+# which now resolves to the fresh copy beside dodona.exe. Under the old paths it resolved to
+# src\Dodona\bin's orphan copy, which no ProjectReference maintains and which was measured 18
+# hours stale on 2026-08-18. So m1 is also the check that the flat layout works.
+$bin = Use-TestBinaries $repo
+$dodona = "$bin\dodona.exe"
 $env:DODONA_NO_AUTOSTART = "1"   # this test owns daemon lifetime; start-on-demand (M4) must not join in
 $out = Join-Path $PSScriptRoot 'm1-output'
 New-Item -ItemType Directory -Force $out | Out-Null
@@ -152,6 +162,11 @@ finally {
     Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
     Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
+    # Did this suite leak a process into the build output? (RECOVERY-PHASES P1.3) Last in the
+    # finally, so the suite's own cleanup has already run and this reports only what survived
+    # it. It reports; it never kills -- a check that killed what it found would hide the leak
+    # it exists to expose.
+    Assert-NoBuildOutputProcesses $repo $results
 }
 
 $results | ConvertTo-Json | Set-Content "$out\results.json" -Encoding utf8

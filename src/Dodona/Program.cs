@@ -211,10 +211,13 @@ int Cx(object request)
         return Client(request, pipe);
     if (!Instance.IsLive(Concierge.Id))
     {
+        // A build output is not an installation (Ver.IsSourceTreeBuildOutput). Checked
+        // BEFORE the "starting one" notice, so we never announce a start we will not do.
+        var exe = Environment.ProcessPath ?? "dodona.exe";
+        if (Ver.IsSourceTreeBuildOutput(exe)) return Fail(Ver.BuildOutputRefusal(exe, "the concierge"));
         Console.Error.WriteLine("no concierge running — starting one");
         try
         {
-            var exe = Environment.ProcessPath ?? "dodona.exe";
             var psi = new System.Diagnostics.ProcessStartInfo(exe)
             {
                 UseShellExecute = true,                     // detach: it must outlive this CLI
@@ -919,10 +922,16 @@ int Client(object request, string? pipeName = null)
 /// the child is a second chance to disagree. Returns null on success, or the reason.</summary>
 static string? Autostart(string wsId, string primary)
 {
+    var exe = Environment.ProcessPath ?? "dodona.exe";
+    // The refusal, before the notice: a build output is not an installation, and a daemon
+    // autostarted from one is the invisible holder of the compiler's own output file
+    // (Ver.IsSourceTreeBuildOutput carries the incident and the paths deliberately allowed).
+    // `dodona daemon` run EXPLICITLY still works from any path — it is autostart that
+    // refuses, because autostart is the one nobody sees happen.
+    if (Ver.IsSourceTreeBuildOutput(exe)) return Ver.BuildOutputRefusal(exe, "a daemon");
     try
     {
         Console.Error.WriteLine("no daemon for this workspace — starting one");
-        var exe = Environment.ProcessPath ?? "dodona.exe";
         var psi = new System.Diagnostics.ProcessStartInfo(exe)
         {
             UseShellExecute = true,                     // detach: the daemon must outlive this CLI

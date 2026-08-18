@@ -116,6 +116,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | `test <suite>...` | One or more named suites. |
 | `suites` | All eleven. A **gate before committing**, never a loop — it is twenty minutes. |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. |
+| `gate` | The pre-commit gate: runs the suites, then **asserts** the invariants — nothing left running in the build output, and a suite run that dirtied nothing. Prints the six rows of `RECOVERY-PHASES` §2 it does not cover yet, so it can never be mistaken for a full pass. |
 | `ship` | build + suites + publish. |
 
 It is a **script, not a `dodona` subcommand**, and deliberately so: a tool whose job is to fix
@@ -181,8 +182,24 @@ operator sees Dodona through the installed app; work that never reaches it does 
 from where they are sitting.
 
 ```powershell
-.\src\Dodona\bin\Release\net8.0\dodona.exe publish --project . --all
+# Resolve the INSTALLED binary the way Ver.BinRoot does, newest build wins.
+$dodona = Join-Path (Get-ChildItem "$env:LOCALAPPDATA\Dodona\bin" -Directory |
+    Sort-Object Name | Select-Object -Last 1).FullName 'dodona.exe'
+& $dodona publish --project . --all
 ```
+
+**Never `.\src\Dodona\bin\Release\net8.0\dodona.exe`**, which is what this file said until
+2026-08-18. That invocation is how a daemon ends up holding the compiler's own output: the
+instruction *caused* the failure it warns about elsewhere, and any `dodona` command run that
+way could autostart one. The binary now refuses to autostart from a source-tree build output
+and names `publish` instead (`Ver.IsSourceTreeBuildOutput`) — `%LOCALAPPDATA%\Dodona\bin\` and
+a suite's `$DODONA_HOME\bin` are deliberately allowed, because a build output is the problem,
+not the word "bin".
+
+Nothing installed yet on this machine? `powershell -NoProfile -ExecutionPolicy Bypass -File
+tools\dev.ps1 ship` bootstraps it. That one runs `publish` from the build output on purpose
+and it is the single exception: `publish` is a transient CLI that exits, not a daemon that
+outlives your window.
 
 That builds all three executables into a fresh versioned directory, hands off to any
 running daemon **without interrupting a live agent mid-turn** (M4), and re-points the
