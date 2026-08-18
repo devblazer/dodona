@@ -109,6 +109,13 @@ out-of-claim write and stopped and said so; the router retargeted a misrouted in
 a receipt in the wrong pane (first classify 5.4s — cold session; steady-state is spike-4
 data).
 
-Deliberately carried to M3 (with the UI they serve): dispatcher session, selective
-compression pool, retraction-on-consumed-retarget, settings-merge for repos with their
-own tracked `.claude/`. Spike 4 (quota calibration) still parked, by choice.
+**Selective compression (§5) now landed** (schema v7): a pane shows the short readable
+form of a turn — mid-turn narration never reaches the grid, turn-finals are always kept
+and always shortened by a warm 2–3 session Haiku pool answering in a fixed schema, and
+already-short results skip the model entirely. `compressed` is a second column, so `body`
+stays the agent's words and the overlay stays the raw truth. Every failure leaves the
+operator reading the full text. See [DEBUGGING.md](DEBUGGING.md).
+
+Deliberately carried to M3 (with the UI they serve): dispatcher session,
+retraction-on-consumed-retarget, settings-merge for repos with their own tracked
+`.claude/`. Spike 4 (quota calibration) still parked, by choice.

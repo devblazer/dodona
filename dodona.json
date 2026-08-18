@@ -4,6 +4,16 @@
   "model": "opus",
   "effort": "high",
 
+  "compressors": 2,
+  "//compressors": [
+    "Selective compression (§5): warm Haiku sessions that turn each turn-final into one",
+    "short readable line. ON BY DEFAULT (the operator's standing instruction: 'it should",
+    "just be on'); 2 is the smallest pool that is not a serialization point; 0 turns it",
+    "off and panes show the agent's full text. The acceptance suites stay model-free",
+    "anyway: they run with DODONA_NO_AUTOSTART=1, which also skips warming the pool, and",
+    "the compression suite uses the fake agent as a deterministic compressor."
+  ],
+
   "//permissions": [
     "Lanes run bypassPermissions by default — the same permissiveness the operator's IDE",
     "grants in auto mode. A lane cannot ask: headless -p has no prompt channel, so",

@@ -9,8 +9,13 @@ using System.Text.RegularExpressions;
 // Directives inside the user text make turns deterministic and schedulable:
 //   sleep:N       — wait N seconds mid-turn (a long "thinking" turn to kill daemons under)
 //   say <text>    — the result event carries exactly <text>
+//
+// DODONA_LANE_ROLE=compressor makes it answer in the compressor's fixed JSON schema (§5)
+// instead, deterministically shortening whatever it was given. That keeps selective
+// compression testable end-to-end with zero model calls, like every other suite.
 
 var sessionId = $"fake-{Guid.NewGuid():N}";
+var asCompressor = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "compressor";
 var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
 void Emit(object o) => stdout.WriteLine(JsonSerializer.Serialize(o));
 
@@ -26,6 +31,27 @@ while ((line = Console.ReadLine()) is not null)
         text = d.RootElement.GetProperty("message").GetProperty("content")[0].GetProperty("text").GetString() ?? "";
     }
     catch { continue; }
+
+    if (asCompressor)
+    {
+        // Deterministic stand-in for the judgement: first 60 characters, one line, and
+        // needs_you only when the text says so — enough shape for a test to assert on.
+        var flat = Regex.Replace(text, @"\s+", " ").Trim();
+        var needs = flat.Contains("BLOCKED", StringComparison.OrdinalIgnoreCase);
+        Emit(new
+        {
+            type = "result",
+            subtype = "success",
+            session_id = sessionId,
+            result = JsonSerializer.Serialize(new
+            {
+                headline = flat.Length > 60 ? flat[..60].TrimEnd() : flat,
+                needs_you = needs,
+                options = needs ? new[] { "wait", "override" } : Array.Empty<string>(),
+            }),
+        });
+        continue;
+    }
 
     Emit(new
     {

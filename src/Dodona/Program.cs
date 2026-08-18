@@ -45,6 +45,8 @@ async Task<int> Dispatch() => cmd switch
     "focus" => Client(new { cmd = "focus", lane = long.Parse(pos[0]) }),
     "input" => Client(new { cmd = "input", text = string.Join(" ", pos) }),
     "router-start" => Client(new { cmd = "router-start", child = One("child"), model = One("model"), effort = One("effort") }),
+    "compressor-start" => Client(new { cmd = "compressor-start", child = One("child"), model = One("model"), effort = One("effort"),
+                                       count = int.TryParse(One("count"), out var cpn) ? cpn : (int?)null }),
     "ticket-agent" => Client(new { cmd = "ticket-agent", ticket = long.Parse(pos[0]), child = One("child"), model = One("model"), effort = One("effort") }),
     "token-request" => Client(new { cmd = "token-request", ticket = long.Parse(pos[0]), lease = int.Parse(One("lease") ?? "120") }),
     "token-renew" => Client(new { cmd = "token-renew", ticket = long.Parse(pos[0]), lease = int.Parse(One("lease") ?? "120") }),

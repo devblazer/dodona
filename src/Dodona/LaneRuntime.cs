@@ -25,6 +25,12 @@ sealed class LaneRuntime
     public int ShimProtocol { get; private set; } = 1;
     TaskCompletionSource<string>? _resultTcs;
 
+    /// <summary>Raised when a turn ends, with the pane row it just wrote (§5). The daemon
+    /// hangs selective compression off this: a turn-final message is the one thing that
+    /// always reaches the operator, so it is the one thing always worth shortening. Never
+    /// awaited from the pump — a compressor must not be able to stall the wire.</summary>
+    public Action<long, long, string>? OnResult;      // (laneId, paneEventId, body)
+
     public LaneRuntime(long id, string pipeName, Store store)
     {
         Id = id;
@@ -82,13 +88,30 @@ sealed class LaneRuntime
             switch (type)
             {
                 case "system":
-                    kind = "system";
-                    if (d.RootElement.TryGetProperty("session_id", out var sid))
+                {
+                    // `system` is a bag of subtypes, and treating them all as "init" spammed
+                    // one live lane with 985 thinking_tokens rows each reading
+                    // "init session=…". Only real init is worth a labelled pane row;
+                    // permission_denied is worth a LOUD one (an agent that cannot run its
+                    // build is the most-repeated failure in this project's history); the
+                    // rest stay raw — wire noise the overlay can still show.
+                    var sub = d.RootElement.TryGetProperty("subtype", out var st) ? st.GetString() : null;
+                    if (sub == "init" && d.RootElement.TryGetProperty("session_id", out var sid))
                     {
+                        kind = "system";
                         _store.LaneSession(Id, sid.GetString() ?? "");
                         body = $"init session={sid.GetString()}";
                     }
+                    else if (sub == "permission_denied")
+                    {
+                        kind = "error";
+                        var tool = d.RootElement.TryGetProperty("tool_name", out var tn) ? tn.GetString() : "?";
+                        var why = d.RootElement.TryGetProperty("message", out var msg) ? msg.GetString() : "denied";
+                        body = $"permission denied: {tool} — {Truncate(why ?? "", 140)}";
+                    }
+                    // else: kind stays "wire", body stays raw
                     break;
+                }
                 case "assistant":
                     kind = "agent_line";
                     var sb = new StringBuilder();
@@ -122,7 +145,11 @@ sealed class LaneRuntime
         }
         catch { /* unparseable stays kind=wire, body=raw */ }
 
-        _store.PaneEvent(Id, kind, body, seq, raw);
+        var rowId = _store.PaneEventId(Id, kind, body, seq, raw);
+
+        // The row is already written and the pane can already show it. Compression is a
+        // later, optional improvement to a row that is complete without it (§5).
+        if (kind == "result" && rowId > 0 && body.Length > 0) OnResult?.Invoke(Id, rowId, body);
     }
 
     public void Say(string text)

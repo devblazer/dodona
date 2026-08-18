@@ -67,12 +67,59 @@ where nothing ever mentions repos at all.
 - **Lanes are workspace-wide** and need no repository at all: an agent can work in a
   folder that has never seen git. Only tickets need one.
 
-## The schema (v6 — `PRAGMA user_version`)
+## Selective compression (§5)
+
+A pane shows the **short readable** form of what happened; the store keeps everything.
+
+- **Mid-turn `agent_line` narration never reaches the grid.** Not filtered by a model —
+  by construction: an agent ends its turn when it needs you, so anything that needs you
+  IS a `result`, and what it is doing meanwhile is already the presence line, derived in
+  code from `tool_use` events. That is the 5–10× volume cut §2.2 asks for, bought with
+  zero model calls.
+- **Turn-finals are always kept and always shortened.** `result` rows go to a warm
+  compressor, which must answer in a fixed schema — `{headline ≤90 chars, needs_you,
+  options[]}` — so it cannot ramble. `needs_you` renders `BLOCKED — <headline>` with an
+  `options:` line under it.
+- **Already-short results (≤120 chars, single line) skip the compressor entirely.** There
+  is no judgement to buy there, and §2.2's whole point is not to spend calls where there
+  is none.
+- **`compressed` is a second column, never an overwrite.** `body` stays the agent's own
+  words, `raw` stays the wire line. The pane reads `COALESCE(compressed, body)`; the
+  overlay reads `body` and filters no kinds at all — raw one keystroke away, literally.
+- **The pool is 2–3 sessions, round-robin, one lock each.** One session accumulating six
+  lanes' turn-finals would be the serialization point §3 forbids the dispatcher to be.
+
+```
+dodona compressor-start [--count 2] [--model haiku] [--effort low] [--child <exe>]
+```
+
+`dodona.json` keys: `compressorModel`, `compressorEffort`, `compressors`.
+
+**Every failure path leaves the operator reading the agent's own words**, because the row
+is written and on screen before compression is even attempted. No pool warm, a timeout, a
+non-JSON reply, an empty headline — all of them simply leave `compressed` NULL. Look for
+`compressed` (with latency and before→after sizes), `compressor_timeout` and
+`compressor_failed` in `events`. Compression never blocks the wire pump and never delays
+a pane.
+
+Deliberately **not** compressed: announcements. The design lists them, but every
+announcement Dodona writes today is a code-authored one-liner that is already in a fixed
+shape — spending a model call on it would buy exactly the no-judgement volume §2.2 says
+to refuse, and would put `undo: dodona lane-stop 3` at the mercy of a paraphrase.
+
+Also deliberately unchanged: **attention**. `needs_you` is rendered as text only. It does
+not badge, toast, or set presence — blocked-on-you is code-derived from ticket state
+today, and handing a small model the badge is a policy decision `docs/LANE-LIFECYCLE.md`
+§4 has not taken.
+
+## The schema (v7 — `PRAGMA user_version`)
 
 - **`lanes`** — `id, title, state (alive|unreachable|dead), pipe_name, session_id,
   created_ts`. The session_id is the resume handle; the pipe is the reattach handle.
 - **`pane_events`** — everything a pane would show, in order: `lane_id, ts, kind, body,
-  seq, raw, acked`. `kind ∈ user_input | agent_line | result | system | wire |
+  seq, raw, acked, compressed`. `compressed` is the short readable rendering (§5), NULL
+  when the row was not eligible or the compressor never answered; `body` is never
+  rewritten. `kind ∈ user_input | agent_line | result | system | wire |
   announcement`. `seq` is the shim's delivery sequence (NULL for locally-generated
   rows); `UNIQUE(lane_id, seq)` is what makes shim redelivery exactly-once. `raw` is the
   untouched wire line — the raw truth when `body`'s extraction looks wrong. `acked`
@@ -97,7 +144,9 @@ where nothing ever mentions repos at all.
   tuning the confidence threshold.
 - **`kv`** — small state: `focused_lane`, `dispatcher_lane`.
 - **`lanes`** additionally carries `presence` (derived by code from tool_use wire
-  events — never a model) and `role ∈ work | router | dispatcher`. The `dispatcher`
+  events — never a model) and `role ∈ work | router | compressor | dispatcher`. Only
+  `work` lanes take a grid slot, receive routed input, or have their turn-finals
+  compressed — a compressor asked to summarise its own summary would never stop. The `dispatcher`
   lane (title `DODONA`) holds no agent and takes no grid slot — it is where the system
   speaks in its own voice, and reconcile skips it.
 - **`swaps`** — every proposed hot swap (§13/§14): `exe, build, schema_version,
@@ -114,7 +163,8 @@ where nothing ever mentions repos at all.
   `land_refused`, `land_inconsistent`, `verify_green`, `verify_red`, `worktree_pruned`,
   `worktree_prune_failed`, `ticket_git_failed`. Routing kinds: `classified` (with
   latency), `routed_retarget`, `classifier_timeout`, `classifier_failed`,
-  `route_undone`. Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
+  `route_undone`. Compression kinds: `compressed` (with latency and before→after sizes),
+  `compressor_timeout`, `compressor_failed`. Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
   `swap_forced`, `swap_refused`, `swap_failed`, `daemon_handoff`, `binary_gc`,
   `binary_gc_skipped`. **If a state change happened with no event row naming why, that
   is a bug — report it as one.**

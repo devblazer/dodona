@@ -172,6 +172,19 @@ sealed class Store : IDisposable
                 PRAGMA user_version = 6;
                 """);
         }
+        if (v < 7)
+        {
+            // Selective compression (§5). The short readable version is a SECOND column,
+            // never an overwrite: `body` stays the agent's own words and `raw` stays the
+            // wire line, so "raw one keystroke away" remains literally true and a bad
+            // compression is a cosmetic problem rather than a lost message. NULL means
+            // "not compressed" — either it was not eligible, or the compressor never
+            // answered, and both render as the full text.
+            Exec("""
+                ALTER TABLE pane_events ADD COLUMN compressed TEXT;
+                PRAGMA user_version = 7;
+                """);
+        }
     }
 
     static string Now() => DateTime.UtcNow.ToString("o");
@@ -303,7 +316,14 @@ sealed class Store : IDisposable
     /// never counted as attention. A badge must mean "you are needed", not "something
     /// happened" (docs/LANE-LIFECYCLE.md §4); a receipt for an act the system just did on
     /// your behalf is the latter.</summary>
-    public bool PaneEvent(long laneId, string kind, string body, long? seq, string? raw, bool acked = false)
+    public bool PaneEvent(long laneId, string kind, string body, long? seq, string? raw, bool acked = false) =>
+        PaneEventId(laneId, kind, body, seq, raw, acked) > 0;
+
+    /// <summary>As PaneEvent, but returns the new row's id — 0 when the row was a
+    /// duplicate seq and therefore ignored. The compressor needs the id: the row is
+    /// written the instant it arrives and the short version is filled in later, so the
+    /// pane never waits on a model (§5).</summary>
+    public long PaneEventId(long laneId, string kind, string body, long? seq, string? raw, bool acked = false)
     {
         lock (_lock)
         {
@@ -316,6 +336,28 @@ sealed class Store : IDisposable
             c.Parameters.AddWithValue("$b", body);
             c.Parameters.AddWithValue("$s", (object?)seq ?? DBNull.Value);
             c.Parameters.AddWithValue("$r", (object?)raw ?? DBNull.Value);
+            if (c.ExecuteNonQuery() <= 0) return 0;      // duplicate seq: the shim redelivered
+
+            // A SEPARATE statement on purpose. Appending `SELECT last_insert_rowid()` to
+            // the insert reads naturally and returns nothing: Microsoft.Data.Sqlite leaves
+            // the reader on the first statement, so Read() is false on the INSERT and the
+            // SELECT is never reached without NextResult(). That silently returned "no row
+            // id", which silently disabled compression — no error anywhere.
+            using var q = _db.CreateCommand();
+            q.CommandText = "SELECT last_insert_rowid();";
+            return Convert.ToInt64(q.ExecuteScalar() ?? 0L);
+        }
+    }
+
+    /// <summary>Fill in a row's short readable version. Never touches `body`.</summary>
+    public bool PaneCompressed(long paneEventId, string compressed)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "UPDATE pane_events SET compressed = $c WHERE id = $id;";
+            c.Parameters.AddWithValue("$c", compressed);
+            c.Parameters.AddWithValue("$id", paneEventId);
             return c.ExecuteNonQuery() > 0;
         }
     }

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Text;
 using System.Text.Json;
 
 namespace Dodona;
@@ -17,6 +18,13 @@ namespace Dodona;
 sealed record Config(string Main, string[] Verify, string Agent = "claude",
                      string Model = "opus", string Effort = "high",
                      string RouterModel = "haiku", string RouterEffort = "low",
+                     string CompressorModel = "haiku", string CompressorEffort = "low",
+                     // 0 = no pool unless asked for by hand. Off by default because a warm
+                     // pool is real quota drawn from the same window as the lanes (§2.6),
+                     // and because every acceptance suite runs on a root with no
+                     // dodona.json — a default of 2 would silently put real Haiku sessions
+                     // inside seven deliberately model-free suites.
+                     int Compressors = 0,
                      PolicyRule[]? Policy = null, string[]? AllowedTools = null,
                      string PermissionMode = "bypassPermissions")
 {
@@ -49,6 +57,8 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
         var agent = d.RootElement.TryGetProperty("agent", out var a) ? a.GetString() ?? "claude" : "claude";
         string Str(string key, string fallback) =>
             d.RootElement.TryGetProperty(key, out var x) && x.ValueKind == JsonValueKind.String ? x.GetString() ?? fallback : fallback;
+        int Num(string key, int fallback) =>
+            d.RootElement.TryGetProperty(key, out var x) && x.ValueKind == JsonValueKind.Number ? x.GetInt32() : fallback;
         string[]? allowed = null;
         if (d.RootElement.TryGetProperty("allowedTools", out var at) && at.ValueKind == JsonValueKind.Array)
             allowed = at.EnumerateArray().Select(x => x.GetString()!).Where(x => x.Length > 0).ToArray();
@@ -63,7 +73,9 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
 
         return new Config(main, verify, agent,
             Str("model", "opus"), Str("effort", "high"),
-            Str("routerModel", "haiku"), Str("routerEffort", "low"), policy, allowed,
+            Str("routerModel", "haiku"), Str("routerEffort", "low"),
+            Str("compressorModel", "haiku"), Str("compressorEffort", "low"), Num("compressors", 2),
+            policy, allowed,
             Str("permissionMode", "bypassPermissions"));
     }
 }
@@ -74,6 +86,11 @@ sealed class Daemon
     readonly Store _store;
     readonly Dictionary<long, LaneRuntime> _lanes = new();
     readonly SemaphoreSlim _routerLock = new(1, 1);   // one classification at a time on the warm session
+    // One lock per compressor session, not one for the pool: the point of a pool is that
+    // two lanes finishing at once compress concurrently. A single lock would rebuild the
+    // serialization point §3 forbids the dispatcher to be (§5).
+    readonly Dictionary<long, SemaphoreSlim> _compressorLocks = new();
+    int _compressorNext;                              // round-robin cursor
     Config _config;
 
     /// <summary>The workspace's repositories, rediscovered on demand — git is the truth,
@@ -175,8 +192,11 @@ sealed class Daemon
         foreach (var l in _store.LanesAll().Where(l => l.State == "alive" && l.Role != "dispatcher"))
         {
             var rt = new LaneRuntime(l.Id, l.Pipe, _store);
+            HookCompression(rt, l.Role);
             if (await rt.ConnectAndPumpAsync(attempts: predecessorPid > 0 ? 20 : 3)) _lanes[l.Id] = rt;
             else { _store.LaneState(l.Id, "unreachable"); _store.Event("lane_unreachable", l.Id, "reconcile: pipe did not answer"); }
+            // An adopted pool member needs its lock back, or its turns would never gate.
+            if (l.Role == "compressor" && _lanes.ContainsKey(l.Id)) _compressorLocks[l.Id] = new SemaphoreSlim(1, 1);
         }
         _store.Event("reconcile_done", null, $"connected={_lanes.Count}");
         if (predecessorPid > 0)
@@ -185,6 +205,22 @@ sealed class Daemon
             GcOldBuilds();
         }
         StartSwapTicker();
+
+        // Warm the compressor pool at daemon start (§5) — a pool that has to be summoned
+        // by hand after every restart is a pool that is cold exactly when the first turn
+        // finishes. Fire-and-forget: spawning sessions must not delay the daemon becoming
+        // answerable, and a pool that fails to start costs nothing but full-length panes.
+        if (_config.Compressors > 0 && Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") != "1")
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var msg = await StartCompressorsAsync(_config.Agent, _config.CompressorModel,
+                                                          _config.CompressorEffort, _config.Compressors);
+                    _store.Event("compressor_pool", null, msg);
+                }
+                catch (Exception ex) { _store.Event("compressor_pool_failed", null, ex.Message); }
+            });
 
         // No `using` on pipe streams near a peer that may close first (spike 2's lesson).
         bool stopping = false;
@@ -310,6 +346,18 @@ sealed class Daemon
                           "Be willing to say confidence low — a confident wrong guess is worse than an honest unsure.";
                 var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: false) : new List<string>();
                 w.WriteLine((await SpawnLaneAsync("ROUTER", "router", _root, child, args)).Msg);
+                break;
+            }
+            case "compressor-start":
+            {
+                var child = e.TryGetProperty("child", out var cc) && cc.ValueKind == JsonValueKind.String ? cc.GetString()! : _config.Agent;
+                var model = Pick(e, "model", _config.CompressorModel);
+                var effort = Pick(e, "effort", _config.CompressorEffort);
+                // Asked for by hand with the pool configured off, "how many" still has an
+                // obvious answer — two, the smallest number that is not a serialization point.
+                var count = e.TryGetProperty("count", out var cn) && cn.ValueKind == JsonValueKind.Number ? cn.GetInt32()
+                          : _config.Compressors > 0 ? _config.Compressors : 2;
+                w.WriteLine(await StartCompressorsAsync(child, model, effort, count));
                 break;
             }
             case "ticket-agent":
@@ -1105,10 +1153,15 @@ sealed class Daemon
         psi.ArgumentList.Add(child);
         foreach (var a in childArgs) psi.ArgumentList.Add(a);
         psi.Environment["DODONA_SHIM_INFO"] = Path.Combine(_root, ".dodona", $"shim-lane{id}.json");
+        // What this lane is for. A real claude learns its job from the system prompt; this
+        // says the same thing to a child that has no system prompt to read (§17's fake
+        // agent), and is worth having in the environment of any child when debugging.
+        psi.Environment["DODONA_LANE_ROLE"] = role;
         Process.Start(psi);
         _store.Event("shim_spawned", id, $"pipe={pipe} child={child} cwd={workDir}");
 
         var rt = new LaneRuntime(id, pipe, _store);
+        HookCompression(rt, role);
         if (await rt.ConnectAndPumpAsync(attempts: 20))
         {
             _lanes[id] = rt;
@@ -1117,6 +1170,120 @@ sealed class Daemon
         }
         _store.LaneState(id, "unreachable");
         return (-1, $"error: lane {id} shim pipe never answered");
+    }
+
+    // ------------------------------------------------------------- selective compression (§5)
+
+    /// <summary>Only WORK lanes get their turn-finals compressed. A compressor whose own
+    /// result was compressed would ask itself to summarise its summary, forever.</summary>
+    void HookCompression(LaneRuntime rt, string role)
+    {
+        if (role == "work") rt.OnResult = CompressResult;
+    }
+
+    /// <summary>
+    /// The compressor pool (§5). Warm sessions, so a turn lands on ~1s of latency instead
+    /// of a cold start, and a POOL of them rather than one: a single compressor
+    /// accumulating six lanes' turn-finals is exactly the unbounded serialization point
+    /// §3 forbids the dispatcher to be. Cheap model, low effort — shortening a paragraph
+    /// is not where judgement compounds (§9's ladder), and it runs 5–10× more often than
+    /// anything else in the system.
+    /// </summary>
+    async Task<string> StartCompressorsAsync(string child, string model, string effort, int count)
+    {
+        count = Math.Clamp(count, 1, 4);
+        // A schema, not an instruction to be brief: "be concise" is advice a model may
+        // decline, a character cap on a named field is not (§4/§5).
+        var sys = "You are Dodona's pane compressor. You will be given one agent's turn-final message. " +
+                  "Reply with ONLY one line of JSON, no prose, no markdown, no code fence: " +
+                  "{\"headline\":\"<=90 characters\",\"needs_you\":true|false,\"options\":[\"<a few words>\"]} " +
+                  "headline is what the operator must know, written for someone glancing at one pane of six: " +
+                  "past tense for work that happened, imperative for what is wanted. No preamble, no markdown, " +
+                  "never mention 'the user', never restate the question. " +
+                  "needs_you is true only when the work cannot continue without a human decision. " +
+                  "options lists those choices, at most three, and is [] whenever needs_you is false.";
+        var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: false) : new List<string>();
+
+        var alive = _store.LanesAll().Count(l => l.Role == "compressor" && l.State == "alive" && _lanes.ContainsKey(l.Id));
+        if (alive >= count) return $"compressor pool already warm ({alive})";
+        var started = new List<long>();
+        for (int i = alive; i < count; i++)
+        {
+            var (id, msg) = await SpawnLaneAsync($"COMPRESS{i + 1}", "compressor", _root, child, args);
+            if (id < 0) return started.Count > 0
+                ? $"compressor pool partially up: {started.Count} warm, then: {msg}"
+                : $"error: {msg}";
+            _compressorLocks[id] = new SemaphoreSlim(1, 1);
+            started.Add(id);
+        }
+        return $"compressor pool warm: {alive + started.Count} session(s) on {model}" +
+               (effort is { Length: > 0 } ? $"/{effort}" : "") + $" — lanes {string.Join(", ", started)}";
+    }
+
+    /// <summary>
+    /// A turn ended (§5). The row is already in the store and already on screen; this only
+    /// ever fills in a shorter rendering of it, so every failure path below simply leaves
+    /// the operator reading the agent's own words — which is the current behaviour, and
+    /// therefore a safe floor. Nothing here is ever awaited by the wire pump.
+    /// </summary>
+    void CompressResult(long laneId, long paneEventId, string body)
+    {
+        // Already the length a compressor would produce: spending a model call here would
+        // be exactly the no-judgment volume §2.2 says not to buy.
+        if (body.Length <= 120 && !body.Contains('\n')) return;
+
+        var pool = _store.LanesAll()
+            .Where(l => l.Role == "compressor" && l.State == "alive" && _lanes.ContainsKey(l.Id))
+            .ToList();
+        if (pool.Count == 0) return;                  // no pool warm: the full text stands
+
+        var pick = pool[(int)((uint)Interlocked.Increment(ref _compressorNext) % pool.Count)];
+        if (!_compressorLocks.TryGetValue(pick.Id, out var gate)) return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                string? reply;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                await gate.WaitAsync();
+                try { reply = await _lanes[pick.Id].AskAsync(body, 25000); }
+                finally { gate.Release(); }
+                if (reply is null) { _store.Event("compressor_timeout", pick.Id, $"lane={laneId} row={paneEventId}"); return; }
+
+                var open = reply.IndexOf('{');
+                var close = reply.LastIndexOf('}');
+                if (open < 0 || close <= open) { _store.Event("compressor_failed", pick.Id, $"no json in reply: {Truncate(reply, 120)}"); return; }
+                using var d = JsonDocument.Parse(reply[open..(close + 1)]);
+                var headline = d.RootElement.TryGetProperty("headline", out var h) ? h.GetString() ?? "" : "";
+                if (headline.Trim().Length == 0) { _store.Event("compressor_failed", pick.Id, "empty headline"); return; }
+
+                var needsYou = d.RootElement.TryGetProperty("needs_you", out var ny) && ny.ValueKind == JsonValueKind.True;
+                var options = new List<string>();
+                if (d.RootElement.TryGetProperty("options", out var op) && op.ValueKind == JsonValueKind.Array)
+                    options.AddRange(op.EnumerateArray().Select(x => x.GetString() ?? "").Where(x => x.Length > 0).Take(3));
+
+                // The fixed shape from §5. The lane's name is NOT repeated here the way the
+                // design sketch shows it: in a pane the row already sits under that lane's
+                // own coloured header, and in the feed the title is already the first thing
+                // on the row. Printing it a third time is noise, not structure.
+                var flat = headline.Trim().ReplaceLineEndings(" ");
+                // A model that already opened with the word would otherwise render
+                // "BLOCKED — BLOCKED ..." — the prefix is structure, so it is added exactly
+                // once and never echoed.
+                if (flat.StartsWith("BLOCKED", StringComparison.OrdinalIgnoreCase))
+                    flat = flat[7..].TrimStart(' ', ':', '-', '—');
+                var text = new StringBuilder();
+                if (needsYou) text.Append("BLOCKED — ");
+                text.Append(Truncate(flat, 90));
+                if (needsYou && options.Count > 0) text.Append("\n   options: ").Append(string.Join(" / ", options));
+
+                _store.PaneCompressed(paneEventId, text.ToString());
+                _store.Event("compressed", pick.Id,
+                    $"{sw.ElapsedMilliseconds}ms lane={laneId} row={paneEventId} {body.Length}->{text.Length} chars needs_you={needsYou}");
+            }
+            catch (Exception ex) { _store.Event("compressor_failed", pick.Id, ex.Message); }
+        });
     }
 
     /// <summary>Routing (§4): instant by default, corrected visibly. Tier 0 (prefix) is

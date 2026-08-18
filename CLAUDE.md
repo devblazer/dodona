@@ -62,6 +62,7 @@ powershell ... tests\m3-acceptance.ps1        # the UI as a view over the store
 powershell ... tests\m4-acceptance.ps1        # hot swap
 powershell ... tests\workspace-acceptance.ps1 # multi-repo workspaces
 powershell ... tests\ui-use-acceptance.ps1    # the UI driven like a person
+powershell ... tests\compression-acceptance.ps1  # selective compression (§5)
 ```
 
 `ui-use` is the one that matters most for UI work: dumps and screenshots prove the UI
