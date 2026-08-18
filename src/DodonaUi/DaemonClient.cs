@@ -100,7 +100,9 @@ static class DaemonClient
         return "started a concierge but it never answered its control pipe";
     }
 
-    static bool Probe(string instanceId)
+    /// <summary>Is this workspace's daemon answering its control pipe? Public because the
+    /// workspace switcher shows awake/asleep per row — same probe, same 300ms bound.</summary>
+    public static bool Probe(string instanceId)
     {
         var pipe = new NamedPipeClientStream(".", Instance.CtlPipe(instanceId), PipeDirection.InOut);
         try { pipe.Connect(300); return true; }

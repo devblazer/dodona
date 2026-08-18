@@ -39,6 +39,7 @@
     "collapse_survives_reopening_the_window":  "PASS",
     "expanding_returns_it_to_the_grid":  "PASS",
     "a_collapsed_lane_still_shows_its_badge":  "PASS",
+    "bare_launch_is_the_shell_booted_to_zero":  "PASS",
     "shell_boots_to_zero_with_nothing_awake":  "PASS",
     "boot_to_zero_shows_no_bands":  "PASS",
     "boot_to_zero_still_has_an_input_box":  "PASS",

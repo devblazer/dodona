@@ -294,14 +294,16 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <!-- which WORKSPACE holds the grid; click (or Ctrl+P) to open another. The
-                     feed below is a union across workspaces (§6), so the header names the one
-                     the grid is showing rather than the one the window was opened for. -->
+                <!-- which WORKSPACE holds the grid; click (or Ctrl+P) for the workspace
+                     switcher — names only, never folders (a workspace is named, not located,
+                     WORKSPACES-CONCIERGE.md §1). The feed below is a union across workspaces
+                     (§6), so the header names the one the grid is showing rather than the one
+                     the window was opened for. -->
                 <DockPanel Grid.Row="0" Margin="4,0,0,6">
                     <TextBlock DockPanel.Dock="Left" Text="DISPATCHER" FontWeight="Bold" FontSize="14" Foreground="#FF9AA3AE"/>
-                    <Button DockPanel.Dock="Right" Click="Project_Click" HorizontalAlignment="Right"
+                    <Button DockPanel.Dock="Right" Click="Workspace_Click" HorizontalAlignment="Right"
                             Background="Transparent" BorderThickness="0" Padding="4,0" Cursor="Hand"
-                            ToolTip="{Binding ProjectPath}">
+                            ToolTip="Switch workspace (Ctrl+P)">
                         <TextBlock FontSize="11" Foreground="#FF6FA8DC">
                             <Run Text="{Binding WorkspaceLabel, Mode=OneWay}"/><Run Text=" ▾"/>
                         </TextBlock>

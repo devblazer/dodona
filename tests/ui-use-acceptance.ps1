@@ -61,6 +61,7 @@ $uiProc = $null
 # are tracked so the scoped cleanup in `finally` can stop them by pid (CLAUDE.md §4).
 $daemon2 = $null
 $shellUi = $null
+$bareUi = $null
 try {
     # Where this workspace keeps its state. Not `<root>\.dodona` any more: a workspace
     # is named rather than located, so the suite asks the binary (see tests/_workspace.ps1).
@@ -318,6 +319,23 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     # what it says).
     Dodona @("stop-daemon") | Out-Null
     Start-Sleep -Seconds 1
+
+    # ---- a BARE launch (no --root, no --workspace, no --shell) IS the shell ----------------
+    # The folder picker that used to answer a bare launch was removed 2026-08-18 on the
+    # operator's direction (WORKSPACES-CONCIERGE.md §6.1): a workspace is named, not
+    # located, so there is no folder question to ask on the way in. If this check fails,
+    # a bare launch opened something that does not answer the shell pipe — which for a
+    # person means the front door regressed to a dialog.
+    $bareUi = Start-Process $ui -ArgumentList "--test-window" -PassThru
+    Start-Sleep -Seconds 3
+    $bz = $null
+    try { $bz = (& $dodona ui dump --shell) | Out-String | ConvertFrom-Json } catch { }
+    Check 'bare_launch_is_the_shell_booted_to_zero' ($null -ne $bz -and $bz.bootToZero -eq $true) `
+        ($(if ($null -eq $bz) { 'shell pipe did not answer' } else { $bz | ConvertTo-Json -Compress -Depth 3 }))
+    (& $dodona ui close --shell) | Out-Null
+    Start-Sleep -Milliseconds 600
+    if ($bareUi -and -not $bareUi.HasExited) { try { Stop-Process -Id $bareUi.Id -Force } catch { } }
+
     $shellUi = Start-Process $ui -ArgumentList "--shell", "--test-window" -PassThru
     Start-Sleep -Seconds 3
     function ShellDump() { (& $dodona ui dump --shell) | Out-String | ConvertFrom-Json }
@@ -391,7 +409,7 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     (& $dodona stop-daemon --workspace $ws2.Id) | Out-Null
 }
 finally {
-    foreach ($proc in $uiProc, $shellUi, $daemon, $daemon2) {
+    foreach ($proc in $uiProc, $shellUi, $bareUi, $daemon, $daemon2) {
         if ($proc -and -not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force } catch { } }
     }
     # Scoped cleanup: only THIS test's processes, resolved from its own shim-info

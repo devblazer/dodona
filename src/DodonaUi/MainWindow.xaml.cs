@@ -40,12 +40,10 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = _vm;
         // The workspace's NAME, not a folder label. A workspace is named rather than
-        // located (WORKSPACES-CONCIERGE.md §1), so the shortest-unique-path trick that used
-        // to title this window is now answering a question nobody asked — the operator
-        // named this thing "work", and that is what the window should say. The primary
-        // member is still the tooltip, because "which folder is this" stays a fair question.
-        _vm.ProjectName = workspaceName;
-        _vm.ProjectPath = primary;
+        // located (WORKSPACES-CONCIERGE.md §1) — no path appears anywhere in this window's
+        // chrome, not even a tooltip: locations belong to the router, and the last two
+        // path-shaped leftovers here were exactly what let the old folder interface
+        // survive the workspace redesign (removed 2026-08-18).
         Title = workspaceName.Length > 0 ? $"Dodona — {workspaceName}" : "Dodona";
 
         // ShellId is a sentinel for "opened over no particular workspace" (§4), not a
@@ -475,9 +473,11 @@ public partial class MainWindow : Window
         if (e.Key == Key.P && Keyboard.Modifiers == ModifierKeys.Control) { OpenPicker(); e.Handled = true; }
     }
 
-    /// <summary>Open another project (Ctrl+P). It gets its own window, its own daemon and
-    /// its own everything — instances share nothing (§14), so several can be open at
-    /// once and this window keeps running untouched.</summary>
+    /// <summary>The workspace switcher (Ctrl+P, or the header's name). Workspace NAMES
+    /// only — picking one wakes it and hands it the grid in THIS window through
+    /// FocusWorkspace, the same path a band click takes. The one-window model holds: this
+    /// never spawns a second window per workspace. (It used to be the folder picker and
+    /// used to do exactly that; removed 2026-08-18.)</summary>
     void OpenPicker()
     {
         var existing = Application.Current.Windows.OfType<PickerWindow>().FirstOrDefault();
@@ -485,7 +485,7 @@ public partial class MainWindow : Window
         new PickerWindow { Owner = null }.Show();
     }
 
-    void Project_Click(object sender, RoutedEventArgs e) => OpenPicker();
+    void Workspace_Click(object sender, RoutedEventArgs e) => OpenPicker();
 
     void Window_Drag(object sender, MouseButtonEventArgs e)
     {

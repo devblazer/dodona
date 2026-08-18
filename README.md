@@ -7,8 +7,8 @@ agents build competing versions of the same thing.
 ## Running it
 
 Dodona is an application you launch, not a command you type at a project. Build the
-one-folder install, then run `DodonaUi.exe` from it — it asks which project to open,
-starts that project's daemon itself, and needs no environment variables:
+one-folder install, then run `DodonaUi.exe` from it — it opens the workspace shell and
+starts daemons itself as workspaces wake; it needs no environment variables:
 
 ```powershell
 dotnet build Dodona.sln -c Release
@@ -22,16 +22,18 @@ running exe, so in-place replacement is impossible — and once the shortcut exi
 later publish re-points it at the newest build automatically. Publishing into an
 overridden `DODONA_BIN_ROOT` (as the acceptance tests do) never touches it.
 
-The picker lists recent projects with live status (`running` / `idle` / `new`), and
-**Browse…** adds one — any git repository will do; tickets are branches and lanes are
-worktrees, so git is required. Opening a second project opens a second window with its
-own daemon: instances share nothing (§14), so that *is* multi-project support. `Ctrl+P`
-from a grid opens another.
+A bare launch opens the **shell**: one window over every awake workspace. A workspace is
+a *named* session group — "work", "personal" — with its own lanes, memory and merge
+queues; folders are members the router attaches as work arrives, never something you
+browse for. Typing is the front door: describe work and the concierge resolves, wakes or
+creates the right workspace. `Ctrl+P` (or clicking the workspace name) opens the
+workspace switcher — names and awake/asleep status; picking one hands it the grid in the
+same window.
 
 Direct and forensic entry points, for shortcuts and for debugging sessions:
 
 ```powershell
-DodonaUi.exe --root C:\src\myproject          # skip the picker (starts the daemon if needed)
+DodonaUi.exe --root C:\src\myproject          # straight into one workspace (starts its daemon)
 DodonaUi.exe --root <copied-store> --attach   # look only: never summon a daemon
 DodonaUi.exe --pose full                      # a seeded visual state, no store at all
 DodonaUi.exe --shot out.png                   # self-render this window and exit

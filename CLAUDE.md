@@ -139,7 +139,7 @@ build (or after the probe, when nothing was running). This exists because fourte
 consecutive auto-publishes of a broken tree once each repointed the shortcut at a binary
 whose daemon died on startup — the front door itself rotted, and every project open froze
 against it (2026-08-18). The shortcut launches `DodonaUi.exe --shell` — the workspace
-shell, never the folder picker.
+shell. (The folder picker no longer exists at all, see §3.1.)
 
 Blocked swaps **arm themselves** instead of asking (`swap-answer now` forces, `hold`
 parks — holding is opt-in, waiting never is), and a schema-migrating swap **backs up the
@@ -183,7 +183,19 @@ input with `dodona ui type "<text>"`, which submits through the same code path a
 
 Poses are deterministic fixtures (`full`, `badges`, `blocked`, `feed`, `collapsed`,
 `tray`, `overlay`, `long`, `two`, `twelve`, `bands`, `merged-feed`, `boot-zero`). `--pose` needs a `--root`
-or `--shell`; without either you get the picker.
+or `--shell`; a bare launch (no `--root`, no `--workspace`) is the shell.
+
+## 3.1 No folder UI, ever (operator directive, 2026-08-18)
+
+The app's only user-facing identity is the **workspace name**. Locations are the router's
+business: the concierge attaches folders as work arrives, and a workspace daemon manages
+every lane in its member locations. The old folder picker (recents, Browse…, repo
+statuses) and the header dropdown that reopened it survived the workspace redesign as
+leftovers and were removed on the operator's direction. `PickerWindow` is now the
+**workspace switcher** — names + awake/asleep only; picking wakes the workspace and hands
+it the grid through `FocusWorkspace`, never a second window. Do not reintroduce a folder
+list, a Browse dialog, or a filesystem path in window chrome. `repo-init` stays a daemon
+command reached by typing. (Decision recorded in WORKSPACES-CONCIERGE.md §6.1.)
 
 **The grid divides itself** (§8 revised): no slot cap, panes shrink as lanes arrive, nothing
 scrolls, and the operator collapses tiles to chips (`dodona lane-collapse|lane-expand <lane>`).

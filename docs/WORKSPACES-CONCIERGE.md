@@ -445,6 +445,22 @@ dimension.
   only resource is a pipe (`dodona-shell-ui`), so `dodona ui dump --shell` addresses it.
   It cannot borrow one workspace's ui pipe, because it shows all of them.
 
+  **Revised 2026-08-18 — the folder picker is gone, and folder UI must not come back.**
+  The operator found the shell still carried the per-root era's chrome: the header name was
+  a dropdown into the old folder picker (recents, Browse…, repo statuses, repo-init), and
+  picking there spawned a second old-style window per project. That contradicted §1's whole
+  premise — the app's only user-facing identity is the workspace NAME; locations are the
+  router's business, attached by the concierge as work arrives (§5). So now: a bare launch
+  of `DodonaUi.exe` lands in the shell (boot-to-zero if nothing is awake — typing is how you
+  leave it), `PickerWindow` survives only as the **workspace switcher** (names + awake/asleep,
+  opened from the header or Ctrl+P; picking wakes the workspace and hands it the grid through
+  `FocusWorkspace`, the same path a band click takes), and `--root`/`--workspace` remain the
+  direct doors tests and shortcuts use. Browse…, the recents file (`projects.json`), the
+  shortest-unique-suffix window label, and the picker's repo-init button are deleted;
+  `repo-init` remains a daemon command, reached by typing. **Do not reintroduce a folder
+  list, a Browse dialog, or a path in the window chrome** — that is the §8 anchor-folder
+  rejection wearing UI clothes.
+
 - **`ui workspace <name|id>` is the band click without a mouse.** A band is a `Border`; UIA
   can find one but cannot invoke it, and `SendKeys` is banned because it needs focus (the
   operator's keyboard was stolen mid-work by exactly that). So the verb goes through

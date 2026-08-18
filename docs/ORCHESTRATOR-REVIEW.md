@@ -436,8 +436,9 @@ with no repository at all, and `repo-init` creates one when a ticket first needs
   settings-merge for tracked `.claude/` — **DONE** by construction (the gate now deploys
   to `settings.local.json`, which Claude merges over the repo's own settings, so the
   tracked file is never touched and the repo's hooks keep running); the short unique
-  label — **DONE** for panes (repo tag, multi-repo workspaces only) and for windows
-  (shortest-unique-suffix against the picker's known projects); the quota indicator —
+  label — **DONE** for panes (repo tag, multi-repo workspaces only); for windows it was
+  the shortest-unique-suffix trick, later deleted with the folder picker (2026-08-18,
+  WORKSPACES-CONCIERGE.md §6.1: windows title by workspace NAME now); the quota indicator —
   **DONE** (rate_limit_event off the wire into kv, aged honestly, amber past the CLI's own
   threshold); lane lifecycle §3–§5 — **DONE** (land retires the agent, lanes go dormant,
   `lane-respawn`/wake resumes the session, badge deferral, liveness clock).
