@@ -4,6 +4,57 @@ Dodona orchestrates Claude Code agents. You are probably one of them, working in
 These are the house rules — short, and every one of them exists because breaking it cost
 real time.
 
+## 0. The repo is the only memory
+
+**Do not rely on session memory, recalled context, or anything that lives outside this
+repository.** Those load for some sessions and not others; a lane in a worktree sees none
+of it. The operator's standing rule: *skills + CLAUDE.md, or tooling that enforces, is
+the only reliable way.* So knowledge worth keeping goes in exactly one of:
+
+- **enforcement in code** — the strongest form (the claim gate, the merge backstop, the
+  drift watcher exist because instructions get skipped and code does not)
+- **this file** — rules and traps every agent must know before touching anything
+- **`.claude/skills/`** — invocable workflows (`/ship` is the delivery path)
+- **`docs/` and `DEBUGGING.md`** — design authority, decisions and rejections, schema
+- **commit messages** — the incident history of record; write them so a stranger can
+  reconstruct what happened and why
+
+If you learn something load-bearing mid-task, put it in one of those places *in the same
+commit as the work*. A lesson that lives anywhere else is a lesson the next session
+re-learns the expensive way.
+
+## 0.1 How the operator works (previously unwritten)
+
+- They state **goals, not metric specs** — "make it feel instant" is the requirement;
+  deriving budgets is your job. Do not ask them to quantify.
+- **Quota is the scarce resource** (§2.6): suites stay model-free, real-model runs are
+  rare and deliberate, the router/compressor stay on cheap models, and you never spawn
+  subagent swarms when one focused session will do.
+- **Act, announce, allow undo** (§11) applies to you too: make the routine call, say what
+  you did, keep it reversible. Blocking questions are for genuinely unsafe forks only.
+- Feedback like "that's bullshit" about a proposal is a decision — record it (rejected
+  ideas live in `docs/LANE-LIFECYCLE.md` §2 style: *with the reason*) so it is never
+  re-proposed.
+
+## 0.2 Windows & PS 5.1 traps (each cost a debugging round)
+
+- **Non-ASCII literals in `.ps1` files** (`✓ — ⚠`) are read as ANSI in BOM-less files and
+  match nothing — build patterns from `[char]0x2713` / `[char]0x2014`.
+- **Native stderr**: capturable only with `$ErrorActionPreference='Continue'` + `2> file`
+  (`Stop` throws NativeCommandError; `SilentlyContinue` eats the record).
+- **`-shl` on `[byte]` stays a byte** and overflows to 0 — cast `[int]` first.
+- **Commit messages** with quotes/dashes: `git commit -F <file>`, never inline `-m`.
+- **`.Count` on a one-element pipeline** is `$null` — wrap in `@(...)`.
+- **A `.ps1` that fails to PARSE never reaches `finally`** — everything it started leaks.
+- **WPF**: implicit usings omit `System.IO`; with `AcceptsReturn` the TextBox class
+  handler eats Enter before instance `KeyDown` (use `PreviewKeyDown`);
+  `RenderTargetBitmap` renders in the element's own coordinate space (capture the Window,
+  not a margined child).
+- **Redirected child stdio defaults to the OEM codepage** — set UTF-8 explicitly or em
+  dashes become `ΓÇö`.
+- **`Microsoft.Data.Sqlite`**: `INSERT …; SELECT last_insert_rowid();` in one command
+  returns nothing without `NextResult()` — use a separate command.
+
 ## 1. Work is not done until it is built
 
 **Never report a change as complete without compiling it.**
@@ -108,6 +159,12 @@ instance the operator is using right now*.
 `.dodona/` holds the live store, its WAL twins, and the worktrees. It is git-ignored, and
 it must stay that way — a `git add -A` once committed a live SQLite database into this
 repo. Deployed gate files live in `.git/info/exclude` for the same reason.
+
+## 5.1 Delivery is a skill
+
+`/ship` (`.claude/skills/ship/SKILL.md`) is the complete build → suites → commit →
+publish → verify-the-swap path. Use it rather than improvising the sequence; when the
+delivery process changes, change the skill in the same commit.
 
 ## 6. Where things are written down
 
