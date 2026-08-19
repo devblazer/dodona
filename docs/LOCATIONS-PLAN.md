@@ -190,6 +190,66 @@ in; a store relocated because an agent ran `dodona tickets`.
 | P1.6 | **Done 2026-08-19 (Phase 0), recorded here because it is a `dev prove` fix, not a Phase 0 one.** `dev prove` built `Dodona.sln` in its HEAD worktree, which includes `Dodona.Tests` — and `prove` copies `tests\` from the WORKING tree over HEAD's `src\`. So a unit test naming a method the fix introduces cannot compile there, by construction, and the whole proof aborted with `HEAD does not build` plus nine `CS0117`s in a project no acceptance suite loads. Measured: 12 checks across 2 suites, **zero verdicts**, for a change whose acceptance checks were all provable. It now builds the four executables unless `unit` is itself among the suites being proved. The residual limit is inherent and the abort message states it: **a unit test for a NEW API can never be proven red**, so prove the acceptance check and say so in the report. |
 
 **Becomes impossible:** landing any later phase unobserved.
+### What Phase 1 measured, and what it corrected  *(landed 2026-08-19)*
+
+Every citation in the table above was checked against the source before it was changed. Four
+things turned out differently from what the audits said, and all four matter to Phase 2.
+
+**1. `m3:186-187` does NOT pin the cwd rung ORDER.** The work order said the ticket-worktree
+branch must keep winning over the recorded-cwd branch or those checks go red. Measured, by
+reversing the order in `Daemon.ResolveLaneCwd` and rebuilding: **m3 stayed 31/31 green.** The
+reason is that for a normally-spawned ticket lane the two rungs name the SAME folder --
+`AttachShimAsync` recorded the worktree as `lanes.cwd` at spawn -- so the order only matters when
+they disagree (a lane older than the column with an open ticket, or a worktree recreated after
+the lane spawned). The M5.1 bug was `_primary` hardcoded with no recorded-cwd rung at all, and
+the recorded-cwd rung alone would have fixed it.
+`unit:A_ticket_worktree_wins_over_the_recorded_cwd` is now the only thing in the tree that pins
+the order, which is precisely what P1.3 was for.
+
+**2. `m3` does not cover the ticket-lane SPAWN path at all, only the respawn.** Measured, by
+making `ticket-agent` spawn in `_primary` instead of the worktree ([Daemon.cs:709](../src/Dodona/Daemon.cs#L709))
+and rebuilding: **m3 stayed green**, because it asserts on the `lane-respawn` event, and respawn
+re-derives the worktree from the ticket regardless of where the first spawn went. Five of the new
+`workspace` checks go red on it. So Phase 2 must not read a green m3 as evidence about a spawn
+site.
+
+**3. A lane with NO recorded cwd must say nothing, not `none`.** Found by m3 going red on real
+output: the `DODONA` dispatcher lane is a UI row and nothing else, so it has no cwd. `Projects.Field`
+returns null for an empty cwd -- `AttachShimAsync` writes the column before `Process.Start`, so an
+empty one can only mean "never spawned".
+
+**4. `dev prove` could not prove ANY of this, three separate ways** (all in `Do-Prove`, all fixed
+or refused out loud in the same commit):
+ * it compiled `tests\Dodona.Tests` into the HEAD baseline, so a unit test naming a symbol the
+   change ADDS made prove abort with *"HEAD does not build"* -- and take every provable
+   acceptance check in the same run down with it. Now it builds the four product projects only.
+ * `Start-Suite 'unit'` would then abort with *"no suite 'unit'"*.
+ * and `Run-Unit` builds and tests `$repo`, the WORKING TREE -- so a unit verdict would have been
+   the change measured against itself. **`dev prove unit:<check>` now refuses**, naming the honest
+   limit: a new pure function cannot be failed by a HEAD that does not contain it.
+
+**5. `dev prove`'s worktree cache is SHARED BETWEEN LANES.** `$env:TEMP\dodona-prove\<commit12>`
+is keyed on the commit alone, so three lanes at one HEAD share one worktree, one `tests\`
+directory and one `stderr.tmp`. Observed: `workspace-acceptance` died on its FIRST command with
+*"the process cannot access the file ... stderr.tmp"*, and prove reported eleven perfectly good
+checks as MISSING. This is `f9aaf25`'s two-lanes-one-tree failure reappearing inside the tool
+that verifies. A private `TEMP` is the workaround; the fix belongs beside P1.5.
+
+| item | what |
+|---|---|
+| P1.5 | `dev test` / `dev suites` / `dev gate` do not build the tree under test -- a **refusal** comparing build output against sources, never an implicit build (that would end the 1-second `dev test unit` loop). *(filed by the Phase 0c lane)* |
+| P1.6 | `dev prove`'s worktree must be per-LANE, not per-commit (finding 5 above). Two lanes proving at one HEAD corrupt each other's run, and the failure looks like a crashed suite rather than a collision. |
+
+**Enforcement that replaced a check.** P1.4 began as an acceptance check that `registry.db` is
+under `DODONA_HOME`. Proving it red required breaking `Paths.Registry` -- and the concierge suite
+then promptly wrote three workspaces (`harbour`, `lighthouse` + the alias `rotation`, and `work`)
+into the operator's REAL registry, and two unrelated concierge checks went red because the
+group-scope ladder was resolving against the operator's real workspaces. A check that reports
+after the fact is not enough for machine-wide state, so `Assert-IsolatedRegistry` in
+`tests/_workspace.ps1` now **refuses to run any suite** whose registry is not under
+`DODONA_HOME`. Called from `Use-TestBinaries`, so all twelve suites get it with no per-suite edit.
+Re-verified with the same break: the suite aborts in 2.1 s and writes nothing.
+
 
 ---
 
@@ -243,7 +303,11 @@ byte-for-byte identical:**
 - **`workspace:146-150` `lanes_are_workspace_wide`** — its stated premise is *"lanes are
   workspace-wide"*. This phase contradicts it. The one check whose **name** must change.
 - `m3:186-187` survives **only if the ticket-worktree branch still wins** over the project
-  branch. A red here is a correctness incident, not a test problem.
+  branch. A red here is a correctness incident, not a test problem. **But do not read its
+  green as evidence:** Phase 1 measured that it stays green both with the rung order
+  reversed AND with `ticket-agent` spawning in the first project -- it covers the RESPAWN
+  path only. The checks that cover the spawn sites are the new `workspace` ones and
+  `unit:A_ticket_worktree_wins_over_the_recorded_cwd`.
 
 ---
 

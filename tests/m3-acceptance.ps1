@@ -186,6 +186,35 @@ print('|' if r is None else str(r[0]) + '|' + r[1])
     Check 'respawned_ticket_lane_is_not_in_the_live_tree' `
         (-not $spawnDetail.EndsWith("cwd=$root")) $spawnDetail
 
+    # ---- A ONE-PROJECT WORKSPACE SAYS NOTHING NEW ABOUT PROJECTS (LOCATIONS-PLAN P1.2) ----
+    # THE PROPERTY THE WHOLE WORKSPACE MIGRATION RESTED ON, and the one docs/LOCATIONS-PLAN.md
+    # is most likely to break: every phase of it must leave the one-project case byte-for-byte
+    # identical. This workspace has ONE project, so a lane's project carries no information --
+    # there is exactly one answer -- and both `status` and `ui dump` must therefore stay silent.
+    #
+    # This is a REGRESSION check, not a defect check: nothing is broken today, and it exists so
+    # that Phases 2 to 5 cannot quietly add a field to the configuration eleven of the twelve
+    # suites use. It goes red the moment Projects.Field starts answering here, which is exactly
+    # what a careless "just always print the project" would do.
+    #
+    # `project` is expected PRESENT-AND-EMPTY in the dump and ABSENT from the status line: a JSON
+    # key that vanishes is a shape change every consumer has to guard for, while a text field is
+    # a suffix that simply is not there. Both mean "nothing to say" -- the difference is the
+    # medium, and it was picked deliberately rather than by accident.
+    $oneSt = Dodona @("status")
+    $oneStLanes = @($oneSt -split "`r?`n" | Where-Object { $_ -match '^lane \d+' })
+    Check 'one_project_status_names_no_project' `
+        ($oneStLanes.Count -ge 2 -and -not (@($oneStLanes | Where-Object { $_ -match 'project=' }).Count)) `
+        ($oneStLanes -join ' || ')
+    $oneD = Dump
+    $oneSlots = @($oneD.slots | Where-Object { -not $_.empty })
+    Check 'one_project_panes_carry_the_project_key' `
+        ($oneSlots.Count -ge 1 -and @($oneSlots | Where-Object { $null -eq $_.PSObject.Properties['project'] }).Count -eq 0) `
+        "slots=$($oneSlots.Count)"
+    Check 'one_project_panes_name_no_project' `
+        ($oneSlots.Count -ge 1 -and @($oneSlots | Where-Object { "$($_.project)" -ne '' }).Count -eq 0) `
+        (($oneSlots | ForEach-Object { "$($_.title)=[$($_.project)]" }) -join ' ')
+
     # ---- landing retires the agent, the lane survives, wake resumes it ----
     # (docs/LANE-LIFECYCLE.md §3: the prune deletes the directory the agent stands in, so
     # an agent left running there was the most confusing state the system could be in.)
@@ -254,6 +283,22 @@ print('|' if r is None else str(r[0]) + '|' + r[1])
         $poseHashes[$pose] = (Get-FileHash "$out\pose-$pose.png").Hash
     }
     Check 'poses_render_distinct' (($poseHashes.Values | Select-Object -Unique).Count -eq 8) (($poseHashes.Values | Select-Object -Unique).Count)
+
+    # ---- the `two` pose carries TWO DIFFERENT PROJECTS (LOCATIONS-PLAN P1.2) ----
+    # A pose nobody asserts on is decoration, and this one is the ONLY way to look at the project
+    # tag without two live daemons and a two-project registry. It is what makes
+    # `--pose two --shot out.png` a review a person can do (CLAUDE.md 3's capture loop).
+    #
+    # DIFFERENT projects, not just non-empty: one tile showing a tag proves the binding exists,
+    # two tiles showing DIFFERENT tags prove the tag belongs to its own lane -- which is the
+    # failure mode of every "which project" feature (one value computed once, painted N times).
+    Dodona @("ui", "pose", "two") | Out-Null
+    $twoD = Dump
+    $twoSlots = @($twoD.slots | Where-Object { -not $_.empty })
+    $twoProjects = @($twoSlots | ForEach-Object { "$($_.project)" } | Where-Object { $_ -ne '' })
+    Check 'the_two_pose_names_a_project_per_lane' `
+        ($twoSlots.Count -eq 2 -and $twoProjects.Count -eq 2 -and $twoProjects[0] -ne $twoProjects[1]) `
+        (($twoSlots | ForEach-Object { "$($_.title)=[$($_.project)]" }) -join ' ')
 
     Dodona @("ui", "pose", "blocked") | Out-Null
     $d = Dump

@@ -17,6 +17,14 @@ public record PaneSnap(long LaneId, string Title, string State, string Presence,
     /// project, which must never see the word.</summary>
     public string Repo { get; init; } = "";
 
+    /// <summary>WHICH PROJECT this lane is in — a project being one folder, a `members`
+    /// row (docs/GLOSSARY.md). Exactly what <see cref="Dodona.Projects.Field"/> returns: a
+    /// project path, `neutral`, or `none (cwd=…)`; and "" for "there is nothing to say",
+    /// which is the case for every lane of a ONE-project workspace and is what keeps that
+    /// workspace's dump reporting what it always did (LOCATIONS-PLAN P1.2). Same rule the
+    /// <see cref="Repo"/> tag above already follows, for the same reason.</summary>
+    public string Project { get; init; } = "";
+
     /// <summary>Highest user_input row id — moves when a routed message lands here.</summary>
     public long LastInputId { get; init; }
 
@@ -186,6 +194,10 @@ public sealed class PaneView
     public List<LineView> Lines { get; init; } = new();
 
     public string Repo { get; init; } = "";
+    /// <summary>See <see cref="PaneSnap.Project"/>. Rendered as a tag beside the title, so a
+    /// lane in the wrong project is visible to a PERSON and not only to a check — which is
+    /// the whole point of LOCATIONS-PLAN Phase 1.</summary>
+    public string Project { get; init; } = "";
     /// <summary>True for ~1.5s after a routed message lands here — the eye follows the
     /// routing without reading a receipt (operator: "a lane pulse so I can see where it
     /// routed"). Rendered as a brief border in the LANE's own colour; blocked's white
@@ -203,6 +215,17 @@ public sealed class PaneView
     public Brush LaneBrush => new SolidColorBrush((Color)ColorConverter.ConvertFromString(ColorHex));
     public string FocusMark => Focused ? "▶ " : "";
     public Visibility RepoVisibility => Repo.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>A tile is narrow, so the tag shows the project's LEAF folder — `alpha`, not
+    /// forty characters of path. `ui dump` keeps the unabbreviated value, because a dump
+    /// testifies and a check needs a value it cannot mistake for another project's.
+    /// `none (cwd=…)` becomes a short shout rather than a clipped path: the operator needs
+    /// to SEE it, and the cwd itself is one `dodona status` away.</summary>
+    public string ProjectLabel =>
+        Project.Length == 0 ? ""
+        : Project.StartsWith("none ", StringComparison.Ordinal) ? "no project"
+        : Project.Contains('\\') ? Project[(Project.LastIndexOf('\\') + 1)..]
+        : Project;
+    public Visibility ProjectVisibility => Project.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     // The lane's controls: close (retire it) always; wake only when there is something to
     // wake. Buttons, because the feed saying "undo: dodona lane-stop 3" at a GUI user was
     // this project's original sin.
@@ -223,7 +246,7 @@ public sealed class PaneView
     public static PaneView From(PaneSnap s, int slot, bool pulsing = false) => new()
     {
         Slot = slot, LaneId = s.LaneId, Title = s.Title, State = s.State, Presence = s.Presence,
-        Badge = s.Badge, Blocked = s.Blocked, Focused = s.Focused, Repo = s.Repo, Pulsing = pulsing,
+        Badge = s.Badge, Blocked = s.Blocked, Focused = s.Focused, Repo = s.Repo, Project = s.Project, Pulsing = pulsing,
         Collapsed = s.Collapsed,
         Lines = s.Lines.Select(LineView.From).ToList(),
     };

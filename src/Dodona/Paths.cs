@@ -59,10 +59,17 @@ static class Paths
     /// (commit 19dad3d; operator: "that could be disastrous").</summary>
     public static string NeutralCwd()
     {
-        var dir = Path.Combine(Home, "neutral");
-        Directory.CreateDirectory(dir);
-        return dir;
+        Directory.CreateDirectory(NeutralDir);
+        return NeutralDir;
     }
+
+    /// <summary>The same directory, WITHOUT creating it. Two callers need to ask "is this
+    /// lane's recorded cwd the neutral one?" rather than "give me somewhere to start an
+    /// agent" -- <see cref="Projects.Field"/> through `status`, and the UI's poller, which
+    /// runs four times a second and must not be creating directories in order to render a
+    /// pane. A read that mutates the disk is the status-summons-a-daemon mistake in
+    /// miniature (CLAUDE.md 3.2).</summary>
+    public static string NeutralDir => Path.Combine(Home, "neutral");
 
     /// <summary>Ticket worktrees stay beside the MEMBER that holds the repository — the
     /// documented exception above. For a one-member workspace whose member is the project

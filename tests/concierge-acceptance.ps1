@@ -87,6 +87,35 @@ try {
     Check 'concierge_answers_its_pipe' ($st -match 'concierge pid=') $st
     Check 'concierge_store_is_its_own' ($st -match 'concierge\\store.db') $st
 
+    # ---- THE REGISTRY LIVES UNDER DODONA_HOME (LOCATIONS-PLAN P1.4) ----------------------
+    # `registry.db` is the ONE machine-wide table in the product: every workspace name, id,
+    # alias and project row. Nothing in the tree asserted where it is. This suite already
+    # COPIES it out of $dodonaHome in its `finally` and asserts nothing about its location, so a
+    # future change that reached for %LOCALAPPDATA% directly -- the way Ver.BinRoot legitimately
+    # does one file over -- would pass all twelve suites while writing into the OPERATOR'S REAL
+    # REGISTRY. A suite that tests the repo-exclusivity REFUSAL could then refuse one of their
+    # real repos (CLAUDE.md 5, and it is the reason DODONA_HOME exists at all).
+    #
+    # Three parts, because the first two alone would be satisfied by a decoy file:
+    #   1. the path the BINARY reports is under $env:DODONA_HOME,
+    #   2. a file is really there,
+    #   3. and it is the LIVE one -- it holds the workspace this suite just created. Part 3 is
+    #      what a stray %LOCALAPPDATA% write cannot fake: the file under DODONA_HOME would exist
+    #      and be empty.
+    #
+    # A REGRESSION check, not a defect check, and `dev prove` says VACUOUS for it by design --
+    # Paths.Registry derives from Paths.Home today, so nothing is broken. It was demonstrated
+    # red by making Paths.Registry reach for LocalApplicationData directly; see the commit.
+    $regPath = (Dx @('where', '--workspace', 'harbour', '--json') | ConvertFrom-Json).registry
+    $homePrefix = $env:DODONA_HOME.TrimEnd('\')
+    Check 'registry_is_reported_under_dodona_home' `
+        ($regPath -and $regPath.StartsWith($homePrefix + '\', [StringComparison]::OrdinalIgnoreCase)) `
+        "registry='$regPath' DODONA_HOME='$homePrefix'"
+    Check 'registry_file_exists_where_it_is_reported' ($regPath -and (Test-Path $regPath)) "registry='$regPath'"
+    $regWs = if ($regPath -and (Test-Path $regPath)) { Invoke-StoreSql $regPath "SELECT name FROM workspaces ORDER BY name" } else { '' }
+    Check 'the_registry_under_dodona_home_is_the_live_one' ($regWs -match 'harbour') "workspaces=$(($regWs -replace '\s+', ' ').Trim())"
+
+
     $r = Resolve-Text "make the pier longer"
     Check 'sole_workspace_needs_no_model' ($r.rung -eq 'only' -and $r.name -eq 'harbour') ($r | ConvertTo-Json -Compress)
 

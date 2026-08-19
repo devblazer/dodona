@@ -154,7 +154,129 @@ function Use-TestBinaries([string]$repo) {
             Copy-Item $f.FullName $target -Force
         }
     }
+    Assert-IsolatedRegistry $dest
     $dest
+}
+
+# ---------------------------------------------------------------- is the registry really ours?
+
+# THE REGISTRY MUST BE UNDER DODONA_HOME, AND THIS REFUSES TO RUN THE SUITE IF IT IS NOT.
+#
+# `registry.db` is the one machine-wide table in the product: every workspace name, id, alias
+# and project row, for the whole machine. DODONA_HOME exists so a suite can create workspaces,
+# migrate stores and exercise the repo-exclusivity REFUSAL without touching the registry the
+# operator is using right now (CLAUDE.md 5) -- and the only thing that made that true was
+# Paths.Registry deriving from Paths.Home. Nothing anywhere checked it.
+#
+# IT IS CHECKED BEFORE THE SUITE CREATES ANYTHING, because a check at the end reports a mess
+# that has already been made. Measured on 2026-08-19, by breaking Paths.Registry on purpose to
+# prove the P1.4 acceptance check red: the concierge suite promptly wrote THREE workspaces --
+# `harbour`, `lighthouse` (plus the alias `rotation`) and `work` -- into the operator's REAL
+# registry under %LOCALAPPDATA%\Dodona\concierge\, and two unrelated checks went red because the
+# group-scope ladder was resolving against the operator's real workspaces instead of the
+# fixture's. Undoing it took three `workspace-forget` calls against live state.
+#
+# Called from Use-TestBinaries so all twelve suites get it with no per-suite edit: every one of
+# them calls that immediately after Use-IsolatedDodonaHome, and a guard that has to be added to
+# twelve files is a guard that will be missing from the thirteenth.
+#
+# HOW IT ASKS: `workspaces --json` opens the Registry, which CREATES registry.db when it is not
+# there -- so the file appearing under DODONA_HOME is evidence of where the BINARY resolved it,
+# not of what this script believes. That command starts no daemon (a registry read plus a pipe
+# enumeration), which is what makes it safe to run before the suite owns anything.
+#
+# It reconstructs `concierge\registry.db` by hand, which CLAUDE.md 5 otherwise forbids. That is
+# deliberate and it is the point: this assertion IS the layout, so asking the binary where it put
+# things would be asking the suspect to vouch for itself.
+function Assert-IsolatedRegistry([string]$bin) {
+    if (-not $env:DODONA_HOME) { throw "Assert-IsolatedRegistry: DODONA_HOME is not set -- call Use-IsolatedDodonaHome first" }
+    $ErrorActionPreference = 'Continue'
+    & "$bin\dodona.exe" workspaces --json 2>&1 | Out-Null
+    $want = Join-Path $env:DODONA_HOME 'concierge\registry.db'
+    if (Test-Path $want) { return }
+    throw ("REFUSING TO RUN: the registry is not under DODONA_HOME, so this suite would write " +
+           "into the machine-wide one. expected '$want'; DODONA_HOME='$env:DODONA_HOME'. " +
+           "Paths.Registry must derive from Paths.Home (CLAUDE.md 5): a suite that creates " +
+           "workspaces outside it litters the operator's real workspace list, and a test of the " +
+           "repo-exclusivity refusal could refuse one of their real repos.")
+}
+
+# ---------------------------------------------------------------- TWO projects, live lanes
+
+# A workspace with TWO projects (two `members` rows -- docs/GLOSSARY.md: a project is one
+# folder), both git repos, ready for a daemon and live lanes.
+#
+# WHY THIS IS SHARED PLUMBING RATHER THAN A LOCAL FIXTURE (docs/LOCATIONS-PLAN.md P1.1). Every
+# phase of that plan is about which project a lane opens in, and before this the tree could not
+# express the question: the ONLY two-project fixture with a daemon anywhere in the suites
+# (workspace-acceptance's `pair`) made a ticket and stopped, so NO suite had ever started a plain
+# lane, or a brain, in a workspace with more than one project. Phases 2, 3 and 5 all need one, and
+# three copies of it would drift.
+#
+# WHAT IT DELIBERATELY DOES NOT DO: start the daemon. Every suite starts daemons its own way
+# (its own output redirection, its own $extraDaemons list to reap in `finally`), and a helper
+# that spawned a process the caller does not know about is a leak waiting for a `finally` that
+# was never told.
+#
+# The returned paths come back FROM THE REGISTRY, not from the strings we made the directories
+# with -- the registry stores them canonicalized (Instance.Canonical resolves 8.3 names,
+# junctions and casing), and `_primary` and `lanes.cwd` are both canonical. Comparing a check's
+# idea of a path against a canonical one is a false red waiting to happen on the first machine
+# whose TEMP is a junction.
+#
+# Members are ordered as attached, and Members[0] IS the workspace's `Primary`
+# (Workspaces.cs:26) -- which is what every spawn site that has not yet been moved passes as a
+# lane's working directory. So .A is "where a plain lane lands today" and .B is "the project a
+# plain lane cannot reach yet", and that asymmetry is the whole point of the fixture.
+function New-TwoProjectWorkspace([string]$dodona, [string]$name) {
+    if (-not $env:DODONA_HOME) { throw "New-TwoProjectWorkspace: call Use-IsolatedDodonaHome first -- this CREATES a workspace and would litter the operator's registry (CLAUDE.md 5)" }
+    $ErrorActionPreference = 'Continue'
+    $made = @()
+    foreach ($tag in 'a', 'b') {
+        $d = Join-Path (Use-SuiteTemp) ("dodona-proj$tag-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Force "$d\src" | Out-Null
+        Set-Content "$d\src\main.cs" "// project $tag"
+        Set-Content "$d\.gitignore" ".dodona/"
+        git -C $d init -b main -q
+        git -C $d add -A
+        git -C $d -c user.email=t@t -c user.name=t commit -q -m init
+        $made += $d
+    }
+    (& $dodona workspace-create --name $name --member $made[0] --member $made[1]) | Out-Null
+    # ConvertFrom-Json emits a JSON ARRAY as ONE pipeline item in PS 5.1, so it lands in a
+    # variable BEFORE anything filters it -- filtering in the same pipeline filters the array
+    # object and `.name -eq 'x'` on an array returns matching ELEMENTS, which is truthy, so
+    # every row passes (CLAUDE.md 0.2; it made three checks silent no-ops once).
+    $all = (& $dodona workspaces --json) | ConvertFrom-Json
+    $row = @($all) | Where-Object { $_.name -eq $name } | Select-Object -First 1
+    if (-not $row) { throw "New-TwoProjectWorkspace: '$name' was not created -- $($all | ConvertTo-Json -Compress)" }
+    $members = @($row.members).path
+    if ($members.Count -ne 2) { throw "New-TwoProjectWorkspace: '$name' has $($members.Count) project(s), not 2" }
+    $w = (& $dodona where --workspace $row.id --json) | Out-String | ConvertFrom-Json
+    [pscustomobject]@{
+        Id      = $row.id
+        Name    = $name
+        A       = $members[0]                        # the FIRST project == the workspace Primary
+        B       = $members[1]
+        ALeaf   = (Split-Path -Leaf $members[0])
+        BLeaf   = (Split-Path -Leaf $members[1])
+        Store   = $w.store
+        Dir     = $w.dir
+        CtlPipe = $w.ctlPipe
+        UiPipe  = $w.uiPipe
+    }
+}
+
+# The `project=` field `dodona status` prints for one lane, or '' when it printed none. Shared
+# because three suites ask it now, and because "none" and "the field was absent" are DIFFERENT
+# answers (Projects.Field returns null for "nothing to say" and the literal string `none (cwd=)`
+# for a lane whose folder no project owns) -- a check that conflated them would go green on the
+# defect it exists to catch.
+function Get-StatusProject([string]$statusText, [string]$lane) {
+    $line = @($statusText -split "`r?`n" | Where-Object { $_ -match "^lane $lane\b" })
+    if ($line.Count -ne 1) { return "<$($line.Count) lines matched 'lane $lane'>" }
+    if ($line[0] -match 'project=(.+?)\s*$') { return $Matches[1] }
+    return ''
 }
 
 # ---------------------------------------------------------------- did this suite leak?

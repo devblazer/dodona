@@ -560,6 +560,104 @@ PRAGMA user_version = 8;
     Check 'a_recycled_repo_name_cannot_inherit_another_repos_ticket' `
         ($DODONA_EXIT -ne 0 -and $recTok -match 'no longer in this workspace') $recTok
     StopDaemonFor $recycle
+    # ================== TWO PROJECTS WITH LIVE LANES (LOCATIONS-PLAN P1.1, P1.2) ==================
+    # THE FIXTURE PHASES 2, 3 AND 5 ARE BUILT ON, and the first checks in the tree that read
+    # `lanes.cwd` at all.
+    #
+    # What was missing, from the coverage audit that produced docs/LOCATIONS-PLAN.md: exactly TWO
+    # checks anywhere asserted a lane's working directory (m3:183-187), both by parsing the
+    # `shim_spawned` event DETAIL STRING -- the only observable surface for a lane's project in
+    # the whole product. `status` did not say. `ui dump` did not say. And the `pair` section above
+    # is the only two-project fixture with a daemon in the tree: it makes a ticket and stops, so
+    # no suite had ever started a LANE in a workspace with more than one project.
+    #
+    # So a lane opening in the wrong project was invisible to a check AND to the operator, which
+    # is why Phase 1 blocks Phases 2 to 5.
+    #
+    # HOW A LANE GETS INTO THE SECOND PROJECT TODAY: a ticket. `lane-start` passes `_primary`
+    # (Daemon.cs:501) and so does the typed-input path, so a PLAIN lane can only land in the
+    # first project until Phase 2 moves those spawn sites -- and that is exactly the asymmetry
+    # these checks pin. A ticket lane already runs outside the first project, because its worktree
+    # is created beside the repo that owns it (Paths.Worktrees, asserted just above).
+    $tp = New-TwoProjectWorkspace $dodona 'twoproj'
+    StartDaemonFor $tp.Id | Out-Null
+    function Tp([string[]]$a) { DodonaBare ($a + @('--workspace', $tp.Id)) }
+    function TpRows([string]$sql) { Invoke-StoreSql $tp.Store $sql }
+
+    $ls2 = Tp @("lane-start", "--title", "PLAIN", "--child", $fake)
+    if ($ls2 -notmatch 'lane (\d+)') { throw "lane-start failed in the two-project workspace: $ls2" }
+    $plainLane = $Matches[1]
+    Tp @("ticket-create", "--title", "BETAWORK", "--claim", "subtree:$($tp.BLeaf)/src") | Out-Null
+    $ta2 = Tp @("ticket-agent", "1", "--child", $fake)
+    if ($ta2 -notmatch 'lane (\d+)') { throw "ticket-agent failed in the two-project workspace: $ta2" }
+    $betaLane = $Matches[1]
+    # A management lane too, with the FAKE agent: `router-start --child` exists for suites for
+    # exactly this reason (a real one is `claude -p`, i.e. quota). It belongs in the neutral
+    # directory and NOT in either project -- a router or brain inside a project loads that
+    # project's CLAUDE.md and skills, i.e. a classifier that can run /ship (commit 19dad3d).
+    $rs = Tp @("router-start", "--child", $fake)
+    if ($rs -notmatch 'lane (\d+)') { throw "router-start failed in the two-project workspace: $rs" }
+    $routerLane = $Matches[1]
+
+    # ---- the store records where each lane runs, and they are NOT the same place ----
+    # The first check in this repo to read `lanes.cwd`. It would go red if lane-start and
+    # ticket-agent both resolved to `_primary`, which is the single most likely way Phase 2
+    # breaks: one spawn site moved, the other not.
+    $plainCwd = (TpRows "SELECT cwd FROM lanes WHERE id=$plainLane").Trim()
+    $betaCwd = (TpRows "SELECT cwd FROM lanes WHERE id=$betaLane").Trim()
+    $routerCwd = (TpRows "SELECT cwd FROM lanes WHERE id=$routerLane").Trim()
+    Check 'a_plain_lane_records_the_project_it_opened_in' `
+        ($plainCwd -eq $tp.A) "cwd='$plainCwd' first_project='$($tp.A)'"
+    Check 'a_ticket_lane_records_a_directory_inside_its_own_project' `
+        ($betaCwd.StartsWith($tp.B, [StringComparison]::OrdinalIgnoreCase) -and
+         -not $betaCwd.StartsWith($tp.A, [StringComparison]::OrdinalIgnoreCase)) "cwd='$betaCwd' B='$($tp.B)'"
+    Check 'two_lanes_in_one_workspace_run_in_different_projects' `
+        ($plainCwd.Length -gt 0 -and $betaCwd.Length -gt 0 -and
+         -not $betaCwd.StartsWith($plainCwd, [StringComparison]::OrdinalIgnoreCase)) "plain='$plainCwd' ticket='$betaCwd'"
+
+    # ---- and `dodona status` SAYS SO: a person can read which project a lane is in (P1.2) ----
+    $tpSt = Tp @("status")
+    $plainProj = Get-StatusProject $tpSt $plainLane
+    $betaProj = Get-StatusProject $tpSt $betaLane
+    $routerProj = Get-StatusProject $tpSt $routerLane
+    Check 'status_names_the_project_of_a_plain_lane' ($plainProj -eq $tp.A) "project='$plainProj' want='$($tp.A)'"
+    # THE PROJECT, NOT THE WORKTREE. A ticket lane's cwd is `<project>\.dodona\wt\tN`, and the
+    # question a person is asking is "which project", so the ancestor is the answer and the
+    # worktree path is what `lanes.cwd` is for.
+    Check 'status_names_a_ticket_lanes_project_not_its_worktree' ($betaProj -eq $tp.B) "project='$betaProj' want='$($tp.B)'"
+    Check 'status_does_not_report_two_projects_as_one' ($plainProj -ne $betaProj) "plain='$plainProj' ticket='$betaProj'"
+    # A management lane is where it BELONGS, so there is nothing to say about it -- and the
+    # omission is per ROLE, so a brain that ended up inside a project would still be named.
+    Check 'a_management_lane_is_not_reported_against_a_project' `
+        ($routerProj -eq '' -and $routerCwd.Length -gt 0 -and
+         -not $routerCwd.StartsWith($tp.A, [StringComparison]::OrdinalIgnoreCase) -and
+         -not $routerCwd.StartsWith($tp.B, [StringComparison]::OrdinalIgnoreCase)) "project='$routerProj' cwd='$routerCwd'"
+
+    # ---- and the WINDOW says so, in the slot a person looks at (P1.2) ----
+    # --test-window: off-screen, never activated, never in the taskbar. A test window that steals
+    # the operator's keyboard mid-work was a priority complaint (CLAUDE.md 3).
+    $tpUi = Start-Process "$bin\DodonaUi.exe" -ArgumentList "--workspace", $tp.Id, "--test-window" -PassThru
+    [void]$extraDaemons.Add($tpUi)
+    function TpDump() { try { (Tp @('ui', 'dump')) | ConvertFrom-Json } catch { $null } }
+    Wait-Until { @((TpDump).slots | Where-Object { -not $_.empty }).Count -ge 2 } 30000 'the two-project window answers with both lanes' | Out-Null
+    $tpD = TpDump
+    $plainSlot = @($tpD.slots | Where-Object { -not $_.empty -and $_.title -eq 'PLAIN' })
+    $betaSlot = @($tpD.slots | Where-Object { -not $_.empty -and $_.title -eq 'BETAWORK' })
+    Check 'the_window_shows_both_projects_lanes' ($plainSlot.Count -eq 1 -and $betaSlot.Count -eq 1) `
+        "titles=$(($tpD.slots | Where-Object { -not $_.empty }).title -join ',')"
+    Check 'a_pane_names_the_project_its_lane_is_in' `
+        ($plainSlot.Count -eq 1 -and $plainSlot[0].project -eq $tp.A) "project='$($plainSlot[0].project)' want='$($tp.A)'"
+    Check 'a_ticket_panes_project_is_its_project_not_its_worktree' `
+        ($betaSlot.Count -eq 1 -and $betaSlot[0].project -eq $tp.B) "project='$($betaSlot[0].project)' want='$($tp.B)'"
+    # The daemon and the window must not be able to disagree: both call Projects.Field over the
+    # same three inputs, and this is the check that notices if one of them stops.
+    Check 'the_window_and_status_agree_about_a_lanes_project' `
+        ($plainSlot[0].project -eq $plainProj -and $betaSlot[0].project -eq $betaProj) `
+        "ui='$($plainSlot[0].project)','$($betaSlot[0].project)' status='$plainProj','$betaProj'"
+
+    Tp @("ui", "close") | Out-Null
+    Stop-WorkspaceShims $tp.Dir
+    DodonaBare @("stop-daemon", "--workspace", $tp.Id) | Out-Null
 
     # ---- forget removes the registry rows and keeps every transcript (§12) ----
     $forgotten = DodonaBare @("workspace-forget", "--workspace", $twin)
