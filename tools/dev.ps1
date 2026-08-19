@@ -638,7 +638,30 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 # shim-info, neutral cwd); Instance.Scoped() hashes that home into the concierge and shell
 # ids, so two suites cannot collide on a pipe; every root is a GUID temp directory; and every
 # UI launch carries --test-window, so it renders off-screen and never takes focus.
-function SoloSuites { , @('unit', 'm1') }
+# ui-use JOINED THIS LIST 2026-08-19, MEASURED, after Phase 2 made `workspace` heavier.
+#         Phase 2 gave workspace several more live lanes and two `--project` daemon
+#         restarts. In the same wave the gate went: ui-use 177.6s with 4 FAILED inside the
+#         concurrent run, and 64.4s with 0 failed alone, on a machine with nothing leaked
+#         (the gate's own pre-run count said none). The whole run inflated with it -- m4
+#         110s against a 36s baseline, brain 107s against 37s -- so this is contention, not
+#         a suite that got slower.
+#
+#         The four reds were grid-tile counts and a close-button interaction, i.e. missed
+#         UI interactions, and CLAUDE.md 3 records that ui-use's failures CASCADE: two
+#         missed interactions become six red checks. That is the same signature as the
+#         5->3 concurrency drop (69e8003), and the root cause named there is windows and
+#         process starts, which is exactly what Phase 2 added.
+#
+#         WHY SOLO RATHER THAN DROPPING CONCURRENCY TO 2: this isolates the one sensitive
+#         suite instead of slowing all twelve, and ui-use is the suite whose failures are
+#         least readable when they cascade. Raising the I7 budget instead would have been
+#         the wrong fix twice over -- it does not make a red check green, and a gate that
+#         is red one run in three teaches people to re-run instead of read, which
+#         CLAUDE.md 0.3 calls the same disease as a gate that is always green.
+#
+#         The REAL fix is still splitting ui-use -- 64s of monolith is why it dominates the
+#         wall clock at all -- and that remains unfinished business, not this change.
+function SoloSuites { , @('unit', 'm1', 'ui-use') }
 
 # Longest first. With a concurrency cap, start order decides the wall clock: begin the 45
 # second suite last and it finishes 45 seconds after everything else already has. This list is
