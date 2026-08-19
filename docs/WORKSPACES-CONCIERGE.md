@@ -288,17 +288,26 @@ resolution when nothing is running — the registry's real job. Four rungs, chea
 2. **Fuzzy match — cheap model.** Voice-typed "blazing some of the trumpets" against
    registry + recents. Confident → act, announce in the feed with undo (§11 applied to
    workspace wake).
-3. **Bounded discovery — expensive tier, with a fence.** The name is unknown but there is
-   signal: an explicit path in the prompt attaches that folder outright (explicit info
-   never triggers a search); otherwise the resolver may *look* — but only within the
-   fence: parent directories of every member ever registered, plus configured search
-   roots. This deliberately carves one narrow exception to "management brains never run
-   tools": the resolver gets exactly one capability, enumerating candidates inside the
-   fence. A classifier with a flashlight, not a crawler. On failure it falls to rung 4
-   fast — **the fence never widens itself**.
-4. **Ask, with a guess — and teach.** Double uncertainty lands in the merged feed
+3. **Ask, with a guess — and teach.** Double uncertainty lands in the merged feed
    carrying its best candidates ("Did you mean C:\repos\blazing-trumpets, or is this
-   new?"). The answer becomes a registry alias; rung 4 decays toward rung 1 with use.
+   new?"). The answer becomes a registry alias; asking decays toward rung 1 with use.
+   An explicit path in the prompt is handled *above* all of this and attaches that folder
+   outright — explicit information never triggers a search.
+4. **Bounded discovery — expensive tier, with a fence. BELOW the ask now, and never
+   automatic** (D-L3, operator 2026-08-19; it used to be rung 3). It is an affordance:
+   answering an open question with `look` sends the resolver to search, and only within the
+   fence — parent directories of every member ever registered, plus configured search roots.
+   This deliberately carves one narrow exception to "management brains never run tools": the
+   resolver gets exactly one capability, enumerating candidates inside the fence. A classifier
+   with a flashlight, not a crawler. **The fence never widens itself**, and a look that finds
+   nothing leaves the question open rather than answering it.
+
+   **Why it moved.** It ran automatically on the way to a question we were going to ask
+   anyway — a directory walk plus an expensive-tier call, spent to avoid asking, when asking
+   is the cheapest correct rung there is. And searching unbidden is the wrong default:
+   occasionally going to look is exactly right, which is why `Fence.cs` stays and was not
+   deleted, but it must be something the operator asks for rather than something that happens
+   to them.
 
 Creation follows the same shape: confident-new creates the workspace and announces,
 reversibly (a workspace is a registry row and a store directory — no daemon until work
@@ -306,9 +315,17 @@ arrives); unconfident-new asks.
 
 Consequences: **the shell boots to zero** (a window with no workspace awake — just feed
 and input — is a real state, with a pose and a ui-use check), and rungs 1–2 handle the
-steady state so rung 3 stays rare by construction (quota discipline, CLAUDE.md §0.1).
+steady state so the expensive tier stays rare by construction (quota discipline,
+CLAUDE.md §0.1) — now doubly so, since it is only reached when the operator asks for it.
 All four rungs sit behind the same fake-agent seam as the router (§17): the fence makes
-rung 3 deterministic under a fixture directory tree.
+discovery deterministic under a fixture directory tree.
+
+**Note the two ladders, and that they are different questions.** This one answers *which
+workspace*. Inside a workspace the router answers *which lane* (§5.1's four verdicts) and
+then, for a new lane, *which project* — one project answers itself, a sentence naming a
+project is decided in code, otherwise the project holding a live lane, and on genuine
+uncertainty the sentence is held (`docs/LOCATIONS-PLAN.md` Phase 3). Both hold rather than
+guess for the same reason: the wrong destination cannot be unsaid.
 
 ## 5. Lane granularity: new lane vs continuation
 

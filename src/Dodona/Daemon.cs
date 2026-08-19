@@ -147,6 +147,65 @@ sealed class Daemon
     List<string> ProjectPaths() => Members().Select(m => m.Path).ToList();
 
     /// <summary>
+    /// This workspace's projects, MOST RECENTLY USED FIRST — the ordering half of the router's
+    /// memory (docs/LOCATIONS-PLAN.md Phase 3, D-L5), used to order the candidates rung 4
+    /// offers.
+    ///
+    /// **Derived from the store's own lane rows, NOT from a registry column, and that is a
+    /// decision.** A `members.last_used_ts` was the obvious shape and was rejected: only a
+    /// daemon knows a project was used, so the column would need a SECOND writer into the
+    /// machine-wide registry the concierge is meant to own (Phase 3: *the concierge stays the
+    /// registry's sole writer; a daemon that learns a project tells it*) — a cross-process
+    /// channel, and a fact that then exists in two places and can disagree. `lanes.cwd` plus
+    /// `lanes.id` already record it, workspace-locally, transactionally, in the store this
+    /// daemon owns outright. Projects never used come last, in attach order, so every project
+    /// is always offered.
+    /// </summary>
+    List<string> ProjectsByRecency()
+    {
+        var projects = ProjectPaths();
+        var ordered = new List<string>();
+        foreach (var l in _store.LanesAll().OrderByDescending(l => l.Id))
+            if (Projects.Of(projects, l.Cwd) is string p &&
+                !ordered.Any(x => x.Equals(p, StringComparison.OrdinalIgnoreCase)))
+                ordered.Add(p);
+        foreach (var p in projects)
+            if (!ordered.Any(x => x.Equals(p, StringComparison.OrdinalIgnoreCase))) ordered.Add(p);
+        return ordered;
+    }
+
+    /// <summary>The spoken handles taught for this workspace's projects — rung 3's memory, read
+    /// from the registry per call for the same reason <see cref="Members"/> is. A registry that
+    /// will not open degrades to "no handles taught", which costs a rung and never a
+    /// refusal.</summary>
+    List<(string Alias, string Key)> ProjectHandles()
+    {
+        try { using var reg = new Registry(); return reg.ProjectHandles(_instanceId); }
+        catch { return new List<(string, string)>(); }
+    }
+
+    /// <summary>
+    /// The I/O half of rung 2's evidence: gather the three liveness answers and hand them to
+    /// <see cref="Projects.Live"/>, which is where the decision lives and is unit-tested.
+    ///
+    /// The split is D-L6 made unnarrowable. `LaneLiveness.Live` is already the union of the pipe
+    /// namespace and a live recorded shim pid — never one instantaneous read, because a pipe name
+    /// blinks out while its shim swaps server instances (8 of 192 reads over 1.5 s, and the gap
+    /// is synchronised with a daemon restart). This adds the third answer only this process has:
+    /// a runtime it is holding an open handle to right now.
+    /// </summary>
+    List<string> LiveProjectPaths()
+    {
+        var lanes = _store.LanesAll();
+        return Projects.Live(
+            ProjectPaths(),
+            lanes.Select(l => (l.Id, l.Role, l.State, l.Cwd)),
+            Instance.LiveLanes(_instanceId),
+            LaneLiveness.LiveRecords(Paths.WorkspaceDir(_instanceId)).Select(t => t.Lane),
+            lanes.Where(l => _lanes.TryGetValue(l.Id, out var rt) && rt.Connected).Select(l => l.Id));
+    }
+
+    /// <summary>
     /// WHERE A LANE MAY OPEN (docs/LOCATIONS-PLAN.md P2.1). Resolves a requested folder to a
     /// project of THIS workspace, or refuses — loudly, naming the projects it does know and the
     /// command that would add the one it does not.
@@ -2554,7 +2613,21 @@ sealed class Daemon
         "and the length of the input tells you nothing about which kind it is. What tells you is " +
         "the SUBJECT — does the input concern what that lane is about, or something else?\n" +
         "Be willing to say unclear or confidence low — an honest unsure is cheap here, and a " +
-        "confident wrong guess is the one error that cannot be taken back.";
+        "confident wrong guess is the one error that cannot be taken back.\n" +
+        // TWO QUESTIONS, ONE WARM SESSION. Phase 3 asks this same classifier a second, narrower
+        // question -- which PROJECT a new lane opens in -- and a system prompt that described only
+        // the four verdicts would fight it: a cheap model told "reply with ONLY that JSON" answers
+        // in that schema whatever it is asked. Naming both question shapes here, each by the first
+        // line it arrives with, is what keeps one warm session honest for both. A second router
+        // lane would be a second `claude -p` per workspace for one extra sentence of prompt
+        // (CLAUDE.md 0.1: quota is the scarce resource).
+        "SOMETIMES YOU ARE ASKED A DIFFERENT QUESTION. If the input begins \"" + ProjectQuestionLead +
+        "\", answer THAT question in the schema it asks for instead of the one above.";
+
+    /// <summary>The first line of the project question, and the marker that tells the classifier
+    /// (and the fake agent) which of the two questions it is being asked. One constant so the
+    /// prompt that WARNS about it and the question that SENDS it cannot drift.</summary>
+    internal const string ProjectQuestionLead = "Choose which PROJECT a new lane for this input should open in.";
 
     /// <summary>Start a classifier and remember it. Separate from EnsureRouterAsync so
     /// `router-start` can force a fresh one with a different child or model.</summary>
@@ -3143,22 +3216,148 @@ sealed class Daemon
     }
 
     /// <summary>
+    /// WHICH PROJECT A NEW LANE OPENS IN (docs/LOCATIONS-PLAN.md Phase 3). The ladder itself is
+    /// pure and lives in <see cref="ProjectLadder"/>; this is the I/O half — the registry read,
+    /// the liveness read, and the one cheap model call rung 2 is allowed.
+    ///
+    /// Returns the project, or null when the sentence must be HELD. Null is not an error and not
+    /// a fallback: with several projects, no project named in the sentence, and no live lane to
+    /// infer from, every guess is a coin toss whose losing side is an agent editing the wrong
+    /// repository. That is not undone by a `lane-stop`, so it is the one place this ladder stops
+    /// and asks (§5's error asymmetry, one level down from lane choice).
+    ///
+    /// **A one-project workspace never reaches any of it**: <see cref="ProjectLadder.Decide"/>
+    /// answers `only` before the liveness read, before the registry read and before any model,
+    /// and this method writes no event for it. Byte-for-byte what the spawn site did before.
+    /// </summary>
+    async Task<ProjectVerdict> ResolveProjectAsync(string text)
+    {
+        var projects = ProjectPaths();
+        // THE ONE-PROJECT SHORT-CIRCUIT, HERE AS WELL AS INSIDE Decide, and it is not
+        // redundant: arguments are evaluated before the call, so passing `ProjectHandles()` and
+        // `LiveProjectPaths()` unconditionally would make a one-project workspace pay for a
+        // registry read of the alias table and a full pipe-namespace enumeration on every
+        // sentence the operator types -- to reach a rung that had already decided. The honest
+        // residual cost this phase adds to a one-project workspace is `ProjectPaths()`, one
+        // registry read that degrades to `_primary` if the registry will not open, i.e. exactly
+        // the old answer.
+        if (projects.Count <= 1)
+            return ProjectLadder.Decide(projects, Array.Empty<(string, string)>(), Array.Empty<string>(), text);
+
+        var v = ProjectLadder.Decide(projects, ProjectHandles(), LiveProjectPaths(), text);
+
+        if (v.Rung == ProjectLadder.Classify)
+        {
+            // Rung 2 proper: several projects hold live lanes, so which one this sentence is
+            // about is a judgement, and it is the cheap tier's to make. EnsureRouterAsync, not a
+            // lookup -- the same rule that cost this project two days of dead routing.
+            var routerId = await EnsureRouterAsync();
+            var picked = routerId < 0 ? null : await ClassifyProjectAsync(routerId, text, v.Candidates);
+            if (picked is not null) v = v with { Rung = ProjectLadder.Live, Project = picked, How = "classified" };
+            else
+            {
+                // No classifier, or it would not choose. SAY SO rather than picking the first
+                // candidate: a silent degrade is a bug, and "the first project" is exactly the
+                // invisible wrong answer this phase exists to delete.
+                _store.Event("project_unclassified", null,
+                    routerId < 0 ? $"no classifier; candidates={string.Join(", ", v.Candidates)}"
+                                 : $"classifier would not choose; candidates={string.Join(", ", v.Candidates)}");
+                v = v with { Rung = ProjectLadder.Ask, Project = null, How = routerId < 0 ? "no-classifier" : "classifier-unsure" };
+            }
+        }
+
+        // ONE PLACE WRITES THE EVENT, and it is below the classify branch on purpose: that branch
+        // used to return early, so a lane placed by the cheap tier -- the only rung that costs
+        // quota -- was the one rung with no row saying which project it chose or why. Caught by
+        // `workspace:the_classified_rung_records_that_a_model_answered`, which read back the
+        // PREVIOUS decision's event and reported `how=sole-live` for a classified one.
+        if (v.Rung != ProjectLadder.Only && v.Project is not null)
+            _store.Event("project_chosen", null, $"rung={v.Rung} how={v.How} project={v.Project}");
+        return v.Rung == ProjectLadder.Ask ? v with { Candidates = ProjectsByRecency() } : v;
+    }
+
+    /// <summary>Ask the warm cheap classifier which project, over a CLOSED list. Null when it has
+    /// no usable opinion or names something that was not offered — a model that invents a folder
+    /// must not be able to place an agent in it, which is why the answer is matched against the
+    /// candidates rather than fed to <see cref="TryProject"/> and hoped about.</summary>
+    async Task<string?> ClassifyProjectAsync(long routerId, string text, IReadOnlyList<string> candidates)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append(ProjectQuestionLead).Append('\n');
+        sb.Append("Each project is one folder, and each already has an agent working in it. The new " +
+                  "work is a DISTINCT task, so it gets its own lane -- the only question is which " +
+                  "project's folder it belongs in.\n");
+        sb.Append("Projects:\n");
+        foreach (var c in candidates) sb.Append("- ").Append(ProjectLadder.Leaf(c)).Append('\n');
+        sb.Append("Input: ").Append(text).Append('\n');
+        sb.Append("Reply ONLY one line of JSON: {\"project\":\"<one project name above, or none>\"," +
+                  "\"confidence\":\"high|medium|low\",\"reason\":\"<=60 chars\"}\n");
+        sb.Append("Say none, or confidence low, if the input does not clearly belong to one of them. " +
+                  "The operator is then asked, which is cheap; a lane opened in the wrong project is " +
+                  "an agent editing the wrong repository, which is not.");
+
+        await _routerLock.WaitAsync();
+        string? reply;
+        try { reply = await _lanes[routerId].AskAsync(sb.ToString(), 20000); }
+        finally { _routerLock.Release(); }
+        if (reply is null) { _store.Event("classifier_timeout", routerId, Truncate(text, 100)); return null; }
+        try
+        {
+            using var d = JsonDocument.Parse(reply[reply.IndexOf('{')..(reply.LastIndexOf('}') + 1)]);
+            var name = d.RootElement.TryGetProperty("project", out var p) ? p.GetString() : null;
+            var conf = d.RootElement.TryGetProperty("confidence", out var c) ? c.GetString() ?? "low" : "low";
+            _store.Event("classified_project", routerId, $"project={name} confidence={conf} input={Truncate(text, 80)}");
+            if (conf == "low" || name is null or "" or "none") return null;
+            return candidates.FirstOrDefault(x =>
+                ProjectLadder.Leaf(x).Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                x.Equals(name, StringComparison.OrdinalIgnoreCase));
+        }
+        catch { _store.Event("classifier_failed", routerId, Truncate(reply, 120)); return null; }
+    }
+
+    /// <summary>
     /// Spawn a lane for this input and deliver to it — the `new-task` action, and also the
     /// first-lane case. Name derived in code, model/effort from the policy table (a claude
     /// process cannot change model mid-session, so this is decided where the lane is born), and
     /// `BrainReview` corrects the name or suggests a ticket from behind — machinery that already
     /// existed and needed no change.
+    ///
+    /// **A negative id means NOTHING WAS DELIVERED**, and Phase 3 gave that two meanings rather
+    /// than one: the spawn failed, or the project ladder held the sentence. Both are handled the
+    /// same way by every caller (`if (id &lt; 0) return msg`), which is why the held case can be
+    /// reported here — the alternative was a second return channel through four call sites.
     /// </summary>
     async Task<(long Id, string Msg, Choice Choice)> SpawnForAsync(string text, string? ovModel, string? ovEffort)
     {
         var name = NameFromText(text);
         var choice = Policy.Resolve(text, _config.Rules, _config.Model, _config.Effort, ovModel, ovEffort);
-        // THE FIRST PROJECT, STILL, AND DELIBERATELY. Typed input has no project in it yet:
-        // deciding which project a sentence means is Phase 3's four rungs (an open lane's
-        // project, then a remembered one, then asking), and guessing here would be the wrong
-        // guess made instantly. So this site keeps today's answer and is now the only one that
-        // does -- `lane-start` takes `--project`, and Phase 3 changes exactly this line.
-        var (newId, msg) = await SpawnAgentLaneAsync(name, _primary, choice.Model, choice.Effort);
+
+        // PHASE 3'S ONE LINE. This used to be `_primary` -- the first project, always, with a
+        // comment saying that choosing one from a sentence was Phase 3's job. It is.
+        var pv = await ResolveProjectAsync(text);
+        if (pv.Project is null)
+        {
+            // Rung 4: HOLD. No lane row, nothing said to any agent -- the same shape the lane
+            // ladder's own top rung uses, and the same reason (`held_input_invents_no_lane`).
+            var list = pv.Candidates.Count == 0 ? "none" : string.Join(" / ", pv.Candidates.Select(ProjectLadder.Leaf));
+            _store.RoutingInsert(text, "ask", null, null, "no-project");
+            _store.Event("project_unknown", null, $"how={pv.How} candidates={list} input={Truncate(text, 80)}");
+            Announce($"[dodona] not sure which project “{Truncate(text, 45)}” is for — NOT delivered yet. " +
+                     $"Projects here: {list}. Name one in the sentence, or " +
+                     $"`dodona lane-start --title <NAME> --project <path>` and say it there.");
+            return (-1, $"held: not sure which project this is for — nothing was delivered. " +
+                        $"Name one of {list} in the sentence, or start a lane with --project.", choice);
+        }
+        // Through TryProject, always: a rung's answer is still only a folder until the thing that
+        // validates folders has seen it (P2.1). Belt and braces on purpose -- every candidate here
+        // came out of `members`, so a refusal can only mean the project was detached between the
+        // ladder's read and this one, which is precisely trap T4 arriving on the spawn path.
+        if (!TryProject(pv.Project, out var project, out var refusal))
+        {
+            _store.Event("project_gone_at_spawn", null, $"rung={pv.Rung} {refusal}");
+            return (-1, $"error: could not start a lane for this: {refusal}", choice);
+        }
+        var (newId, msg) = await SpawnAgentLaneAsync(name, project, choice.Model, choice.Effort);
         if (newId < 0) return (-1, $"error: could not start a lane for this: {msg}", choice);
 
         _store.Event("policy_choice", newId, $"{choice.Model}/{choice.Effort} why={choice.Why} overridden={choice.Overridden} text={text}");

@@ -116,6 +116,21 @@ sealed class Registry : IDisposable
                 );
                 PRAGMA user_version = 1;
                 """);
+        // SCHEMA 2 (docs/LOCATIONS-PLAN.md Phase 3, D-L5): a spoken handle may name a PROJECT
+        // and not only a workspace. `members` was already every project ever attached — the
+        // router's "memory of every project ever" needed no new table, only a way to record
+        // what the operator CALLS one. So `aliases` grows one nullable column instead of a
+        // parallel `places` table: fewer owned things is this project's whole failure mode.
+        //
+        // NULL means what it always meant — the alias names the workspace. A value is the
+        // `members.key` of one project inside it, and such an alias resolves BOTH: the
+        // workspace at the concierge's rung 1 (asking for a project you can name should wake
+        // the workspace that holds it) and the project at the router's rung 3.
+        if (v < 2)
+            Exec("""
+                ALTER TABLE aliases ADD COLUMN member_key TEXT;
+                PRAGMA user_version = 2;
+                """);
     }
 
     void Exec(string sql)
@@ -178,6 +193,66 @@ sealed class Registry : IDisposable
         using var r = c.ExecuteReader();
         while (r.Read()) list.Add(r.GetString(0));
         return list;
+    }
+
+    /// <summary>
+    /// The spoken handles taught for the PROJECTS of one workspace: `(alias, members.key)`
+    /// (schema 2, D-L5). This is the router's rung-3 memory, and it is a READ — the daemon
+    /// never writes here (the registry is machine-wide and the concierge owns learning into
+    /// it; an operator-explicit `dodona project-alias` is what writes, exactly as
+    /// `workspace-create` does).
+    ///
+    /// Longest first is the caller's job, not this one's: two ladders order by different
+    /// things and a helper that pre-sorted would hide which.
+    /// </summary>
+    public List<(string Alias, string Key)> ProjectHandles(string wsId)
+    {
+        var list = new List<(string, string)>();
+        using var c = _db.CreateCommand();
+        c.CommandText = "SELECT display, member_key FROM aliases " +
+                        "WHERE workspace_id = $w AND member_key IS NOT NULL ORDER BY created_ts;";
+        c.Parameters.AddWithValue("$w", wsId);
+        using var r = c.ExecuteReader();
+        while (r.Read()) list.Add((r.GetString(0), r.GetString(1)));
+        return list;
+    }
+
+    /// <summary>
+    /// Teach a handle for one PROJECT of this workspace (D-L5). The path must already be a
+    /// member: an alias for a folder nobody attached is a memory of somewhere no lane may open,
+    /// and refusing here is the same refusal <see cref="Daemon.TryProject"/> makes at the spawn
+    /// site — better said now than discovered when a sentence resolves to it.
+    /// </summary>
+    public bool AddProjectAlias(string id, string projectPath, string alias, out string error)
+    {
+        error = "";
+        var clean = alias.Trim();
+        if (clean.Length == 0) { error = "an alias needs text"; return false; }
+        var ws = ById(id);
+        if (ws is null) { error = $"no workspace {id}"; return false; }
+        var key = Instance.Canonical(projectPath).ToLowerInvariant();
+        var m = ws.Members.FirstOrDefault(x => x.Key == key);
+        if (m is null)
+        {
+            error = $"{projectPath} is not a project of {ws.Label} " +
+                    $"(projects here: {(ws.Members.Count == 0 ? "none" : string.Join(", ", ws.Members.Select(x => x.Path)))})";
+            return false;
+        }
+        var clash = ByNameOrId(clean);
+        if (clash is not null && !clash.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
+        { error = $"\"{clean}\" already resolves to {clash.Label}"; return false; }
+        using var c = _db.CreateCommand();
+        c.CommandText = "INSERT INTO aliases(alias, display, workspace_id, created_ts, member_key) " +
+                        "VALUES ($a,$d,$w,$t,$k) " +
+                        "ON CONFLICT(alias) DO UPDATE SET workspace_id = $w, display = $d, member_key = $k;";
+        c.Parameters.AddWithValue("$a", clean.ToLowerInvariant());
+        c.Parameters.AddWithValue("$d", clean);
+        c.Parameters.AddWithValue("$w", id);
+        c.Parameters.AddWithValue("$t", Now());
+        c.Parameters.AddWithValue("$k", key);
+        c.ExecuteNonQuery();
+        Event("project_alias_added", id, $"{clean} -> {m.Path}");
+        return true;
     }
 
     /// <summary>Registry rung 1 (§4): exact id, exact name, then alias — code, no model.

@@ -32,6 +32,7 @@ var asCompressor = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "co
 // the operator -- which is the branch a test most needs to be able to reach.
 var asBrain = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE")?.StartsWith("brain") == true;
 var brainIsHi = Environment.GetEnvironmentVariable("DODONA_LANE_ROLE") == "brain-hi";
+// router (project question, Phase 3): routeproject:N — the Nth project offered, by INDEX
 // router: routekind:generic|addendum|new-task|unclear, routetarget:X, routereason:direct|tweak,
 // routeconf:low — so the full escalation chain (classifier → brain-hi → ask the operator) runs
 // model-free. Default is `unclear`, deliberately: an unclear verdict delivers NOTHING, so a
@@ -73,6 +74,46 @@ while ((line = Console.ReadLine()) is not null)
 
     if (asRouter)
     {
+        // TWO QUESTIONS REACH ONE WARM ROUTER (LOCATIONS-PLAN Phase 3). The second is "which
+        // PROJECT does a new lane for this open in", asked only when several projects hold live
+        // lanes, and it wants its own schema. Recognised by the question's own first line --
+        // the same way the concierge's review-behind and brain-hi's escalation are, and for the
+        // same reason: a directive in the OPERATOR'S text cannot distinguish them, because both
+        // questions carry that same text.
+        //   routeproject:N     — pick the Nth project (1-based) out of the list the daemon put
+        //                        in the question. AN INDEX, NOT A NAME, and that is the same
+        //                        lesson `cxpick:N` carries one level up: a project NAME written
+        //                        into the operator's sentence is matched IN CODE by the ladder's
+        //                        `named` rung before any model is asked, so a rung-2 test
+        //                        written with a name passes at rung 3 having never reached the
+        //                        tier at all -- a check proving the opposite of what it claims.
+        //   (no directive)     — none/low, so the ladder holds the sentence and asks. That is
+        //                        the safe default: a fake agent that said nothing useful must
+        //                        never be able to place an agent in a project.
+        if (text.Contains("Choose which PROJECT a new lane for this input should open in."))
+        {
+            string? picked = null;
+            var rp = Regex.Match(text, @"routeproject:(\d+)");
+            if (rp.Success)
+            {
+                var offered = Regex.Matches(text, @"(?m)^- (.+)$").Select(m => m.Groups[1].Value.Trim()).ToList();
+                var i = int.Parse(rp.Groups[1].Value) - 1;
+                if (i >= 0 && i < offered.Count) picked = offered[i];
+            }
+            Emit(new
+            {
+                type = "result",
+                subtype = "success",
+                session_id = sessionId,
+                result = JsonSerializer.Serialize(new
+                {
+                    project = picked ?? "none",
+                    confidence = picked is not null && !text.Contains("routeconf:low") ? "high" : "low",
+                    reason = "fake router project",
+                }),
+            });
+            continue;
+        }
         // Four verdicts (WORKSPACES-CONCIERGE.md §5): generic | addendum | new-task | unclear.
         //   routekind:new-task     — a distinct task; the daemon spawns a lane and delivers
         //   routekind:addendum + routetarget:LANE  — continues that lane

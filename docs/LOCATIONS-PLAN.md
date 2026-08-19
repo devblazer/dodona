@@ -372,7 +372,21 @@ directory and one `stderr.tmp`. Observed: `workspace-acceptance` died on its FIR
 *"the process cannot access the file ... stderr.tmp"*, and prove reported eleven perfectly good
 checks as MISSING. This is `f9aaf25`'s two-lanes-one-tree failure reappearing inside the tool
 that verifies. A private `TEMP` is the workaround; the fix is P1.7, **which is now done** — see its row below.
-One residual, benign and recorded so it is not re-diagnosed: two lanes starting a proof at the same
+**A SECOND residual, found 2026-08-19 by Phase 3 and NOT benign: the tree is keyed on
+`(owner, commit)`, so ONE lane running TWO proofs concurrently collides with itself.** Observed
+directly — a `dev prove workspace:...` was still running when a `dev prove concierge ...` started
+from the same worktree at the same commit, and the second printed
+`Copy-Item ... stderr.tmp ... IOException` before reaching its verdict. This time the verdict
+survived (PROVEN, with real red output), which is exactly why it is dangerous: it is the P1.7
+failure mode wearing a different hat, and a suite that dies on its first command reports its
+checks as MISSING rather than as a collision. The fix is the same shape as P1.7's — the key needs
+a third component that distinguishes concurrent proofs from the same tree (a pid, or a run id) —
+and it belongs with whoever owns `tools/dev.ps1`, not with a phase lane. **Until then: do not run
+two `dev prove` commands from one worktree at once**; the grouped form
+`dev prove <suite>:<check> ...` already batches every check of one suite into a single run, so
+the only way to hit this is to launch two suites' proofs separately.
+
+One further residual, benign and recorded so it is not re-diagnosed: two lanes starting a proof at the same
 moment can both prune the *same* orphaned tree and both report having done it. The remove is
 `-ErrorAction SilentlyContinue` and the next run re-prunes whatever is left, so the worst case is a
 duplicated log line, never a lost tree.
@@ -549,6 +563,202 @@ be one instantaneous pipe read.** A shim's pipe name blinks out of the namespace
 
 ---
 
+
+### Delivered 2026-08-19, branch `loc-p3` — and five corrections to the text above
+
+Every citation above was checked against the source before it was changed. What the phase
+actually became, rung by rung:
+
+| rung | decided by | where |
+|---|---|---|
+| **only** — one project | code, and it is checked FIRST, before the liveness read, the registry read and any model | `ProjectLadder.Decide` |
+| **named** — the sentence says where: exact leaf → taught handle → the leaf said as words (`project zed` → `project-zed`) | code, free | `ProjectLadder.NameMatch` |
+| **live** — a project holds a live lane: free when exactly ONE does (`how=sole-live`), one cheap call when several (`how=classified`) | code, then the warm router | `Projects.Live` + `Daemon.ClassifyProjectAsync` |
+| **ask** — nothing to go on, or the classifier would not choose | code: HOLD the sentence, no lane row | `Daemon.SpawnForAsync` |
+
+Rung 1 (a comment for an existing lane) was already built and is untouched: by the time any
+of this runs, the four-verdict lane ladder has already said "this is new work".
+
+**`SpawnForAsync` was the one line, as Phase 2 promised, and the answer goes through
+`TryProject` before a lane row exists** — belt and braces on purpose: every candidate came out
+of `members`, so a refusal there can only mean the project was detached between the ladder's
+read and the spawn, which is trap T4 arriving on the typed-input path (`project_gone_at_spawn`).
+
+**1. `named` runs BEFORE the classifier, and the operator's 2-then-3 ordering is preserved in
+substance rather than in sequence.** This is the same rule the concierge's own ladder already
+applies one level up (rung 0/1 before rung 2 fuzzy): *explicit information never triggers a
+search*. The two rungs agree wherever both have an answer; where they disagree the named one is
+right, and asking the model first would let "fix `<B>`'s header" open a lane in A because A
+happens to be busy — a confident wrong answer, made instantly, to a question the operator had
+already answered for free. Pinned by
+`unit:A_named_project_is_not_overruled_by_a_busy_one` and, at the spawn site, by
+`workspace:a_named_project_is_not_overruled_by_a_busy_one` — which asserts the whole claim as one
+thing: the lane landed in the taught project **and** `classified_project` did not move.
+
+**2. Recency is derived from the store's lane rows, NOT from a `members.last_used_ts`
+column.** D-L5 asked for "recency for ordering" and the obvious shape was a registry column —
+rejected, because only a daemon knows a project was used, so that column needs a SECOND writer
+into the machine-wide registry the concierge is meant to own, i.e. a cross-process channel and
+a fact that then exists in two places and can disagree. `lanes.cwd` + `lanes.id` already record
+it, workspace-locally and transactionally, in the store the daemon owns outright
+(`Daemon.ProjectsByRecency`). So the registry change is **one nullable column**:
+`aliases.member_key` (**registry schema 2**), which is the half `members` genuinely could not
+carry — what the operator *calls* a project. Written by `dodona project-alias <name> --member
+<path>`, an operator-explicit registry edit in the CLI exactly like `workspace-create`; the
+daemon only ever READS it.
+
+**3. Rung 2's liveness is a pure function with three inputs, because no suite can construct the
+window D-L6 is about.** `Projects.Live(projects, lanes, byPipe, byRecord, byConnection)` — the
+pipe namespace, a recorded shim pid that is a live `DodonaShim`, and a runtime this daemon is
+holding an open handle to. A lane counts if ANY of them says yes. The measured blink (8 reads of
+192 over 1.5 s with the shim alive and instantly connectable, synchronised with a daemon
+restart) cannot be reproduced from a `.ps1` — it would have to hold the OS pipe namespace
+still — so the part that can be got wrong, *which answers count*, was lifted onto the ~1 second
+`unit` loop where narrowing it back to one read is a red check rather than a plausible tidy-up
+(`unit:A_lane_alive_only_by_its_shim_record_still_counts` and its two siblings). Stated plainly
+so it is not mistaken for full coverage: **the acceptance suites prove the union is WIRED, the
+unit checks prove which answers it accepts, and neither reproduces the blink itself.**
+
+**4. The four booby-trapped concierge checks, each by name.**
+
+- **`concierge:226-228`, the loop over literal rung names** (`only, registry, path, fuzzy,
+  discovery, ask`) — **untouched, all six still asserted, no rung renamed.** `discovery` is now
+  produced by the `look` affordance instead of automatically, so the fixture that feeds the loop
+  moved but the loop did not.
+- **`concierge:152` `fence_never_reaches_outside_itself`** — it asserted only `rung -eq 'ask'`,
+  and with the fence demoted **that would have gone green having tested nothing**: every
+  unresolved sentence reaches `ask` now, fence or no fence. Decided and stated: it is **rewritten
+  to be strictly stronger** — the sentence asks, the answer `look` explicitly runs the fence, and
+  the check demands the look came back empty, named no `atlantis`, and left the question open. It
+  now proves the fence *ran* and still did not reach outside itself, which the old form never did.
+- **`concierge:107/111`** (`explicit_path_attaches_outright` / `explicit_path_reuses_its_workspace`)
+  — **still green and still meaningful.** The memory added here records nothing on first sight:
+  `aliases.member_key` is written only by an explicit `project-alias`, and recency is derived
+  rather than stored, so `WorkspaceResolve.ForPath` and the meaning of `created` are unchanged.
+- **`concierge:167-172`** (`answer_teaches_an_alias`, `rung_4_decays_to_rung_1`) — **still green.**
+  `AnswerAsync` gained one branch in front (`look`); the plain-name branch, `Teach`, and the
+  `registry` rung it decays to are byte-for-byte as they were.
+- **`concierge:80-127`** (the fixed workspace-creation order, `fuzzy_match_on_the_cheap_tier`
+  indexing `$names[1]`) — **nothing was inserted before it.** The new checks all sit in the
+  rung-3 block, which is after it, and the one workspace they create (`bay`, via `look`) is
+  forgotten again in the same block, as the old fixture did.
+
+**5. What the plan text got wrong or left implicit.**
+
+- `Concierge.cs:512` is `Ask`, as stated, and it is where rung 4 lands at group scope. **The
+  daemon's project rung 4 does NOT open a `questions` row, and that is a deliberate deviation
+  with a reason** — see P3.1 below. It holds the sentence in the daemon's own established
+  hold-and-ask shape (`routing_decisions` tier `ask` + a `project_unknown` event + an announce
+  naming every candidate and the command that un-sticks it), which is the same shape the lane
+  ladder's own top rung uses and is what keeps `held_input_invents_no_lane`'s guarantee true one
+  level down.
+- **The warm router is now asked two different questions**, so `RouterPrompt` names both, each by
+  the first line it arrives with (`Daemon.ProjectQuestionLead`). Without that a cheap model told
+  "reply with ONLY this JSON" answers in the four-verdict schema whatever it is asked. A second
+  router lane would have been a second `claude -p` per workspace for one extra sentence of prompt.
+- **`Concierge.Mentions` moved into `ProjectLadder.Mentions`** rather than being copied. Both
+  ladders ask "did the operator say this name", and two implementations of that drift the moment
+  one learns something.
+- The fake agent's project directive is **`routeproject:N`, an INDEX**, for the reason `cxpick:N`
+  exists one level up: a project NAME written into a test sentence is matched in code by `named`
+  before any model is asked, so a rung-2 check written with a name passes at rung 3 having never
+  reached the tier — proving the opposite of what it claims.
+
+| item | what | built |
+|---|---|---|
+| P3.1 | Rung 4 produces a question. **Deviation:** it holds and announces in the WORKSPACE, and does not write a concierge `questions` row. Three reasons: the daemon has no coupling to the concierge at all today and every suite (and a sleeping-concierge machine) runs daemons without one; *"no workspace daemon ever reads its store"* plus §2's authority cap deliberately keep per-workspace work-routing state out of that store; and `questions` has **no column saying which workspace or which scope a question belongs to**, so a project question cannot be told from a group question in it. Adding one is a **row-shape decision, which Phase 4 owns** (P4.1 wants one component over one source) — flagged here rather than made from this lane. | yes, as described |
+| P3.2 | `ProjectLadder` — the four rungs, pure, on the `unit` loop. | yes |
+| P3.3 | Memory: `aliases.member_key` (registry schema 2), `Registry.ProjectHandles` / `AddProjectAlias`, `dodona project-alias`. Recency derived from lane rows (correction 2). | yes |
+| P3.4 | `Projects.Live` — rung 2's evidence as the union of three liveness answers (D-L6). | yes |
+| P3.5 | The fence demoted below the ask (D-L3): `Concierge.LookAsync`, reached only by answering an open question with `look`. `Fence.cs` unchanged and not deleted. | yes |
+
+**Becomes impossible:** a typed sentence opening a lane in the first project because nothing
+knew which project it meant; a project name in the sentence being overruled by whichever
+project happens to be busy; a rung-2 answer resting on one instantaneous pipe read; the
+discovery fence spending the expensive tier on a sentence nobody asked it to search for.
+
+
+**`dev prove` verdicts — 21 PROVEN, 2 VACUOUS-by-construction, both declared.** Grouped form,
+one run per suite, every red read back from the real output:
+
+| check | suite | what HEAD did instead |
+|---|---|---|
+| `a_typed_sentence_with_no_project_to_infer_is_held` | workspace | `-> HEADER (started on opus/high (default))` — it spawned |
+| `a_held_sentence_invents_no_lane` | workspace | `before=0 after=1` |
+| `the_project_hold_offers_every_project_it_knows` | workspace | no `project_unknown` row at all |
+| `a_typed_sentence_naming_a_project_opens_a_lane_there` | workspace | `cwd=…dodona-proja-… want=…dodona-projb-…` |
+| `a_new_task_joins_the_only_project_with_a_live_lane` | workspace | the same, project A |
+| `the_lane_opens_in_the_project_the_classifier_chose` | workspace | `lanes=3->4 cwd=…proja… want=…projb…` |
+| `several_live_projects_reach_the_cheap_tier` | workspace | `classified_project events=0` |
+| `the_classified_rung_records_that_a_model_answered` | workspace | no `project_chosen` row |
+| `a_classifier_that_will_not_choose_holds_the_sentence` | workspace | `-> COMPLETELY (new task, started on opus/high)` |
+| `an_unchosen_project_invents_no_lane` | workspace | `before=4 after=5` |
+| `a_project_can_be_taught_a_spoken_handle` | workspace | `unknown command: project-alias` |
+| `a_handle_for_a_folder_that_is_not_a_project_is_refused` | workspace | the same |
+| `a_project_handle_is_stored_against_the_project_not_only_the_workspace` | workspace | `(aliases has no member_key column: registry schema is pre-2) cols=alias,display,workspace_id,created_ts` |
+| `a_taught_handle_opens_a_lane_in_its_project` | workspace | `lanes=5->6 cwd=…proja… want=…projb…` |
+| `the_alias_rung_records_that_evidence` | workspace | no `project_chosen` row |
+| `a_named_project_is_not_overruled_by_a_busy_one` | workspace | `cwd=…proja… want=…projb… classified_project went 0 -> 0` |
+| `the_project_ladder_is_live_on_the_path_the_operator_uses` | workspace | `lanes=6->7 cwd=…proja… want=…projb…` |
+| `the_fence_never_runs_unbidden` | concierge | `{"rung":"discovery","workspace":"bay-8f06","created":true}` — it went looking |
+| `looking_on_request_finds_a_folder_in_the_fence` | concierge | `concierge-answer: a numeric argument was expected` |
+| `looking_closes_the_question_it_answered` | concierge | the 'bay wall' question was never opened, so nothing to close |
+| `fence_never_reaches_outside_itself` (rewritten) | concierge | `error: no workspace "look"` |
+| `a_look_that_found_nothing_leaves_the_question_open` | concierge | the same |
+
+**VACUOUS, declared rather than dressed up as proof** — both pin a property no code state can
+currently redden, kept for the reason `an_explicit_root_beats_the_inherited_env` is (Phase 0c):
+
+- `naming_a_project_costs_no_model` — HEAD writes no `classified_project` row at all, so "the
+  count is zero" cannot fail against it. Its provable sibling is
+  `a_named_project_is_not_overruled_by_a_busy_one`, which asserts the same freeness *alongside* a
+  destination HEAD gets wrong.
+- The `unit` checks: **`dev prove unit:` refuses on purpose** and the refusal is right — a HEAD
+  that does not contain `ProjectLadder` cannot fail a test of it. The 19 unit checks are pinned
+  by the 22 acceptance PROVENs above, not by themselves, and that is stated rather than implied.
+
+**Suite tallies, this tree, after the fix:** `unit` 152/0 · `workspace` 133/0 (63.7 s) ·
+`concierge` 48/0 · `brain` 45/0 · `m2` 12/0. `dev gate` and `dev suites` deliberately NOT run:
+two sibling lanes were working and nine concurrent suites is the contention that reddens
+`ui-use`. **One measurement worth carrying:** `workspace` ran 202.5 s while a `dev prove` was
+running beside it and 63.7 s alone — the same 3x contention effect `dev gate` prints its
+leaked-process count for.
+
+**A rule for anyone writing a project check, learned from four VACUOUS verdicts in one run:
+NEVER ASSERT THE FIRST PROJECT.** `Members[0]` is `_primary`, which is what every spawn site
+answered before this wave — so "the lane landed in project A" is an assertion no build can fail,
+and `dev prove` correctly called four checks vacuous for it (`the_lane_opens_in_the_project_the_
+classifier_chose`, `a_taught_handle_opens_a_lane_in_its_project`, `the_project_ladder_is_live_on_
+the_path_the_operator_uses`, `a_named_project_is_not_overruled_by_a_busy_one`). Every one of them
+names **B** now. Two related shapes, both real:
+
+- **A cwd-only assertion goes green on the HELD case.** If a rung holds the sentence, no lane is
+  created and "the newest work lane" is the PREVIOUS one — which, in a section that keeps
+  choosing B, is also in B. So the lane COUNT belongs in the assertion, not only in the
+  `Wait-Until` above it.
+- **"No event was written" is unprovable on its own** when HEAD writes that event kind never.
+  `a_named_project_is_not_overruled_by_a_busy_one` asserted only that `classified_project` did
+  not move; HEAD has no such row at all, so it passed having tested nothing. It now asserts the
+  whole claim in one check — the name won, *and* it cost no model call.
+
+**A trap worth the next lane's attention, because it cost a full 200-second proof run.**
+`Invoke-StoreSql` THROWS on a sqlite error (deliberately — a hand-rolled version that swallowed
+stderr is how a check naming a non-existent column passed against every build ever made). So a
+check that names a column your migration ADDS **kills the suite** against HEAD: `dev prove`
+reported all twelve of this phase's `workspace` checks as MISSING with *"NO TALLY: the suite
+never reported"*, which reads as a crash rather than as "the schema is not there yet". A check
+must be able to fail against HEAD without taking the suite down with it — so the query is
+`pragma_table_info`-guarded and the absent-column case becomes the check's own FAIL detail.
+
+**Left undone, named so it is not re-discovered:** the one-project workspace is proved
+byte-for-byte identical by construction (`Decide` returns before every read, and
+`project_chosen` is not written) and by the eleven suites that run one-project workspaces
+staying green — but there is no check that *counts* the events a one-project workspace writes,
+so a future rung added ahead of the `only` short-circuit would not be caught by name. That is a
+one-line check somebody should add.
+
+---
+
 ## Phase 4 — asking, as one component with two render modes
 
 **The question already exists as a row** — `questions` in the concierge store, opened by `Ask`
@@ -649,6 +859,12 @@ grouped form `dev prove <suite>:<check> ...` — one run per suite, not one per 
 - **D-L4. The ask renders an existing `questions` row.** One component, two render modes, **one
   answer path**. Rejected: a modal (untestable by construction).
 - **D-L5. Project memory extends `members`/`aliases`.** Rejected: a new parallel `places` table.
+  **Settled while building Phase 3:** the handle half is `aliases.member_key` (registry schema 2),
+  written only by an operator-explicit `dodona project-alias`; the **recency half is derived from
+  the store's own lane rows, not stored in the registry at all**. Rejected: `members.last_used_ts`
+  — only a daemon knows a project was used, so it needs a second writer into a machine-wide table
+  the concierge owns, and `lanes.cwd` + `lanes.id` already record the fact workspace-locally and
+  transactionally.
 - **D-L6. Liveness is `LaneLiveness`, never one instantaneous pipe read.** Already one near-miss.
 - **D-L7. A project is a location — a folder.** It may be a repo, hold one, hold several, or
   hold none. Merging serialises per **repo**; everything operator-facing is per **project**.
@@ -665,3 +881,21 @@ grouped form `dev prove <suite>:<check> ...` — one run per suite, not one per 
   would break every suite run from inside a lane (they pass `--root`; their workspaces live in an
   isolated `DODONA_HOME`). Also rejected: making a stale `DODONA_WORKSPACE` fatal — it strands a
   lane over a leftover variable; it is announced and stepped past instead.
+- **D-L10. A project NAMED in the sentence is decided in code, before the classifier is asked.**
+  *(settled while building Phase 3)* The operator's precedence list reads 2-then-3 (an open lane's
+  project, then a remembered one), and this keeps it in substance while inverting the sequence: it
+  is the same rule the concierge's ladder already applies one level up — *explicit information
+  never triggers a search*. The two rungs agree wherever both have an answer; where they disagree
+  the named one is right. Rejected: consulting the cheap tier first, which lets "fix `<B>`'s
+  header" open a lane in A because A happens to be busy — a confident wrong answer, made
+  instantly, to a question the operator had already answered for free.
+- **D-L11. The router's project rung 4 holds in the WORKSPACE and does not open a concierge
+  `questions` row.** *(settled while building Phase 3; Phase 4 may revisit)* Three reasons: the
+  daemon has no coupling to the concierge at all and every suite — and any machine whose concierge
+  is asleep — runs daemons without one; *"no workspace daemon ever reads its store"* plus §2's
+  authority cap deliberately keep per-workspace work-routing state out of that store; and
+  `questions` has no column saying which workspace or which scope a question belongs to, so a
+  project question cannot be told from a group question in it. Adding one is a row-shape decision
+  and P4.1 (*one component, one source*) owns it. Rejected: writing project questions into the
+  concierge store from the daemon, and rejected: a second answer path in `Answer` that Phase 4
+  would have to undo.

@@ -995,6 +995,218 @@ PRAGMA user_version = 8;
         (($rh -match "lane $cLane") -and (TpRows "SELECT cwd FROM lanes WHERE id=$cLane").Trim() -eq $tp.B) `
         "out=$($rh -replace '\s+', ' ') cwd='$((TpRows "SELECT cwd FROM lanes WHERE id=$cLane").Trim())'"
 
+
+    # =====================================================================================
+    # PHASE 3: WHICH PROJECT A TYPED SENTENCE MEANS (docs/LOCATIONS-PLAN.md Phase 3)
+    #
+    # Phase 2 gave `lane-start` a `--project` and refused anything a project does not own.
+    # It deliberately left ONE site passing the first project: the typed-input path, because
+    # choosing a project from a sentence is a ladder rather than an argument. This is that
+    # ladder, and these are its rungs at the spawn site.
+    #
+    #   only    one project              free, and byte-for-byte the old answer
+    #   named   the sentence says where  code: leaf, taught handle, or the leaf said as words
+    #   live    a project has a lane in  code when exactly one does; the cheap tier when several
+    #   ask     nothing to go on         HOLD the sentence -- no lane, nothing delivered
+    #
+    # A FRESH WORKSPACE, not the one above, and that is deliberate. The Phase 2 section leaves
+    # live lanes in both projects and a detached third, so `only`, `named` and the single-live
+    # rung could not be told apart in it -- and a rung test that cannot fail for the right
+    # reason is the class of check this repo keeps paying for.
+    $p3 = New-TwoProjectWorkspace $dodona 'ladder'
+    # `agent` in the FIRST project's dodona.json, because Config is loaded once from _primary
+    # and the operator-path check below restarts this daemon with autostart ON. Without it the
+    # warm-up would start real `claude -p --model haiku` processes from an acceptance suite
+    # (CLAUDE.md 0.1: quota is the scarce resource; 3.2: a wake costs four of them).
+    Set-Content "$($p3.A)\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0 } | ConvertTo-Json)
+    StartDaemonFor $p3.Id | Out-Null
+    function P3([string[]]$a) { DodonaBare ($a + @('--workspace', $p3.Id)) }
+    function P3Rows([string]$sql) { Invoke-StoreSql $p3.Store $sql }
+    function P3Work() { [int](P3Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim() }
+    function P3Classified() { [int](P3Rows "SELECT COUNT(*) FROM events WHERE kind='classified_project'").Trim() }
+    function P3Chosen() { (P3Rows "SELECT detail FROM events WHERE kind='project_chosen' ORDER BY id DESC LIMIT 1").Trim() }
+    function P3NewestWorkLane() { (P3Rows "SELECT id FROM lanes WHERE role='work' ORDER BY id DESC LIMIT 1").Trim() }
+    function P3Cwd([string]$lane) { (P3Rows "SELECT cwd FROM lanes WHERE id=$lane").Trim() }
+    P3 @("router-start", "--child", $fake) | Out-Null
+    Wait-Until { (P3Rows "SELECT COUNT(*) FROM lanes WHERE role='router' AND state='alive'").Trim() -eq '1' } `
+        25000 'the ladder workspace has a warm classifier' | Out-Null
+
+    # ---- rung 4: NOTHING TO GO ON, SO HOLD. Two projects, no live lane, no name in the ----
+    # sentence. Before this phase the answer was "the first project, instantly and silently",
+    # which is an agent editing a repository nobody pointed it at -- and unlike a wrong LANE
+    # that is not undone by one `lane-stop`, because the agent has already read the wrong tree.
+    # So the sentence is held, exactly as the lane ladder's own top rung holds one.
+    $held4Before = P3Work
+    $held4 = P3 @("input", "make the header quite a lot taller")
+    Check 'a_typed_sentence_with_no_project_to_infer_is_held' `
+        ((($held4 -replace '\s+', ' ') -match 'held: not sure which project')) ($held4 -replace '\s+', ' ')
+    # THE NEGATIVE HALF, and the one that matters: holding must invent nothing. A rung that
+    # asked and spawned anyway would look identical in the reply text.
+    Check 'a_held_sentence_invents_no_lane' ((P3Work) -eq $held4Before) "before=$held4Before after=$(P3Work)"
+    Check 'the_project_hold_is_recorded_as_asked' `
+        ((P3Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 1") -match 'ask\|no-project') `
+        (P3Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 1")
+    # And it names what un-sticks it (CLAUDE.md 0.1: a wait names a condition, never a person).
+    $held4Ev = (P3Rows "SELECT detail FROM events WHERE kind='project_unknown' ORDER BY id DESC LIMIT 1").Trim()
+    Check 'the_project_hold_offers_every_project_it_knows' `
+        (($held4Ev -match [regex]::Escape($p3.ALeaf)) -and ($held4Ev -match [regex]::Escape($p3.BLeaf))) $held4Ev
+    Check 'the_project_hold_says_how_to_answer_it' `
+        ((P3Rows "SELECT body FROM pane_events WHERE body LIKE '%which project%' ORDER BY id DESC LIMIT 1") -match 'lane-start') `
+        (P3Rows "SELECT body FROM pane_events WHERE body LIKE '%which project%' ORDER BY id DESC LIMIT 1")
+
+    # ---- rung 3: THE SENTENCE NAMES A PROJECT. Code, free, and no model is asked ----------
+    P3 @("input", "tidy up the changelog in $($p3.BLeaf)") | Out-Null
+    Wait-Until { (P3Work) -eq $held4Before + 1 } 30000 'the named project gets a lane' | Out-Null
+    $nLane = P3NewestWorkLane
+    Check 'a_typed_sentence_naming_a_project_opens_a_lane_there' `
+        ((P3Cwd $nLane) -eq $p3.B) "cwd='$(P3Cwd $nLane)' want='$($p3.B)'"
+    Check 'the_named_rung_records_which_evidence_answered' (($nLane) -and (P3Chosen) -match 'rung=named how=leaf') (P3Chosen)
+    # FREE MEANS FREE. `classified_project` is written from inside ClassifyProjectAsync and
+    # nowhere else, so this is the check that notices if a name ever starts costing a call.
+    #
+    # A REGRESSION CHECK, AND `dev prove` SAYS VACUOUS FOR IT BY CONSTRUCTION -- reported as such
+    # rather than dressed up as proof: HEAD writes no `classified_project` row at all, so "the
+    # count is zero" cannot fail against it. It is kept for the same reason
+    # `an_explicit_root_beats_the_inherited_env` is (Phase 0c): it pins a property no code state
+    # can currently redden, so a later change that starts spending a model call on a rung the
+    # operator was promised for free cannot pass quietly. Its provable sibling is
+    # `a_named_project_is_not_overruled_by_a_busy_one`, which asserts the same freeness alongside
+    # a destination HEAD gets wrong.
+    Check 'naming_a_project_costs_no_model' ((P3Classified) -eq 0) "classified_project events=$(P3Classified)"
+
+    # ---- rung 2, the free half: ONE project holds a live lane, so there is nothing to ----
+    # choose between and no model is asked. This is the operator's rung 2 in its common shape.
+    $soleBefore = P3Work
+    P3 @("input", "routekind:new-task shorten the footer as well") | Out-Null
+    Wait-Until { (P3Work) -eq $soleBefore + 1 } 30000 'the new task joins the live project' | Out-Null
+    $sLane = P3NewestWorkLane
+    Check 'a_new_task_joins_the_only_project_with_a_live_lane' `
+        ((P3Cwd $sLane) -eq $p3.B) "cwd='$(P3Cwd $sLane)' want='$($p3.B)'"
+    Check 'the_live_rung_records_that_it_needed_no_model' ((P3Chosen) -match 'rung=live how=sole-live') (P3Chosen)
+    Check 'one_live_project_costs_no_model_either' ((P3Classified) -eq 0) "classified_project events=$(P3Classified)"
+
+    # ---- rung 2 proper: SEVERAL projects are live, so the cheap tier chooses --------------
+    # routeproject:N is an INDEX, not a name, and that is the same lesson `cxpick:N` carries in
+    # the concierge suite: a project NAME written into the sentence is matched IN CODE by the
+    # `named` rung before any model is asked, so this check written with a name would pass at
+    # rung 3 having never reached the tier -- proving the opposite of what it claims.
+    P3 @("lane-start", "--title", "ALPHAWORK", "--project", $p3.A, "--child", $fake) | Out-Null
+    Wait-Until { (P3Rows "SELECT COUNT(*) FROM lanes WHERE title='ALPHAWORK' AND state='alive'").Trim() -eq '1' } `
+        25000 'a lane is live in the first project too' | Out-Null
+    #
+    # AND IT MUST NAME THE SECOND PROJECT (index 2), not the first. `dev prove` said VACUOUS for
+    # the first draft of this check, which asserted project A: A is `_primary`, so it is what the
+    # OLD code answered for every typed sentence -- an assertion no build can fail. Every check in
+    # this section that names a project therefore names B. Worth knowing before writing another.
+    $classBefore = P3Work
+    P3 @("input", "routekind:new-task routeproject:2 add the missing footnote") | Out-Null
+    Wait-Until { (P3Work) -eq $classBefore + 1 } 30000 'the cheap tier chooses a project and a lane opens there' | Out-Null
+    $cLane2 = P3NewestWorkLane
+    Check 'several_live_projects_reach_the_cheap_tier' ((P3Classified) -ge 1) "classified_project events=$(P3Classified)"
+    # The lane COUNT is in the assertion, not only in the wait: a classifier that answered `none`
+    # holds the sentence, and `$cLane2` would then be the PREVIOUS lane -- which is also in B, so
+    # a cwd-only check would go green on the held case.
+    Check 'the_lane_opens_in_the_project_the_classifier_chose' `
+        (((P3Work) -eq $classBefore + 1) -and ((P3Cwd $cLane2) -eq $p3.B)) `
+        "lanes=$classBefore->$(P3Work) cwd='$(P3Cwd $cLane2)' want='$($p3.B)'"
+    Check 'the_classified_rung_records_that_a_model_answered' ((P3Chosen) -match 'rung=live how=classified') (P3Chosen)
+
+    # ...and a classifier that will not choose HOLDS, rather than falling back to the first
+    # project. This is the fallback that would be invisible: it compiles, it never errors, and
+    # it is wrong in exactly the case nobody watches.
+    $unsureBefore = P3Work
+    $unsure = P3 @("input", "routekind:new-task and now for something completely different")
+    Check 'a_classifier_that_will_not_choose_holds_the_sentence' `
+        ((($unsure -replace '\s+', ' ') -match 'held: not sure which project')) ($unsure -replace '\s+', ' ')
+    Check 'an_unchosen_project_invents_no_lane' ((P3Work) -eq $unsureBefore) "before=$unsureBefore after=$(P3Work)"
+    Check 'a_classifier_that_would_not_choose_says_so_in_the_chain' `
+        ((P3Rows "SELECT detail FROM events WHERE kind='project_unclassified' ORDER BY id DESC LIMIT 1") -match 'would not choose') `
+        (P3Rows "SELECT detail FROM events WHERE kind='project_unclassified' ORDER BY id DESC LIMIT 1")
+
+    # ---- THE MEMORY (D-L5): a spoken handle per project, in `aliases`, not a new table ----
+    # `members` was already every project ever attached; what was missing is what the operator
+    # CALLS one. So `aliases` grew one nullable `member_key` (registry schema 2) instead of a
+    # parallel `places` table -- fewer owned things is this project's whole failure mode.
+    # Taught for the SECOND project, for the reason recorded above: A is `_primary`, so a check
+    # asserting A cannot fail against a build that always answered A.
+    $pa = DodonaBare @("project-alias", "lantern", "--member", $p3.B, "--workspace", $p3.Id)
+    Check 'a_project_can_be_taught_a_spoken_handle' ($pa -match 'project aliased') $pa
+    $regDb = (DodonaBare @("where", "--workspace", $p3.Id, "--json") | ConvertFrom-Json).registry
+    # PRAGMA-GUARDED, and that is not defensive padding -- `Invoke-StoreSql` THROWS on a sqlite
+    # error, so naming a column that a pre-schema-2 registry does not have killed the whole
+    # suite mid-run: `dev prove` reported all twelve of this section's checks as MISSING and no
+    # tally line at all, which reads as "the suite crashed" rather than "the schema is not there
+    # yet". A check must be able to FAIL against HEAD; it must not be able to take the suite
+    # down with it.
+    $aliasCols = (Invoke-StoreSql $regDb "SELECT name FROM pragma_table_info('aliases')").Trim()
+    $aliasRow = if ($aliasCols -match 'member_key') {
+        (Invoke-StoreSql $regDb "SELECT alias, member_key FROM aliases WHERE alias='lantern'").Trim()
+    } else { "(aliases has no member_key column: registry schema is pre-2) cols=$($aliasCols -replace '\s+', ',')" }
+    Check 'a_project_handle_is_stored_against_the_project_not_only_the_workspace' `
+        ($aliasRow -match [regex]::Escape($p3.B.ToLowerInvariant())) "row='$aliasRow' B='$($p3.B.ToLowerInvariant())'"
+    # THE POINT OF THE MEMORY: the handle now answers for free, and it answers even though
+    # BOTH projects hold live lanes -- a name beats the classifier, the same rule the concierge
+    # applies one level up (explicit information never triggers a search).
+    $taughtBefore = P3Work
+    $taughtClassified = P3Classified
+    P3 @("input", "the lantern needs a new bulb") | Out-Null
+    Wait-Until { (P3Work) -eq $taughtBefore + 1 } 30000 'the taught handle opens a lane in its project' | Out-Null
+    $tLane = P3NewestWorkLane
+    Check 'a_taught_handle_opens_a_lane_in_its_project' `
+        (((P3Work) -eq $taughtBefore + 1) -and ((P3Cwd $tLane) -eq $p3.B)) `
+        "lanes=$taughtBefore->$(P3Work) cwd='$(P3Cwd $tLane)' want='$($p3.B)'"
+    Check 'the_alias_rung_records_that_evidence' ((P3Chosen) -match 'rung=named how=alias') (P3Chosen)
+    # BOTH halves, because the free-ness alone is unprovable: HEAD writes no `classified_project`
+    # row at all, so "the count did not move" passes against it having tested nothing (dev prove
+    # said VACUOUS). The claim is one thing -- a name wins over a busy project, AND costs nothing
+    # -- so it is one check over both facts.
+    Check 'a_named_project_is_not_overruled_by_a_busy_one' `
+        (((P3Cwd $tLane) -eq $p3.B) -and ((P3Classified) -eq $taughtClassified)) `
+        "cwd='$(P3Cwd $tLane)' want='$($p3.B)' classified_project went $taughtClassified -> $(P3Classified)"
+    # A handle for a folder no project owns is refused, not remembered. An alias pointing at a
+    # place no lane may open is a memory of somewhere the spawn site will refuse later, and
+    # "later" here means after a sentence has already resolved to it.
+    $badAlias = DodonaBare @("project-alias", "nowhere", "--member", (Join-Path $p3.A 'src'), "--workspace", $p3.Id)
+    Check 'a_handle_for_a_folder_that_is_not_a_project_is_refused' `
+        (($badAlias -replace '\s+', ' ') -match 'is not a project of') ($badAlias -replace '\s+', ' ')
+
+    # ---- THE OPERATOR'S OWN PATH: autostart ON, nothing pre-built by this test -----------
+    # The rule this exists for cost two days (CLAUDE.md 3): the routing ladder was fully
+    # covered and fully green while being DEAD in production, because the suite stood up its
+    # own classifier by hand and the real daemon never created one. Everything above this line
+    # ran against a router THIS TEST started with `router-start --child`. So: stop the
+    # classifier, stop the daemon, clear DODONA_NO_AUTOSTART, and let the daemon build its own
+    # warm-up -- then type a sentence and demand the project ladder actually decided.
+    $p3Router = (P3Rows "SELECT id FROM lanes WHERE role='router' AND state='alive' ORDER BY id DESC LIMIT 1").Trim()
+    if ($p3Router) { P3 @("lane-stop", $p3Router) | Out-Null }
+    StopDaemonFor $p3.Id
+    Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue    # as the operator has it
+    $p3auto = Start-Process $dodona -ArgumentList "daemon", "--workspace", $p3.Id -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon-p3-auto.out" -RedirectStandardError "$out\daemon-p3-auto.err"
+    [void]$extraDaemons.Add($p3auto)
+    Wait-Daemon $p3.CtlPipe | Out-Null
+    Wait-Until { (P3Rows "SELECT COUNT(*) FROM lanes WHERE role='router' AND state='alive'").Trim() -eq '1' } `
+        30000 'autostart builds its own classifier' | Out-Null
+    Check 'autostart_builds_the_classifier_the_ladder_will_use' `
+        ((P3Rows "SELECT COUNT(*) FROM lanes WHERE role='router' AND state='alive'").Trim() -eq '1') `
+        (P3Rows "SELECT id, title, role, state FROM lanes WHERE role='router'")
+    $opBefore = P3Work
+    $opChosen = [int](P3Rows "SELECT COUNT(*) FROM events WHERE kind='project_chosen'").Trim()
+    # The SECOND project again: naming the first would be an assertion no build can fail.
+    P3 @("input", "routekind:new-task $($p3.BLeaf) needs a changelog entry of its own") | Out-Null
+    Wait-Until { (P3Work) -eq $opBefore + 1 } 30000 'the operator-shaped sentence opens a lane' | Out-Null
+    $opLane = P3NewestWorkLane
+    Check 'the_project_ladder_is_live_on_the_path_the_operator_uses' `
+        (((P3Work) -eq $opBefore + 1) -and ((P3Cwd $opLane) -eq $p3.B)) `
+        "lanes=$opBefore->$(P3Work) cwd='$(P3Cwd $opLane)' want='$($p3.B)'"
+    Check 'a_ladder_decision_is_recorded_on_that_path_too' `
+        (([int](P3Rows "SELECT COUNT(*) FROM events WHERE kind='project_chosen'").Trim()) -gt $opChosen) `
+        "project_chosen went $opChosen -> $([int](P3Rows "SELECT COUNT(*) FROM events WHERE kind='project_chosen'").Trim())"
+    $env:DODONA_NO_AUTOSTART = "1"
+
+    Stop-WorkspaceShims $p3.Dir
+    DodonaBare @("stop-daemon", "--workspace", $p3.Id) | Out-Null
+
     Stop-WorkspaceShims $tp.Dir
     DodonaBare @("stop-daemon", "--workspace", $tp.Id) | Out-Null
 

@@ -202,7 +202,7 @@ sealed class Concierge
 
             case "answer":
             {
-                foreach (var line in Answer(e.GetProperty("id").GetInt64(), e.GetProperty("answer").GetString()!))
+                foreach (var line in await AnswerAsync(e.GetProperty("id").GetInt64(), e.GetProperty("answer").GetString()!))
                     w.WriteLine(line);
                 break;
             }
@@ -354,45 +354,102 @@ sealed class Concierge
             }
         }
 
-        // ---- rung 3: bounded discovery, on the EXPENSIVE tier, inside the fence. The one
-        // narrow exception to "management brains never run tools" — a classifier with a
-        // flashlight (Fence.cs). It falls to rung 4 fast, and the fence NEVER widens itself.
+        // ---- rung 3 IS NO LONGER HERE (D-L3, operator 2026-08-19): THE DISCOVERY FENCE IS
+        // DEMOTED BELOW THE ASK.
+        //
+        // It used to run automatically, right at this point: a bounded directory walk plus an
+        // EXPENSIVE-tier call, on the way to a question we were going to ask anyway. Two things
+        // are wrong with that, and the second is the operator's.
+        //
+        //   * It spends the costly tier -- and a filesystem walk -- to answer a question the
+        //     operator can answer for free, and it does it on every unresolved sentence.
+        //     Asking is not a failure mode to be avoided; it is the cheapest correct rung there
+        //     is (CLAUDE.md 0.1: quota is the scarce resource).
+        //   * Searching unbidden is the wrong DEFAULT. Occasionally going to look is exactly
+        //     right -- which is why Fence.cs stays, deliberately, and was not deleted -- but it
+        //     has to be something the operator asks for, not something that happens to them.
+        //
+        // So it is an affordance now: rung 4 asks, the question offers `look`, and answering
+        // `look` runs the fence (see LookAsync). The fence itself is unchanged and still never
+        // widens itself; what changed is who starts it.
         var candidateName = lo is JsonElement lv ? Str(lv, "candidate_name") : null;
-        var roots = Fence.Roots(reg, _config.Roots);
-        var candidates = roots.Count > 0 ? Fence.Enumerate(roots) : new List<Candidate>();
-        if (candidates.Count > 0)
-        {
-            var hi = await AskTierAsync(TierHiQuestion(text, candidateName, candidates), hi: true);
-            if (hi is JsonElement hiV && Str(hiV, "confidence") is string hc && hc != "low" &&
-                Str(hiV, "folder") is { Length: > 0 } folder && folder != "none")
-            {
-                var pick = candidates.FirstOrDefault(c =>
-                    c.Path.Equals(folder, StringComparison.OrdinalIgnoreCase) ||
-                    c.Name.Equals(folder, StringComparison.OrdinalIgnoreCase));
-                if (pick is not null)
-                {
-                    if (reg.Owner(pick.Path) is { } already)
-                        return Done(new Verdict("discovery", already.Ws.Id, already.Ws.Name, hc));
-                    try
-                    {
-                        // EXPLICIT: this folder was chosen — by the hi tier, out of a bounded
-                        // fence, in answer to something the operator typed. It is not a cwd
-                        // anybody inherited, which is the only thing D-L9 forbids.
-                        var made = WorkspaceResolve.ForPath(reg, pick.Path, PathSource.Explicit);
-                        Announce($"[dodona] found {pick.Path} inside the search fence — new workspace “{made.Ws.Name}”. " +
-                                 $"undo: dodona workspace-forget --workspace {made.Ws.Id}");
-                        return Done(new Verdict("discovery", made.Ws.Id, made.Ws.Name, hc, Created: true));
-                    }
-                    catch (Exception ex) { _store.Event("discovery_attach_failed", null, ex.Message); }
-                }
-            }
-            _store.Event("discovery_miss", null, $"fence={candidates.Count} candidates, input={Truncate(text, 60)}");
-        }
 
         // ---- rung 4: ask, with a guess, and TEACH. Double uncertainty lands in the merged
         // feed carrying its best candidates; the answer becomes an alias, so rung 4 decays
         // toward rung 1 with use.
         return Done(Ask(text, all, candidateName is null ? null : $"it sounded like “{candidateName}”"));
+    }
+
+    /// <summary>
+    /// "GO AND LOOK FOR IT" — the discovery fence as an explicit affordance (D-L3). Reached only
+    /// by answering an open rung-4 question with `look`, so a filesystem walk and an
+    /// expensive-tier call happen when the operator asks for them and never on their behalf.
+    ///
+    /// Everything below this line is the code that used to sit inline in the ladder, moved
+    /// rather than rewritten: same fence, same one capability, same refusal to widen itself, and
+    /// still recorded as the `discovery` rung so the resolutions table keeps telling the truth
+    /// about which rung answered.
+    ///
+    /// A MISS LEAVES THE QUESTION OPEN. That is the whole point of it being an affordance: the
+    /// operator asked us to look, we looked, we found nothing, and the honest next move is still
+    /// theirs. Closing the question here would turn "I looked and found nothing" into "answered".
+    /// </summary>
+    async Task<List<string>> LookAsync(long qid, string input)
+    {
+        var sw = Stopwatch.StartNew();
+        var lines = new List<string>();
+        using var reg = new Registry();
+        var roots = Fence.Roots(reg, _config.Roots);
+        var candidates = roots.Count > 0 ? Fence.Enumerate(roots) : new List<Candidate>();
+        if (candidates.Count == 0)
+        {
+            _store.Event("discovery_miss", null, $"fence empty (roots={roots.Count}), input={Truncate(input, 60)}");
+            lines.Add($"looked: nothing inside the search fence to consider (roots: {(roots.Count == 0 ? "none" : string.Join(", ", roots))})");
+            lines.Add($"question {qid} is still open — answer it with a name, or new:<NAME>");
+            return lines;
+        }
+
+        var hi = await AskTierAsync(TierHiQuestion(input, null, candidates), hi: true);
+        if (hi is JsonElement hiV && Str(hiV, "confidence") is string hc && hc != "low" &&
+            Str(hiV, "folder") is { Length: > 0 } folder && folder != "none")
+        {
+            var pick = candidates.FirstOrDefault(c =>
+                c.Path.Equals(folder, StringComparison.OrdinalIgnoreCase) ||
+                c.Name.Equals(folder, StringComparison.OrdinalIgnoreCase));
+            if (pick is not null)
+            {
+                if (reg.Owner(pick.Path) is { } already)
+                {
+                    _store.QuestionAnswer(qid, already.Ws.Id);
+                    _store.ResolutionInsert(input, "discovery", already.Ws.Id, hc, false, sw.ElapsedMilliseconds);
+                    _store.Event("resolved", null, $"rung=discovery ws={already.Ws.Name} conf={hc} input={Truncate(input, 80)}");
+                    lines.Add($"looked: {pick.Path} is already in workspace {already.Ws.Name} ({already.Ws.Id})");
+                    lines.Add($"deliver: dodona input \"{input}\" --workspace {already.Ws.Id}");
+                    return lines;
+                }
+                try
+                {
+                    // EXPLICIT: the operator asked us to look, the hi tier chose out of a bounded
+                    // fence, and the sentence they typed is what it chose for. Nothing here is a
+                    // cwd anybody inherited, which is the only thing D-L9 forbids.
+                    var made = WorkspaceResolve.ForPath(reg, pick.Path, PathSource.Explicit);
+                    _store.QuestionAnswer(qid, made.Ws.Id);
+                    _store.ResolutionInsert(input, "discovery", made.Ws.Id, hc, true, sw.ElapsedMilliseconds);
+                    _store.Event("resolved", null, $"rung=discovery ws={made.Ws.Name} conf={hc} created input={Truncate(input, 80)}");
+                    Announce($"[dodona] found {pick.Path} inside the search fence — new workspace “{made.Ws.Name}”. " +
+                             $"undo: dodona workspace-forget --workspace {made.Ws.Id}");
+                    lines.Add($"looked: found {pick.Path} — workspace {made.Ws.Name} ({made.Ws.Id})");
+                    lines.Add($"deliver: dodona input \"{input}\" --workspace {made.Ws.Id}");
+                    return lines;
+                }
+                catch (Exception ex) { _store.Event("discovery_attach_failed", null, ex.Message); }
+            }
+        }
+
+        _store.Event("discovery_miss", null, $"fence={candidates.Count} candidates, input={Truncate(input, 60)}");
+        lines.Add($"looked: nothing inside the search fence matched (considered {candidates.Count} folder(s))");
+        lines.Add($"question {qid} is still open — answer it with a name, or new:<NAME>");
+        return lines;
     }
 
     /// <summary>
@@ -504,17 +561,12 @@ sealed class Concierge
 
     /// <summary>Does the text name this workspace? Word-bounded for plain names so "work"
     /// does not match "network"; a substring match for names carrying punctuation, where a
-    /// word boundary is not meaningful.</summary>
-    static bool Mentions(string text, string handle)
-    {
-        if (handle.Length < 2) return false;
-        var esc = System.Text.RegularExpressions.Regex.Escape(handle);
-        var pattern = handle.All(ch => char.IsLetterOrDigit(ch) || ch == '-' || ch == '_')
-            ? $@"(?<![\w-]){esc}(?![\w-])"
-            : esc;
-        return System.Text.RegularExpressions.Regex.IsMatch(text, pattern,
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-    }
+    /// word boundary is not meaningful.
+    ///
+    /// The implementation moved to <see cref="ProjectLadder.Mentions"/> when Phase 3 needed the
+    /// identical question one level down ("did the operator name this PROJECT"). One matcher, so
+    /// the two ladders cannot come to different conclusions about the same sentence.</summary>
+    static bool Mentions(string text, string handle) => ProjectLadder.Mentions(text, handle);
 
     Verdict Ask(string text, List<Workspace> all, string? hint)
     {
@@ -525,8 +577,11 @@ sealed class Concierge
         var candidates = JsonSerializer.Serialize(ordered.Select(x => new { id = x.Id, name = x.Name }));
         var qid = _store.QuestionOpen(text, candidates);
         var choices = string.Join(" / ", ordered.Select(x => x.Name));
+        // `look` is the demoted fence (D-L3), offered here because this is the moment it is
+        // genuinely useful: we have said we do not know, and going to look is one of the answers
+        // the operator might want. It is never taken on their behalf.
         Announce($"[dodona] not sure which workspace “{Truncate(text, 45)}” is for{(hint is null ? "" : $" — {hint}")}. " +
-                 $"{choices}, or new? answer: dodona concierge-answer {qid} <name|new:NAME>", qid);
+                 $"{choices}, or new? answer: dodona concierge-answer {qid} <name|new:NAME|look>", qid);
         _store.Event("group_clarification", null, $"question {qid}: {Truncate(text, 80)}");
         return new Verdict("ask", null, null, "unsure", QuestionId: qid);
     }
@@ -536,12 +591,19 @@ sealed class Concierge
     /// (§4): every clarification becomes an alias, so the same sentence resolves at rung 1
     /// next time and asking decays with use.
     /// </summary>
-    List<string> Answer(long id, string answer)
+    async Task<List<string>> AnswerAsync(long id, string answer)
     {
         var lines = new List<string>();
         var q = _store.Question(id);
         if (q is null) { lines.Add($"error: no question {id}"); return lines; }
         if (q.State != "open") { lines.Add($"error: question {id} is already {q.State}"); return lines; }
+
+        // `look` is not a workspace name, it is an INSTRUCTION: go and search inside the fence
+        // (D-L3). It is answered here rather than as its own command because this is where the
+        // question already is -- the fence needs the sentence that could not be resolved, and the
+        // one place that is recorded is the question row.
+        if (answer.Trim().Equals("look", StringComparison.OrdinalIgnoreCase))
+            return await LookAsync(id, q.Input);
 
         using var reg = new Registry();
         Workspace? target;

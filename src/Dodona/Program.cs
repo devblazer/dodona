@@ -159,6 +159,13 @@ async Task<int> Dispatch() => cmd switch
     "workspace-move" => WorkspaceEdit((r, id) => r.Move(id, RequireMember(), out var e) ? null : e, "moved", RequireMember()),
     "workspace-rename" => WorkspaceEdit((r, id) => r.Rename(id, pos[0], out var e) ? null : e, "renamed"),
     "workspace-alias" => WorkspaceEdit((r, id) => r.AddAlias(id, pos[0], out var e) ? null : e, "aliased"),
+    // The router's rung-3 memory (LOCATIONS-PLAN Phase 3, D-L5): what the operator CALLS one
+    // project. `members` is already every project ever attached; this is the spoken handle for
+    // one of them, so "on zed, fix the header" opens a lane in the right folder for free, with
+    // no model call and no question. Written here in the CLI for the reason the block above
+    // gives: this is an operator-explicit registry edit, exactly like workspace-create, and the
+    // partial unique index is the arbiter rather than a process.
+    "project-alias" => WorkspaceEdit((r, id) => r.AddProjectAlias(id, RequireMember(), pos[0], out var e) ? null : e, "project aliased"),
     "workspace-forget" => WorkspaceEdit((r, id) => r.Forget(id, out var e) ? null : e, "forgotten"),
     "where" => Where(),
     "ps" => Ps(),
@@ -1370,6 +1377,8 @@ static void Help() => Console.WriteLine("""
       dodona workspace-detach --member <path> | workspace-move --member <path>
               a REPO belongs to at most one workspace; move is how you reassign it
       dodona workspace-rename <NAME> | workspace-alias <name> | workspace-forget
+      dodona project-alias <name> --member <path>
+              what you CALL one project, so "on <name>, ..." opens a lane there for free
       dodona where [--json]                 (store, dir, pipes — state left the project folder)
       dodona ps [--json]                    (EVERYTHING running on this machine, named)
       dodona stop-all [--lanes]             (stop the daemons; --lanes stops the agents too)

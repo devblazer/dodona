@@ -151,6 +151,67 @@ static class Projects
         || Of(new[] { neutralDir }, cwd) is not null
         || Of(projects, cwd) is not null;
 
+    // ------------------------------------------- rung 2's evidence, and D-L6 made unnarrowable
+
+    /// <summary>
+    /// THE DISTINCT PROJECTS THAT HOLD A LIVE LANE — the evidence rung 2 of the project ladder
+    /// decides on (docs/LOCATIONS-PLAN.md Phase 3), as a pure function over three liveness
+    /// answers rather than one read.
+    ///
+    /// **This is pure for one specific reason, and it is not tidiness.** Phase 3's named trap
+    /// (D-L6) is that "is something already live in this project?" must never be one
+    /// instantaneous pipe read: a shim's pipe name BLINKS OUT of the namespace while its serve
+    /// loop disposes one `NamedPipeServerStream` and constructs the next — measured on this
+    /// machine, 8 reads out of 192 over 1.5 s saw no pipe while the shim was demonstrably alive
+    /// and instantly connectable — and the gap is *synchronised*: every shim in a workspace
+    /// disconnects the instant its daemon exits, and the next daemon's reconcile runs
+    /// milliseconds later. A single read there once declared four to seven live lanes dead per
+    /// restart.
+    ///
+    /// A suite cannot construct that window: it would have to hold the OS pipe namespace still.
+    /// So the part that CAN be got wrong — *which answers count* — is lifted out of the daemon
+    /// and onto the ~1 second `unit` loop, where narrowing it back to one source is a red check
+    /// rather than a plausible-looking simplification. The three answers, and a lane counts if
+    /// ANY of them says yes:
+    ///
+    ///   * <paramref name="byPipe"/>        — the pipe namespace. Cannot go stale; the only
+    ///                                        answer that sees a lane whose `shim-lane*.json`
+    ///                                        was never written or has been reaped. It blinks.
+    ///   * <paramref name="byRecord"/>      — a recorded shim pid that is a live `DodonaShim`.
+    ///                                        Does not blink; blind to a recordless orphan.
+    ///   * <paramref name="byConnection"/>  — this daemon is holding an open handle to that pipe
+    ///                                        right now, which is proof no read can contradict.
+    ///
+    /// Every consequence of a false negative here is worse than a stale rung: it demotes a free,
+    /// correct rung 2 into a question the operator did not need to be asked — or, with two
+    /// projects live and one wrongly dropped, into the WRONG project answered confidently.
+    ///
+    /// Work lanes only, and only projects this workspace still owns: a lane whose recorded
+    /// folder outlived its project (Phase 2 trap T4) must not drag a new lane into a folder that
+    /// now belongs to somebody else.
+    /// </summary>
+    public static List<string> Live(
+        IReadOnlyList<string> projects,
+        IEnumerable<(long Id, string Role, string State, string Cwd)> lanes,
+        IEnumerable<long> byPipe,
+        IEnumerable<long> byRecord,
+        IEnumerable<long> byConnection)
+    {
+        var live = new HashSet<long>(byPipe);
+        foreach (var id in byRecord) live.Add(id);
+        foreach (var id in byConnection) live.Add(id);
+
+        var result = new List<string>();
+        foreach (var l in lanes)
+        {
+            if (l.Role != "work" || l.State != "alive") continue;
+            if (!live.Contains(l.Id)) continue;
+            if (Of(projects, l.Cwd) is string p &&
+                !result.Any(x => x.Equals(p, StringComparison.OrdinalIgnoreCase))) result.Add(p);
+        }
+        return result;
+    }
+
     // ------------------------------------------------------------------ T1: one folder, said once
 
     /// <summary>The lead-in of the sentence a plain lane's system prompt uses to name its

@@ -1024,3 +1024,229 @@ public class LaneProjectGuardTests
         Assert.Equal("user", Projects.ArgValue(args, "--setting-sources"));
     }
 }
+
+// =========================================================================================
+// PHASE 3: WHICH PROJECT A TYPED SENTENCE MEANS (docs/LOCATIONS-PLAN.md Phase 3)
+//
+// The whole ladder is pure, which is the point of it being here: the one-project answer below
+// is the property the entire workspace migration rested on and the one this plan is most
+// likely to break, and it must be re-checkable in a second rather than eight seconds of
+// daemon startup away.
+//
+// `dev prove unit:<check>` refuses by design (a HEAD that does not contain a new function
+// cannot fail a test of it), so the teeth for this phase are the `workspace` and `concierge`
+// acceptance checks. These pin the DECISIONS so a later simplification cannot pass quietly.
+// =========================================================================================
+
+public class ProjectLadderTests
+{
+    const string Alpha = @"C:\ws\alpha";
+    const string Beta = @"C:\ws\project-zed";
+    static readonly string[] One = { Alpha };
+    static readonly string[] Two = { Alpha, Beta };
+    static readonly (string Alias, string Key)[] NoHandles = System.Array.Empty<(string, string)>();
+    static readonly string[] Nothing = System.Array.Empty<string>();
+
+    /// <summary>THE PROPERTY THIS PHASE IS MOST LIKELY TO BREAK. One project is one answer, so
+    /// nothing is named, nothing is classified and nothing is asked -- and the rung says `only`
+    /// so the daemon knows not to write an event either. The operator's own machine is a
+    /// one-project workspace.</summary>
+    [Fact]
+    public void One_project_is_answered_before_anything_else_happens()
+    {
+        var v = ProjectLadder.Decide(One, NoHandles, Nothing, "something completely unrelated");
+        Assert.Equal(ProjectLadder.Only, v.Rung);
+        Assert.Equal(Alpha, v.Project);
+    }
+
+    /// <summary>...and it holds even when a live lane and a taught handle would both point
+    /// elsewhere. The short-circuit is first for a reason: a one-project workspace must not be
+    /// able to reach a rung at all.</summary>
+    [Fact]
+    public void One_project_wins_over_every_other_rung()
+    {
+        var v = ProjectLadder.Decide(One, new[] { ("zed", Beta.ToLowerInvariant()) }, new[] { Beta }, "on zed, fix it");
+        Assert.Equal(ProjectLadder.Only, v.Rung);
+        Assert.Equal(Alpha, v.Project);
+    }
+
+    /// <summary>Rung 3, the cheapest of the real rungs: the sentence names the folder.</summary>
+    [Fact]
+    public void A_named_project_is_decided_in_code()
+    {
+        var v = ProjectLadder.Decide(Two, NoHandles, Nothing, "in project-zed, rename the header");
+        Assert.Equal(ProjectLadder.Named, v.Rung);
+        Assert.Equal(Beta, v.Project);
+        Assert.Equal("leaf", v.How);
+    }
+
+    /// <summary>A taught handle (`aliases.member_key`, registry schema 2) is the half `members`
+    /// could not carry: `members` is already every project ever attached, but nothing recorded
+    /// what the operator CALLS one.</summary>
+    [Fact]
+    public void A_taught_handle_names_its_project()
+    {
+        var v = ProjectLadder.Decide(Two, new[] { ("lamp", Beta.ToLowerInvariant()) }, Nothing, "the lamp needs repainting");
+        Assert.Equal(ProjectLadder.Named, v.Rung);
+        Assert.Equal(Beta, v.Project);
+        Assert.Equal("alias", v.How);
+    }
+
+    /// <summary>The normalised form the plan names outright: `project zed` for `project-zed`.
+    /// Voice typing and ordinary English both put spaces where a folder name has hyphens, and a
+    /// memory that only matched the literal folder name would miss how people actually talk.</summary>
+    [Fact]
+    public void The_folder_name_said_as_words_still_names_it()
+    {
+        var v = ProjectLadder.Decide(Two, NoHandles, Nothing, "start on project zed please");
+        Assert.Equal(ProjectLadder.Named, v.Rung);
+        Assert.Equal(Beta, v.Project);
+        Assert.Equal("spoken", v.How);
+    }
+
+    /// <summary>A NAME BEATS THE CLASSIFIER, and this is the check that pins it. The concierge's
+    /// own ladder already applies the rule one level up: explicit information never triggers a
+    /// search. Consulting the model first would let "fix project-zed's header" open a lane in
+    /// alpha because alpha happens to be busy -- a confident wrong answer, made instantly, in a
+    /// case the operator had already answered for free.</summary>
+    [Fact]
+    public void A_named_project_is_not_overruled_by_a_busy_one()
+    {
+        var v = ProjectLadder.Decide(Two, NoHandles, new[] { Alpha, Beta }, "in project-zed, rename the header");
+        Assert.Equal(ProjectLadder.Named, v.Rung);
+        Assert.Equal(Beta, v.Project);
+    }
+
+    /// <summary>Rung 2 with only ONE project holding live lanes needs no model: there is nothing
+    /// to choose between. Free, and recorded as `sole-live` so the data says which evidence
+    /// answered.</summary>
+    [Fact]
+    public void One_live_project_needs_no_model()
+    {
+        var v = ProjectLadder.Decide(Two, NoHandles, new[] { Beta }, "make the header taller");
+        Assert.Equal(ProjectLadder.Live, v.Rung);
+        Assert.Equal(Beta, v.Project);
+        Assert.Equal("sole-live", v.How);
+    }
+
+    /// <summary>Rung 2 proper: several projects are live, so which one is a judgement, and the
+    /// verdict hands the caller the CLOSED list to ask about. Project is null -- nothing may be
+    /// spawned on this verdict.</summary>
+    [Fact]
+    public void Several_live_projects_go_to_the_cheap_tier()
+    {
+        var v = ProjectLadder.Decide(Two, NoHandles, new[] { Alpha, Beta }, "make the header taller");
+        Assert.Equal(ProjectLadder.Classify, v.Rung);
+        Assert.Null(v.Project);
+        Assert.Equal(new[] { Alpha, Beta }, v.Candidates);
+    }
+
+    /// <summary>A LIVE LANE IN A PROJECT THIS WORKSPACE NO LONGER OWNS IS NOT EVIDENCE (Phase 2
+    /// trap T4). `workspace-detach` and `-move` touch no lane row, so a recorded folder can
+    /// outlive its project while the FOLDER still exists -- it belongs to another workspace now.
+    /// Counting it would drag a brand-new agent into somebody else's repository.</summary>
+    [Fact]
+    public void A_live_lane_outside_every_project_is_not_a_candidate()
+    {
+        var v = ProjectLadder.Decide(Two, NoHandles, new[] { @"C:\elsewhere\gone" }, "make the header taller");
+        Assert.Equal(ProjectLadder.Ask, v.Rung);
+    }
+
+    /// <summary>Rung 4, and it is a real answer rather than a failure. Several projects, no name
+    /// in the sentence, nothing live to infer from: every guess is a coin toss whose losing side
+    /// is an agent editing the wrong repository, which one `lane-stop` does not undo. So the
+    /// sentence is held and the candidates come back for the question.</summary>
+    [Fact]
+    public void Nothing_to_go_on_asks_rather_than_guessing()
+    {
+        var v = ProjectLadder.Decide(Two, NoHandles, Nothing, "make the header taller");
+        Assert.Equal(ProjectLadder.Ask, v.Rung);
+        Assert.Null(v.Project);
+        Assert.Equal(new[] { Alpha, Beta }, v.Candidates);
+    }
+
+    /// <summary>A word boundary, not a substring: "network" is not "work". The concierge's rung 1
+    /// has always had this rule and Phase 3 shares the one matcher, so a project called `work`
+    /// cannot swallow every sentence about networks.</summary>
+    [Fact]
+    public void A_project_name_does_not_match_inside_a_longer_word()
+    {
+        var projects = new[] { @"C:\ws\work", @"C:\ws\other" };
+        Assert.Null(ProjectLadder.NameMatch(projects, NoHandles, "trace the network timeouts"));
+    }
+
+    /// <summary>Longest name first, the same reason the concierge orders workspaces that way:
+    /// `work-ui` must beat `work`, or the longer name can never be used.</summary>
+    [Fact]
+    public void The_longer_project_name_wins()
+    {
+        var projects = new[] { @"C:\ws\work", @"C:\ws\work-ui" };
+        var hit = ProjectLadder.NameMatch(projects, NoHandles, "tidy up work-ui");
+        Assert.Equal(@"C:\ws\work-ui", hit!.Value.Project);
+    }
+
+    /// <summary>A single-word handle is not also a "spoken" match -- Mentions already answered
+    /// it. A rung that can only ever repeat the previous one lies about which evidence was
+    /// used, and `how=` is data the operator's routing table is meant to be tunable from.</summary>
+    [Fact]
+    public void A_single_word_handle_is_never_a_spoken_match() =>
+        Assert.False(ProjectLadder.Spoken("start on alpha", "alpha"));
+}
+
+public class LiveProjectEvidenceTests
+{
+    const string Alpha = @"C:\ws\alpha";
+    const string Beta = @"C:\ws\beta";
+    static readonly string[] Two = { Alpha, Beta };
+    static readonly long[] Nothing = System.Array.Empty<long>();
+
+    static (long, string, string, string)[] Lanes() => new[]
+    {
+        (1L, "work", "alive", Alpha),
+        (2L, "work", "alive", Beta),
+        (3L, "router", "alive", @"C:\home\neutral"),
+        (4L, "work", "dead", Beta),
+    };
+
+    /// <summary>THE D-L6 CHECK, AND THE REASON THIS FUNCTION IS PURE AT ALL. A lane visible only
+    /// by its RECORDED SHIM PID -- its pipe name absent from the namespace this instant -- is
+    /// live. That window is real and measured: 8 reads of 192 over 1.5 s saw no pipe while the
+    /// shim was alive and instantly connectable, and it is synchronised with a daemon restart,
+    /// where a single read once declared four to seven lanes dead at once.
+    ///
+    /// No acceptance suite can construct that window -- it would have to hold the OS pipe
+    /// namespace still -- so this is where narrowing the union back to "just read the pipes"
+    /// goes red instead of looking like a tidy-up.</summary>
+    [Fact]
+    public void A_lane_alive_only_by_its_shim_record_still_counts() =>
+        Assert.Equal(new[] { Beta }, Projects.Live(Two, Lanes(), Nothing, new[] { 2L }, Nothing));
+
+    /// <summary>...and the other direction: a lane with no shim record at all is still seen by
+    /// its pipe. On 2026-08-18 four live agents were invisible to `dodona ps` for exactly this
+    /// reason, three of them running out of the compiler's own output directory.</summary>
+    [Fact]
+    public void A_lane_with_no_record_is_still_seen_by_its_pipe() =>
+        Assert.Equal(new[] { Alpha }, Projects.Live(Two, Lanes(), new[] { 1L }, Nothing, Nothing));
+
+    /// <summary>The third answer, which only the daemon has: it is holding an open handle to that
+    /// pipe right now. No read can contradict that.</summary>
+    [Fact]
+    public void A_connected_runtime_is_evidence_on_its_own() =>
+        Assert.Equal(new[] { Alpha }, Projects.Live(Two, Lanes(), Nothing, Nothing, new[] { 1L }));
+
+    /// <summary>Distinct projects, not lanes: three lanes in one project is one candidate, or
+    /// rung 2 would go to a model to choose between a project and itself.</summary>
+    [Fact]
+    public void The_answer_is_projects_not_lanes()
+    {
+        var many = new[] { (1L, "work", "alive", Alpha), (5L, "work", "alive", Alpha + @"\src") };
+        Assert.Equal(new[] { Alpha }, Projects.Live(Two, many, new[] { 1L, 5L }, Nothing, Nothing));
+    }
+
+    /// <summary>A management lane is not work, and a dead row is not live. Either counted would
+    /// make rung 2 answer with a project nobody is working in -- and the router itself lives in
+    /// the neutral directory, which belongs to no project at all.</summary>
+    [Fact]
+    public void Management_lanes_and_dead_rows_are_not_evidence() =>
+        Assert.Empty(Projects.Live(Two, Lanes(), new[] { 3L, 4L }, new[] { 3L, 4L }, Nothing));
+}

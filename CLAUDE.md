@@ -612,6 +612,15 @@ generics ("stop", "no", "try again") are decided in code and stay instant. On do
 the sentence is HELD and you are asked — nothing is delivered. Without a warm brain, behaviour
 is unchanged (focused lane), which is why the suites are unaffected.
 
+**And a new lane now chooses its PROJECT the same way** (Phase 3): one project answers itself for
+free, a sentence naming a project is decided in code (folder name, a handle taught with `dodona
+project-alias <name> --member <path>`, or the folder name said as words — `project zed` for
+`project-zed`), otherwise the project that already holds a live lane; several live projects cost
+one cheap call. When none of that answers, **the sentence is held and nothing is spawned** — a
+lane opened in the wrong project is an agent reading the wrong repository, which no `lane-stop`
+undoes. `project_chosen` records which rung and which evidence; a one-project workspace writes
+none of it and is byte-for-byte unchanged.
+
 ## 3.2 Commands that observe, and commands that ACT
 
 **`dodona status` used to summon a daemon. It does not any more, and that is enforced in code**
@@ -772,11 +781,15 @@ each one is a way to lose someone's work silently.
   — `SpawnAgentLaneAsync(title, project, …)` has no default, `dodona lane-start --project <path>`
   chooses one, a folder no project owns is refused, and the project picks the lane's
   `permissionMode`/`allowedTools` (`Config.For`) and is written into its system prompt from the
-  same single parameter. What is **still true and still the danger**: with no `--project`, and for
-  every sentence the operator TYPES, the project is the workspace's first one, which for them is
-  their live tree — so a plain lane is still in a SHARED checkout and **must still never check out
-  a branch**. Choosing per-sentence is Phase 3; giving each lane a tree of its own is still
-  unbuilt, and is still a spawn-site change rather than a schema one.
+  same single parameter. **A typed sentence now chooses too** (Phase 3, 2026-08-19): the project
+  comes from a ladder — one project answers itself, a sentence that NAMES a project (its folder
+  name, a handle taught with `dodona project-alias`, or the folder name said as words) is decided
+  in code for free, otherwise the project holding a live lane, and on genuine uncertainty the
+  sentence is **HELD and you are asked** rather than aimed at the first project.
+  What is **still true and still the danger**: with one project — which is what the operator has —
+  every lane still opens in their live tree, so a plain lane is in a SHARED checkout and **must
+  still never check out a branch**. Giving each lane a tree of its own is still unbuilt, and is
+  still a spawn-site change rather than a schema one.
 
 ## 6. Where things are written down
 

@@ -10,8 +10,12 @@
 #   rung 1  exact name or alias                 code, no model  (the steady state; free)
 #   rung 1b only one workspace exists           code, no model  (no group question to answer)
 #   rung 2  fuzzy                               cheap tier
-#   rung 3  bounded discovery inside the fence  expensive tier, ONE capability
-#   rung 4  ask the operator, and TEACH         a row + a feed line; the answer becomes an alias
+#   rung 3  ask the operator, and TEACH         a row + a feed line; the answer becomes an alias
+#   -----   bounded discovery inside the fence  expensive tier, ONE capability -- BELOW the ask
+#           now (D-L3, operator 2026-08-19): never automatic, reached only by answering an open
+#           question with `look`. Fence.cs is unchanged and was deliberately not deleted; what
+#           moved is who starts it. Going looking is occasionally the right answer and never
+#           the right default.
 #
 # Plus the review-behind net (§2.3), which exists because the per-workspace brain
 # structurally CANNOT catch a wrong-workspace delivery: it does not know other workspaces
@@ -161,28 +165,75 @@ try {
     $r = Resolve-Text "do the unnameable thing cxpick:2 cxlow"
     Check 'low_confidence_does_not_act' ($r.rung -ne 'fuzzy') ($r | ConvertTo-Json -Compress)
 
-    # ---- rung 3: bounded discovery inside the fence -------------------------------------
-    # `bay` is a sibling of registered members, so the fence (parents of every member)
-    # covers it. The expensive tier picks it; a workspace is created and announced.
+    # ---- rung 3 IS NO LONGER A RUNG: the discovery fence is DEMOTED BELOW THE ASK -------
+    # D-L3 (operator, 2026-08-19). It used to run automatically on the way to a question we
+    # were going to ask anyway: a directory walk plus an EXPENSIVE-tier call, spent to avoid
+    # asking -- when asking is the cheapest correct rung there is. And searching unbidden is
+    # the wrong default: occasionally going to look is exactly right, which is why `Fence.cs`
+    # stays and was NOT deleted, but it has to be something the operator asks for.
+    #
+    # So it is an affordance now: rung 4 asks, the question offers `look`, and `look` runs the
+    # fence. `bay` is still the folder it has to find -- inside the fence, owned by nobody.
+    $cxStore = Join-Path $dodonaHome 'concierge\store.db'
+    function CxDiscoveryEvents() { [int](Invoke-StoreSql $cxStore "SELECT COUNT(*) FROM events WHERE kind LIKE 'discovery%'").Trim() }
     $st = Dx @('concierge-status')
     Check 'fence_is_derived_from_member_parents' ($st -match [regex]::Escape($fenceRoot)) $st
 
+    # THE DEMOTION ITSELF, and the whole decision rests on this check: an unresolvable sentence
+    # must reach `ask` WITHOUT the fence having run. `discovery_miss` and
+    # `discovery_attach_failed` are written from inside the fence path and nowhere else, so a
+    # fence still running on its own would show up here as an extra row -- which is what makes
+    # this an assertion rather than a hope.
+    $missBefore = CxDiscoveryEvents
     $r = Resolve-Text "start on the bay wall cxguess:bay cxfolder:bay"
-    Check 'discovery_finds_a_folder_in_the_fence' ($r.rung -eq 'discovery' -and $r.created -eq $true) ($r | ConvertTo-Json -Compress)
-    Check 'discovery_is_announced_with_undo' ((Dx @('concierge-feed')) -match 'inside the search fence') ''
-    $bayWs = $r.workspace
-    if ($bayWs) { Dx @('workspace-forget', '--workspace', $bayWs) | Out-Null }
+    Check 'the_fence_never_runs_unbidden' `
+        ($r.rung -eq 'ask' -and (CxDiscoveryEvents) -eq $missBefore) `
+        "$($r | ConvertTo-Json -Compress) discovery_events=$missBefore->$(CxDiscoveryEvents)"
+    Check 'the_ask_offers_going_to_look' ((Dx @('concierge-feed')) -match 'new:NAME\|look') (Dx @('concierge-feed'))
 
-    # THE FENCE NEVER WIDENS ITSELF (§8 rejection). `atlantis` exists, is a perfectly good
-    # folder, and is outside every member's parent -- so the expensive tier is never even
-    # offered it, and the ladder falls to rung 4 instead of going looking.
+    # ...and answering `look` runs it, finds `bay`, and attaches it. Same fence, same single
+    # capability, same rung name in the resolutions table -- only the trigger moved.
+    # The BEFORE reading is load-bearing, not bookkeeping: written as "the question is gone
+    # afterwards" this check was VACUOUS -- against the old build the sentence resolved at
+    # `discovery` and no question was ever opened, so "not in the open list" passed having
+    # tested nothing (dev prove said so; .claude/skills/check-authoring 1).
+    $qOpenBefore = Dx @('concierge-questions')
+    $look = Dx @('concierge-answer', "$($r.question)", 'look')
+    Check 'looking_on_request_finds_a_folder_in_the_fence' `
+        (($look -match 'looked: found') -and ($look -match 'bay')) $look
+    Check 'discovery_is_announced_with_undo' ((Dx @('concierge-feed')) -match 'inside the search fence') ''
+    $wsAll = (Dx @('workspaces', '--json')) | ConvertFrom-Json
+    $bayRow = @($wsAll) | Where-Object { "$($_.members.path)" -match 'bay' } | Select-Object -First 1
+    Check 'looking_attaches_what_it_found' ($null -ne $bayRow) "workspaces=$(@($wsAll).name -join ',')"
+    Check 'looking_closes_the_question_it_answered' `
+        (($qOpenBefore -match 'bay wall') -and ((Dx @('concierge-questions')) -notmatch 'bay wall')) `
+        "before='$($qOpenBefore -replace '\s+', ' ')' after='$((Dx @('concierge-questions')) -replace '\s+', ' ')'"
+    if ($bayRow) { Dx @('workspace-forget', '--workspace', $bayRow.id) | Out-Null }
+
+    # THE FENCE NEVER WIDENS ITSELF (the design's rejection list). `atlantis` exists, is a
+    # perfectly good folder, and is outside every member's parent -- so the expensive tier is
+    # never even offered it.
+    #
+    # THIS CHECK USED TO ASSERT ONLY `rung -eq 'ask'`, AND WITH THE FENCE DEMOTED THAT WOULD
+    # HAVE GONE GREEN HAVING TESTED NOTHING: every unresolved sentence reaches `ask` now, fence
+    # or no fence (LOCATIONS-PLAN Phase 3 names this exact trap by line number). So it asks,
+    # then explicitly LOOKS, and demands the look came back empty and the question stayed open.
+    # That is a strictly stronger assertion than the old one, because it proves the fence
+    # really ran and still did not reach outside itself.
     # "work on atlantis" would match the workspace named `work` at rung 1 and prove nothing.
     $r = Resolve-Text "dig out the sunken city cxguess:atlantis cxfolder:atlantis"
-    Check 'fence_never_reaches_outside_itself' ($r.rung -eq 'ask') ($r | ConvertTo-Json -Compress)
+    Check 'an_unresolvable_sentence_still_asks' ($r.rung -eq 'ask') ($r | ConvertTo-Json -Compress)
+    $lookOut = Dx @('concierge-answer', "$($r.question)", 'look')
+    Check 'fence_never_reaches_outside_itself' `
+        (($lookOut -match 'nothing inside the search fence matched') -and ($lookOut -notmatch 'atlantis')) $lookOut
+    # A MISS LEAVES THE QUESTION OPEN, and that is the point of an affordance: the operator
+    # asked us to look, we looked, we found nothing, and the next move is still theirs.
+    # Closing it here would turn "I looked and found nothing" into "answered".
+    Check 'a_look_that_found_nothing_leaves_the_question_open' `
+        (($lookOut -match 'still open') -and ((Dx @('concierge-questions')) -match 'sunken city')) $lookOut
     $wsAll = (Dx @('workspaces', '--json')) | ConvertFrom-Json
     Check 'outside_folder_was_never_attached' `
         (-not (@($wsAll) | Where-Object { "$($_.members.path)" -match 'atlantis' })) ''
-
 
     # ---- rung 4: ask, with candidates -- and TEACH --------------------------------------
     $r = Resolve-Text "sort out the beacon rotation gearbox"

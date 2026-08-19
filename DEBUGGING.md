@@ -388,7 +388,19 @@ are the authority and they must agree.)*
   sending everything to the focused lane. If you see that row, routing is OFF: the ladder
   is not choosing lanes, and every `routing_decisions` row will read
   `tier=focus confidence=no-classifier`. That was the live state for two days
-  (CLAUDE.md §3) because the classifier was looked up by a role nothing ever created. Compression kinds: `compressed` (with latency and before→after sizes),
+  (CLAUDE.md §3) because the classifier was looked up by a role nothing ever created.
+  **Project-routing kinds (LOCATIONS-PLAN Phase 3) — which project a typed sentence opened a
+  lane in:** `project_chosen` (`rung=named|live how=leaf|alias|spoken|sole-live|classified`,
+  plus the project path — **never written for a one-project workspace**, where there is no
+  decision to record and the whole phase must be invisible), `classified_project` (the cheap
+  tier was asked, because several projects held live lanes — this is the one row that costs
+  quota, so its absence is how the free rungs are checked), `project_unclassified` (there was
+  no classifier, or it would not choose: the sentence is HELD rather than aimed at the first
+  project), `project_unknown` (**held and asked — nothing was delivered, and no lane row
+  exists**; the detail carries every project it could have meant), and
+  `project_gone_at_spawn` (a rung's answer stopped being a project between the ladder's read
+  and the spawn — trap T4 arriving on the typed-input path). A `routing_decisions` row with
+  `tier=ask confidence=no-project` is the project hold seen from the other side. Compression kinds: `compressed` (with latency and before→after sizes),
   `compressor_timeout`, `compressor_failed`. Lifecycle kinds: `lane_stopped`,
   `lane_dormant` (its ticket landed — the agent was retired, the lane keeps the thread),
   `lane_respawned` (a fresh agent resumed the recorded session).
