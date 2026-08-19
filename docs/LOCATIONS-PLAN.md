@@ -279,12 +279,11 @@ is keyed on the commit alone, so three lanes at one HEAD share one worktree, one
 directory and one `stderr.tmp`. Observed: `workspace-acceptance` died on its FIRST command with
 *"the process cannot access the file ... stderr.tmp"*, and prove reported eleven perfectly good
 checks as MISSING. This is `f9aaf25`'s two-lanes-one-tree failure reappearing inside the tool
-that verifies. A private `TEMP` is the workaround; the fix belongs beside P1.5.
+that verifies. A private `TEMP` is the workaround; the fix is P1.7.
 
 | item | what |
 |---|---|
-| P1.5 | `dev test` / `dev suites` / `dev gate` do not build the tree under test -- a **refusal** comparing build output against sources, never an implicit build (that would end the 1-second `dev test unit` loop). *(filed by the Phase 0c lane)* |
-| P1.6 | `dev prove`'s worktree must be per-LANE, not per-commit (finding 5 above). Two lanes proving at one HEAD corrupt each other's run, and the failure looks like a crashed suite rather than a collision. |
+| P1.7 | `dev prove`'s worktree must be per-LANE, not per-commit (finding 5 above). **Not the same defect as P1.6**, which was prove's build TARGET and is done; this is prove's working DIRECTORY and is open. Two lanes proving at one HEAD corrupt each other's run, and the failure looks like a crashed suite rather than a collision. |
 
 **Enforcement that replaced a check.** P1.4 began as an acceptance check that `registry.db` is
 under `DODONA_HOME`. Proving it red required breaking `Paths.Registry` -- and the concierge suite
