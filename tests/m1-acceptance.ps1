@@ -127,6 +127,30 @@ try {
     $bypassed = if (Test-Path $bypass) { (Get-Content $bypass -Raw).Trim() } else { '' }
     Check 'gate_denies_outside_claim' ($deny -match '"permissionDecision":"deny"') `
         "hook=$hookCmd output=[$($deny.Trim())] bypass-log=[$bypassed]"
+    # ---- A FAIL-OPEN MUST LEAVE A TRACE, whatever caused it (operator decision 2026-08-19) ----
+    # The gate had four paths that allowed a write and said nothing: no ticket, unreadable stdin,
+    # unparseable stdin, and no file_path. Silence is the reason `gate_denies_outside_claim`
+    # could go red under load with an empty detail and three wrong diagnoses -- there was
+    # nothing written down to read. Every one of them now records what it saw.
+    #
+    # Driven with input the gate CANNOT interpret, which is the closest reproducible stand-in for
+    # whatever happens under heavy load, and the case that used to vanish completely.
+    $bypassLog = Join-Path $wt1 '.dodona-bypass.log'
+    Remove-Item $bypassLog -ErrorAction SilentlyContinue
+    $garbage = 'this is not json at all'
+    $g = ($garbage | & cmd /c $hookCmd 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
+    $gFlat = ($g -replace '\s+', ' ')
+    # Whitespace collapsed before matching: captured native stderr is WRAPPED to the console
+    # width, so a phrase can be split mid-sentence (CLAUDE.md 0.2).
+    Check 'unparseable_input_is_allowed_but_recorded' ($gFlat -match 'gate fail-open' -and $gFlat -match 'unparseable') $gFlat
+    Check 'the_fail_open_says_how_much_it_got' ($gFlat -match '\d+ bytes') $gFlat
+    $logged = if (Test-Path $bypassLog) { (Get-Content $bypassLog -Raw) } else { '' }
+    Check 'the_fail_open_reaches_the_backstops_log' (($logged -replace '\s+', ' ') -match 'fail-open.*unparseable') "log=[$logged]"
+    # ...and it still ALLOWED the write, because layer 1 failing closed would strand a lane that
+    # has no way to ask a human for permission (CLAUDE.md 7). The backstop is layer 2.
+    Check 'a_fail_open_does_not_block_the_write' ($gFlat -notmatch 'permissionDecision') $gFlat
+    Remove-Item $bypassLog -ErrorAction SilentlyContinue
+
     # A fail-open is not by itself a gate failure -- layer 2, the merge-time diff backstop,
     # exists for it. But it must never be SILENT, because then the only evidence is a file
     # nobody reads (CLAUDE.md §3: a silent degrade is a bug).

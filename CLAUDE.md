@@ -101,6 +101,8 @@ nothing while looking installed).
 - **`-shl` on `[byte]` stays a byte** and overflows to 0 — cast `[int]` first.
 - **Commit messages** with quotes/dashes: `git commit -F <file>`, never inline `-m`.
 - **`.Count` on a one-element pipeline** is `$null` — wrap in `@(...)`.
+- **`$pid` is a read-only automatic variable** — `foreach ($pid in ...)` throws
+  `VariableNotWritable` and the loop body never runs. Name it `$procId`.
 - **`ConvertFrom-Json` emits a JSON ARRAY as ONE pipeline item**, so `... | ConvertFrom-Json
   | Where-Object {...}` filters the array object, not its elements — and `$_.name -eq 'x'`
   on an array returns the matching *elements*, which is truthy, so **every row passes**.
@@ -228,23 +230,52 @@ Three changes did it, and all three are in `tools/dev.ps1` and `tests/_workspace
   thing that un-sticks it, per §0.1's standing directive — a condition-wait with no deadline
   would be that directive violated in a new costume, so timing out is a normal return that
   prints one line and lets the following check fail on its own terms.
-- **Suites run five at a time**, each in its own process with its own `DODONA_HOME`. Not all
-  twelve: measured, that made ui-use *slower* (42.5 s alone → 70 s) and intermittently red,
-  because the contention is windows and process starts, not CPU. `DODONA_TEST_CONCURRENCY`
-  overrides; `dev suites --sequential` is the debugging escape hatch.
+- **Suites run THREE at a time**, each in its own process with its own `DODONA_HOME`. Not all
+  twelve, and not five: at both of those `ui-use` went intermittently red — 61 s green, then
+  149 s and 119 s red on a quiet machine — and its failures cascade, so two missed interactions
+  become six red checks. Three is green and repeatable (93.1 s and 93.3 s, all twelve, twice).
+  The contention is windows and process starts, not CPU (22 cores, never bound), and the root
+  cause is NOT established: ruled out by measurement are the leaked shims, the other window
+  suites, and m4's build — it needs the full rolling wave to reproduce. `ui-use` being a
+  70-second monolith is the real problem; splitting it is unfinished business.
+  `DODONA_TEST_CONCURRENCY` overrides; `dev suites --sequential` is the debugging escape hatch.
 - **`dev test unit`** runs the pure logic — the claim algebra, the policy table, repo
   resolution, path canonicalization, the two routing decisions made in code — with no daemon,
   no store and no window. 54 checks in about a second. That is the "one or two seconds" the
   operator asked for; it does not and cannot replace an acceptance suite.
 
-So the doctrine stands, with better numbers behind it:
+### RUN THE SUITES YOUR CHANGE TOUCHES. THE FULL SET IS FOR MERGING.
 
-- **While iterating**: `dev test unit` for anything that is a function (~1 s), then the single
-  suite your change touches (7–45 s). Anything that must start a daemon has a ~7 second floor,
-  and that is the honest target.
-- **Before committing**: `dev gate`, once. About 70 s of suites plus ~15 s of its own two
-  concurrent builds.
+**This is the default, not an optimisation.** `dev test <suite> [<suite>...]` takes any
+combination and runs them concurrently, and `dev test unit` is a second. Reaching for
+`dev suites` or `dev gate` on every edit is how verification became something to skip, and 80
+seconds spent twenty times is worse than 80 seconds spent once at the end.
+
+| what you changed | run |
+|---|---|
+| anything that is a pure function (claims, policy, repo resolution, paths, routing verdicts) | `dev test unit` — ~1 s, no daemon |
+| daemon lifetime, reconnect, drain | `dev test m0` |
+| claims, the gate, the merge token | `dev test m1` |
+| routing, presence, the backstop | `dev test m2` |
+| the UI as a view over the store | `dev test m3` |
+| publish, hot swap, provenance | `dev test m4 publish` |
+| workspaces, members, repo exclusivity | `dev test workspace` |
+| anything a person clicks or types | `dev test ui-use` |
+| compression | `dev test compression` |
+| the dispatcher brain, the routing ladder | `dev test brain` |
+| the concierge, the fence | `dev test concierge` |
+| `tools/dev.ps1` itself | `dev gate m0` — the gate's machinery over one suite, ~20 s |
+
+- **While iterating**: `dev test unit` for anything that is a function (~1 s), then the one or
+  two suites your change actually touches. Anything that must start a daemon has a ~7 second
+  floor, and that is the honest target.
+- **Before you MERGE to main**: `dev gate`, once — all twelve plus the seven assertions, about
+  80 s of suites and ~15 s of its own two builds. This is the only moment the full set is
+  required, and skipping it is how a stale test survives for months (two did).
 - **Three consecutive failed verification attempts**: stop and report. Do not grind.
+- **If a suite you did not touch goes red, suspect the machine before the code.** `dev gate`
+  prints the leaked-process count first for exactly this reason: with strays alive a full run
+  went from 87 s to 300 s and reddened thirteen checks in suites nobody had edited.
 
 **A suite that does not print `<N> checks, <M> failed` is now a FAILURE, not a shrug.** This
 is not bookkeeping. `m0` had never printed a tally in its life, so `dev.ps1` could not detect
@@ -543,6 +574,37 @@ undone, and correcting it is exactly what is impossible. Only `LANE: text` and u
 generics ("stop", "no", "try again") are decided in code and stay instant. On double uncertainty
 the sentence is HELD and you are asked — nothing is delivered. Without a warm brain, behaviour
 is unchanged (focused lane), which is why the suites are unaffected.
+
+## 3.2 `dodona status` is not a read-only command — it SUMMONS a daemon
+
+**Do not use `status` to check whether anything is running.** Start-on-demand means any client
+command summons the workspace daemon if it is not up (§2), and a summoned daemon runs its
+warm-up: it creates the router, the brain and the compressor pool, and **each of those is a
+real `claude -p --model haiku` process**. So a "quick health check" against the operator's live
+workspace starts five model-backed agents on a machine they believed was idle.
+
+That happened on 2026-08-19, to a session that had just finished writing the tooling to stop
+exactly this class of thing. The operator had nothing running; the agent ran `status` twice
+while verifying a publish, and left behind one daemon and five haiku lanes. Two hours later it
+diagnosed its own five leaked shims as "machine contention" and moved a suite out of the
+parallel wave on that evidence — a wrong conclusion drawn from self-inflicted noise.
+
+**Quota was not burned, and the reason is worth knowing**: `inputs=0 results=0` on every lane.
+Existing costs nothing; only a TURN costs quota (LANE-LIFECYCLE §2). It was recoverable. It was
+still a machine the operator did not ask for.
+
+What to use instead, none of which starts anything:
+
+```powershell
+dodona where [--json]        # ids, paths, pipe names, and whether a daemon is LIVE
+dodona version [--json]      # what a binary is, including its commit
+dodona ps                    # what is actually running, machine-wide
+```
+
+And when you must run a real command against a live workspace — `publish` in particular, which
+§2 requires — say so in your report, because it is an action on the operator's machine and not
+a measurement of it. Anything you only want to *observe* belongs in an isolated
+`$env:DODONA_HOME` (§5), the same rule the suites already follow.
 
 ## 4. Never kill processes by name
 

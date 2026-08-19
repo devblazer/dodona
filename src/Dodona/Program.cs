@@ -646,22 +646,86 @@ int Version()
 /// write is allowed and the reason is appended to the bypass log. The merge-time diff backstop
 /// catches what slips through, and a broken gate must never brick a lane.
 /// </summary>
+/// <summary>
+/// Record that the gate ALLOWED a write without having actually checked it, and hand back 0.
+///
+/// EVERY fail-open goes through here, which is the whole point (P4 follow-up, operator's
+/// decision 2026-08-19). The gate used to have FOUR silent `return 0`s -- no ticket, unreadable
+/// stdin, unparseable stdin, no file_path -- and one logged path. A silent allow is
+/// indistinguishable from an allow the claim algebra actually approved, and that is not a
+/// theoretical complaint: `m1 gate_denies_outside_claim` went red under load with EMPTY output
+/// and an EMPTY bypass log, and three separate hypotheses about the cause were all wrong
+/// because there was nothing recorded to read. Whatever happens, something is written down now.
+///
+/// STILL FAIL-OPEN, deliberately, and that is the operator's call rather than an oversight.
+/// Failing closed would block every write in every ticket lane whenever the daemon is briefly
+/// unreachable, and a lane has no channel to ask a human for permission (CLAUDE.md section 7) --
+/// it would strand mid-task. Layer 2, the merge-time diff backstop, is what refuses anything
+/// that slipped through, and it reads the very log this writes.
+///
+/// TWO DESTINATIONS, because each covers the other's blind spot:
+///   * the bypass log in the worktree -- durable, and where the merge backstop already looks;
+///   * stderr -- always available even when --worktree was not passed, and it is what makes the
+///     event visible to a test and to anyone reading a lane's output. Claude Code takes the
+///     hook's DECISION from stdout, so stderr cannot change the verdict.
+/// </summary>
+int GateAllowedUnchecked(string why, long ticket, string? path)
+{
+    var line = $"{DateTime.Now:o} gate fail-open: {why}" +
+               (ticket > 0 ? $" [ticket {ticket}]" : "") +
+               (string.IsNullOrEmpty(path) ? "" : $" path={path}");
+    try { Console.Error.WriteLine("dodona gate: " + line); } catch { }
+    try
+    {
+        var wt = One("worktree");
+        if (wt is { Length: > 0 } && Directory.Exists(wt))
+            File.AppendAllText(Path.Combine(wt, ".dodona-bypass.log"), line + Environment.NewLine);
+    }
+    catch { /* a log we cannot write must still not block the write */ }
+    return 0;
+}
+
 int GateHook()
 {
-    if (!long.TryParse(One("ticket"), out var ticket)) return 0;      // no ticket: not our business
+    // No ticket means no gate was ever deployed for this lane, so there is nothing to check and
+    // nothing to report -- a plain `lane-start` runs ungated by design (CLAUDE.md section 7).
+    // This is the one allow that is genuinely not a bypass.
+    var ticketArg = One("ticket");
+    if (string.IsNullOrEmpty(ticketArg)) return 0;
+    if (!long.TryParse(ticketArg, out var ticket))
+        return GateAllowedUnchecked($"--ticket '{ticketArg}' is not a number (gate misconfigured)", 0, null);
 
     string input;
-    try { input = Console.In.ReadToEnd(); } catch { return 0; }
+    try { input = Console.In.ReadToEnd(); }
+    catch (Exception ex) { return GateAllowedUnchecked($"stdin unreadable: {ex.GetType().Name}", ticket, null); }
 
+    // The tool name is only for the diagnostic, so it is read defensively and never gates.
+    string tool = "";
     string? path = null;
     try
     {
         using var doc = JsonDocument.Parse(input);
+        if (doc.RootElement.TryGetProperty("tool_name", out var tn)) tool = tn.GetString() ?? "";
         if (doc.RootElement.TryGetProperty("tool_input", out var ti) &&
             ti.TryGetProperty("file_path", out var fp)) path = fp.GetString();
     }
-    catch { return 0; }                                              // unparseable input: fail open
-    if (string.IsNullOrEmpty(path)) return 0;                        // not a file write
+    catch (Exception ex)
+    {
+        // The measured mystery lands here or in the branch below: under a heavy parallel run the
+        // hook produced no verdict and left no trace, and empty-or-truncated stdin is the only
+        // remaining explanation (the daemon path logs, and PowerShell was proved to deliver
+        // stdin 60/60 under load). The BYTE COUNT and a prefix are recorded so the next
+        // occurrence answers the question instead of raising it again.
+        var head = input.Length > 120 ? input.Substring(0, 120) + "..." : input;
+        return GateAllowedUnchecked(
+            $"stdin unparseable as JSON ({input.Length} bytes, {ex.GetType().Name}): {head.Replace("\n", " ").Replace("\r", "")}",
+            ticket, null);
+    }
+
+    // NotebookEdit carries `notebook_path`, not `file_path`, so it lands here and is allowed --
+    // a real hole in layer 1, and now a visible one rather than a silent one.
+    if (string.IsNullOrEmpty(path))
+        return GateAllowedUnchecked($"no file_path in tool_input (tool='{tool}', {input.Length} bytes)", ticket, null);
 
     // Client() prints the daemon's reply to stdout, and stdout here IS the hook's verdict --
     // Claude Code parses it as JSON. So it is silenced for the duration, which is exactly what
@@ -673,7 +737,7 @@ int GateHook()
         Console.SetOut(TextWriter.Null);
         code = Client(new { cmd = "claim-check", ticket, path });
     }
-    catch { code = 2; }
+    catch (Exception ex) { code = 2; try { Console.Error.WriteLine($"dodona gate: claim-check threw {ex.GetType().Name}"); } catch { } }
     finally { Console.SetOut(saved); }
 
     if (code == 0) return 0;                                         // covered by the claim
@@ -695,17 +759,8 @@ int GateHook()
         return 0;                                                    // the DECISION is the output, not the exit code
     }
 
-    // Anything else (no daemon, a pipe error) is a fail-open, logged where the merge backstop's
-    // reader will look for it.
-    try
-    {
-        var wt = One("worktree");
-        if (wt is { Length: > 0 })
-            File.AppendAllText(Path.Combine(wt, ".dodona-bypass.log"),
-                $"{DateTime.Now:o} gate fail-open (claim-check exit {code}): {path}{Environment.NewLine}");
-    }
-    catch { /* a log we cannot write must still not block the write */ }
-    return 0;
+    // Anything else: no daemon, a pipe error, a reply we do not understand.
+    return GateAllowedUnchecked($"claim-check could not answer (exit {code})", ticket, path);
 }
 
 /// <summary>

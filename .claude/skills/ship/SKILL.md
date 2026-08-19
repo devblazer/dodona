@@ -37,8 +37,14 @@ own `finally` and reporting nothing, and nobody saw it, because the tally was ne
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit        # ~1 s, while you edit
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test m3 brain    # the ones you touched
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 gate             # before committing: all 12 + the assertions
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 gate             # ONCE, before you merge
 ```
+
+**Run the suites your change touches — the full set belongs at the merge, not at every edit.**
+`dev test` takes any combination and runs them concurrently; CLAUDE.md §1 has the
+change-to-suite table. `dev gate` is ~95 s all in, which is cheap once and expensive twenty
+times, and treating it as the only way to check is how verification turned back into a thing to
+skip.
 
 `dev gate` is the real step here — it runs every suite AND asserts the seven invariants
 (nothing left in the build output, the run dirtied nothing, two concurrent worktree builds,

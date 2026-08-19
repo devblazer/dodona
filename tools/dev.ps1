@@ -541,24 +541,50 @@ function SuiteOrderHint {
     , @('ui-use', 'publish', 'm4', 'brain', 'm3', 'workspace', 'compression', 'concierge', 'm1', 'm2', 'm0')
 }
 
-# HOW MANY AT ONCE, and the number is measured rather than "all of them".
+# HOW MANY AT ONCE. THREE. The number is measured, and it was 5 until 5 was shown to be wrong.
 #
-# All eleven at once was tried first and it is worse in both directions: on a 22-core machine
-# that never came close to CPU-bound, ui-use went from 42.5s alone to 70.6s, and it went RED --
-# `second_sentence_reuses_the_lane` saw two lanes where there must be one. That is not a slow
-# test, it is a test whose timing assumptions stopped holding, and a gate that is occasionally
-# red for reasons unrelated to the change is a gate people learn to re-run instead of read.
+# The contention is not CPU -- this is a 22-core machine that never came close to bound. Each
+# suite starts a daemon, one to four shims, a WPF window and a python process per store query,
+# and the WPF/UIA side serializes on the desktop.
 #
-# The contention is not CPU. Each suite starts a daemon, one to four shims, a WPF window and a
-# python process per store query, and the WPF/UIA side in particular serializes on the desktop.
-# Five is where the wall clock stopped improving here.
+# ALL ELEVEN AT ONCE was tried first and is worse in both directions: ui-use went from 42.5s
+# alone to 70.6s and went RED (`second_sentence_reuses_the_lane` saw two lanes where there must
+# be one).
+#
+# FIVE looked right for several runs and then was not. ui-use in a five-wide wave measured
+# 61.4s GREEN, then 149.1s and 118.6s RED, on a quiet machine with no strays and nothing of the
+# operator's running. Its failures cascade, which is what makes it expensive: the input box does
+# not grow, or the close button does not stop a lane, and then every tile count after that is
+# off by one and three collapse checks time out. Six red checks from two missed interactions.
+#
+# WHAT IT IS NOT, each ruled out by measurement rather than argument:
+#   * not publish-acceptance's leaked shims -- `ui-use publish` together: green, 62.5s
+#   * not contention with the other window/UIA suites -- `ui-use m3 brain compression`: green,
+#     64.4s
+#   * not m4's real three-project build -- `ui-use m4`: green, 67.6s
+#   * not the machine being dirty -- the red runs had 0 strays and 0 live app processes
+# Pairwise it never reproduces. It needs the full rolling wave, where ui-use spends its whole
+# 60-70s life beside a CHANGING set of four companions, about nine suites over its lifetime.
+#
+# THREE is green and repeatable: two consecutive full runs at 93.1s and 93.3s, all twelve
+# suites, 0 failed. It costs ~13s against a five-wide run that WORKS, and buys back the runs
+# that do not. A gate that is red one time in three for reasons unrelated to the change is one
+# people learn to re-run instead of read, which is the same disease as a gate that is always
+# green -- so the slower honest number wins.
+#
+# THE ROOT CAUSE IS NOT ESTABLISHED, and this comment says so rather than implying otherwise.
+# What is known: ui-use is reliable with two companions and unreliable with four, and it is the
+# only suite in the set that drives a real window through UI Automation for over a minute. The
+# durable fix is to stop it being a 70-second monolith -- it is four suites wearing one name
+# (typing/lanes, the input box, the self-dividing grid, the multi-workspace shell). Splitting it
+# is how this stops being a scheduling parameter, and that is Phase 4's unfinished business.
 #
 # DODONA_TEST_CONCURRENCY overrides it, for a machine unlike this one -- and 1 is the same
 # thing as `dev suites --sequential`.
 function SuiteConcurrency {
     $v = $env:DODONA_TEST_CONCURRENCY
     if ($v -and [int]::TryParse($v, [ref]$null) -and [int]$v -ge 1) { return [int]$v }
-    5
+    3
 }
 
 # Run a set of suites: the solo ones alone and first, the rest up to SuiteConcurrency at once.
