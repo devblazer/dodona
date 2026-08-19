@@ -12,6 +12,35 @@ sealed class WorkspaceUnavailable : Exception
 }
 
 /// <summary>
+/// WHERE A PATH CAME FROM — and creating a workspace depends on it (plan decision D-L9,
+/// operator 2026-08-19: *creating a workspace is a user action; Dodona must never do it on
+/// its own*).
+///
+/// Before this existed, <c>Program</c> handed <see cref="WorkspaceResolve.ForPath"/> a single
+/// string that was EITHER a typed <c>--root</c> OR <c>Environment.CurrentDirectory</c>, and
+/// nothing downstream could tell which. So an agent inside a lane running any `dodona`
+/// command got a workspace invented for whatever folder its process happened to be started
+/// in — named after that folder, and, if that folder held a `.dodona\store.db`, with a store
+/// MOVED into workspace territory as a side effect of running `dodona tickets`.
+///
+/// The distinction is a parameter rather than something the resolver infers, because there is
+/// nothing in a path that says whether a person typed it. Every call site has to answer.
+/// </summary>
+enum PathSource
+{
+    /// <summary>Somebody said this path out loud: a typed <c>--root</c>, a path the operator
+    /// wrote in a sentence (concierge rung 0), a folder chosen inside the discovery fence.
+    /// Creating is CORRECT here, and is the whole legacy-store migration mechanism
+    /// (<c>tests/workspace-acceptance.ps1</c>'s migration set, which passes <c>--root</c>).</summary>
+    Explicit,
+
+    /// <summary>Nobody said it. It is the process's inherited working directory, which for an
+    /// agent in a lane is a folder chosen by the daemon and for a shell is wherever the
+    /// operator happened to be standing. An unowned one is a REFUSAL, never a creation.</summary>
+    Inherited,
+}
+
+/// <summary>
 /// Turning what the operator said into a workspace (docs/WORKSPACES-CONCIERGE.md §1/§4).
 /// Two entry points, and the difference between them matters:
 ///
@@ -21,7 +50,8 @@ sealed class WorkspaceUnavailable : Exception
 ///
 ///   <see cref="ForPath"/> — "--root C:\repos\thing", which is every command the CLI has
 ///     today and every acceptance suite. Ask the registry who owns the path; if nobody
-///     does, MIGRATE or CREATE a workspace for it on the spot.
+///     does, MIGRATE or CREATE a workspace for it on the spot — but only when the path was
+///     <see cref="PathSource.Explicit"/>.
 ///
 /// The auto-create is deliberate and is what keeps the whole migration invisible: every
 /// existing instance becomes "a workspace named after its root, with that root as sole
@@ -32,6 +62,9 @@ sealed class WorkspaceUnavailable : Exception
 /// It is also §11 applied (act, announce, allow undo): a workspace is a registry row and a
 /// directory, the note says which one happened, and `dodona workspace-forget` reverses it
 /// without touching a single transcript.
+///
+/// What it is NOT allowed to do, since 2026-08-19: create for a path nobody named. See
+/// <see cref="PathSource"/> for the incident.
 /// </summary>
 static class WorkspaceResolve
 {
@@ -39,12 +72,35 @@ static class WorkspaceResolve
 
     public static Workspace? ByNameOrId(Registry reg, string nameOrId) => reg.ByNameOrId(nameOrId);
 
-    public static Resolved ForPath(Registry reg, string path)
+    public static Resolved ForPath(Registry reg, string path, PathSource source)
     {
         var owner = reg.Owner(path);
         if (owner is not null) return new Resolved(owner.Value.Ws, null);
 
         var canonical = Instance.Canonical(path);
+
+        // AN INHERITED CWD THAT NOBODY OWNS IS A REFUSAL (D-L9). It is checked before the
+        // legacy-store probe on purpose: a folder with a `.dodona\store.db` in it is exactly
+        // the case where creating would also MOVE that store, and a store must never relocate
+        // because an agent ran `dodona tickets` from a folder it did not choose.
+        //
+        // It refuses rather than parking behind a question (CLAUDE.md §0.1: never hung,
+        // halted, stuck): both un-sticking commands are in the message, and running either
+        // one makes the very next invocation succeed.
+        if (source == PathSource.Inherited)
+        {
+            var have = reg.All();
+            throw new WorkspaceUnavailable(
+                $"no workspace owns {canonical}, and that path was not asked for — it is just" +
+                " the folder this process happens to be running in.\n" +
+                "       Creating a workspace is a user action, so Dodona will not invent one here.\n" +
+                (have.Count > 0
+                    ? $"       address one:  dodona <command> --workspace <{string.Join("|", have.Take(6).Select(x => x.Name))}>\n"
+                    : "       (no workspaces exist yet)\n") +
+                $"       make one:     dodona workspace-create --name <NAME> --member \"{canonical}\"\n" +
+                $"       or say where: dodona <command> --root \"{canonical}\"   (an explicit path DOES create)");
+        }
+
         var legacyStore = Path.Combine(canonical, ".dodona", "store.db");
         var migrating = File.Exists(legacyStore);
 

@@ -1799,6 +1799,15 @@ sealed class Daemon
         // says the same thing to a child that has no system prompt to read (§17's fake
         // agent), and is worth having in the environment of any child when debugging.
         psi.Environment["DODONA_LANE_ROLE"] = role;
+        // WHICH WORKSPACE THIS AGENT BELONGS TO (Phase 0c, P0c.1). Without it a `dodona`
+        // command run by the agent inside this lane had nothing to resolve by except
+        // Environment.CurrentDirectory — and that fallback CREATED a workspace named after
+        // whatever folder the process happened to be in, moving a legacy store into workspace
+        // territory as a side effect of `dodona tickets`. Creating a workspace is a user
+        // action (operator, 2026-08-19; docs/LOCATIONS-PLAN.md D-L9), so the agent is told
+        // where it is instead of being left to guess. Inherited by the agent through the shim,
+        // which does not touch its child's environment.
+        psi.Environment["DODONA_WORKSPACE"] = _instanceId;
 
         // A SPAWN THAT NEVER HAPPENED MUST NOT LEAVE THE ROW SAYING `alive`.
         //

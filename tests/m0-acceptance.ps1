@@ -116,6 +116,30 @@ try {
     $tail2 = Dodona @("tail", "$lane", "10")
     $results['same_agent_answers_daemon2'] = if ($tail2 -match [regex]::Escape($roundtrip)) { 'PASS' } else { 'FAIL' }
 
+    # ---- an agent is TOLD which workspace it is in (Phase 0c, P0c.1) --------------------
+    # The spawn site stamps DODONA_WORKSPACE beside DODONA_SHIM_INFO and DODONA_LANE_ROLE
+    # (Daemon.AttachShimAsync). Before it did, an agent's own `dodona` command had nothing to
+    # resolve a workspace by except Environment.CurrentDirectory -- and that fallback CREATED
+    # one, named after whatever folder the daemon happened to spawn it in, moving a legacy
+    # store into workspace territory as a side effect of `dodona tickets` (D-L9).
+    #
+    # Asked of the AGENT rather than read out of the daemon's source, because a spawn-site
+    # environment is otherwise invisible to a check: `env:NAME` in DodonaFakeAgent answers with
+    # the value it actually inherited, or `(unset)`. It travels daemon -> shim -> agent, and
+    # the shim does not touch its child's environment, so this asserts the whole chain.
+    Dodona @("say", "$lane", "say env:DODONA_WORKSPACE") | Out-Null
+    Wait-Until { (Dodona @("tail", "$lane", "10")) -match [regex]::Escape($ws.Id) } 20000 'the agent reports its workspace id' | Out-Null
+    $envTail = Dodona @("tail", "$lane", "10")
+    Set-Content "$out\env-tail.txt" $envTail
+    # The value the agent REPORTED goes in the failure detail, not just the one wanted: `(unset)`
+    # says the spawn site did not stamp it, while a different id would say it stamped the wrong
+    # one, and those are different bugs.
+    $envSaw = @($envTail -split "`r?`n" | Where-Object { $_ -match '\bresult\b' } | Select-Object -Last 1)
+    $results['a_lane_agent_is_told_its_workspace'] =
+        # @(...) around the pipeline: `.Count` on a ONE-element pipeline is $null (CLAUDE.md §0.2).
+        if (@($envTail -split "`r?`n" | Where-Object { $_ -match 'result' -and $_ -match [regex]::Escape($ws.Id) }).Count -ge 1) { 'PASS' }
+        else { "FAIL (want $($ws.Id); agent reported: $($envSaw -join ' '))" }
+
     # =====================================================================================
     # PHASE 3 -- nothing Dodona starts is allowed to outlive its reason (I3, I4, I6).
     #

@@ -291,9 +291,13 @@ sealed class Concierge
             // Not owned → attach it outright, as its own workspace. Reversible (§11), and
             // announced, because a workspace appearing is exactly the kind of thing the
             // operator must be able to see afterwards.
+            //
+            // EXPLICIT, and this is the sharp end of D-L9: the operator wrote the path in the
+            // sentence, so this creation is a user action in the fullest sense. It is the one
+            // creating route that has nothing to do with `--root`.
             try
             {
-                var made = WorkspaceResolve.ForPath(reg, path);
+                var made = WorkspaceResolve.ForPath(reg, path, PathSource.Explicit);
                 Announce($"[dodona] new workspace “{made.Ws.Name}” for {path} — undo: dodona workspace-forget --workspace {made.Ws.Id}");
                 return Done(new Verdict("path", made.Ws.Id, made.Ws.Name, "explicit", Created: true, Note: made.Note));
             }
@@ -371,7 +375,10 @@ sealed class Concierge
                         return Done(new Verdict("discovery", already.Ws.Id, already.Ws.Name, hc));
                     try
                     {
-                        var made = WorkspaceResolve.ForPath(reg, pick.Path);
+                        // EXPLICIT: this folder was chosen — by the hi tier, out of a bounded
+                        // fence, in answer to something the operator typed. It is not a cwd
+                        // anybody inherited, which is the only thing D-L9 forbids.
+                        var made = WorkspaceResolve.ForPath(reg, pick.Path, PathSource.Explicit);
                         Announce($"[dodona] found {pick.Path} inside the search fence — new workspace “{made.Ws.Name}”. " +
                                  $"undo: dodona workspace-forget --workspace {made.Ws.Id}");
                         return Done(new Verdict("discovery", made.Ws.Id, made.Ws.Name, hc, Created: true));
