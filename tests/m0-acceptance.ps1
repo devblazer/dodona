@@ -205,10 +205,32 @@ try {
     }
     $psWithRecord = PsLanes
     Remove-Item "$wsDir\shim-lane$nLane.json" -Force
+    # OPEN, AND DIAGNOSABLE NEXT TIME (2026-08-19). Measured, exactly: red in three
+    # consecutive FULL twelve-suite waves, then GREEN in the fourth, and green every other
+    # way -- alone 3/3, three-suite wave 1/1. So it IS intermittent, and only the full wave
+    # has ever provoked it. Two facts a future round should not have to re-derive: the
+    # numbers were identical in all three failures (16 lanes with the record, 15 without),
+    # and giving `ps` a second sample 250 ms later (LaneLiveness settleMs, what `stop-all`
+    # uses) did NOT change the result -- so the few-millisecond swap gap of section 0.2 is
+    # not sufficient on its own to explain it.
+    # The remaining hypothesis is the one only a full wave creates: `Instance.LiveLanes`
+    # enumerates the whole `\\.\pipe\` namespace, and a full wave fills that namespace with
+    # every other suite's daemons and shims. An enumeration that comes back incomplete under
+    # that crowd would make `ps` UNDER-count -- the dangerous direction, and the exact
+    # incident LaneLiveness exists for (four live agents invisible to `ps`, holding the
+    # compiler's output, blocking every build).
+    #
+    # So these three readings are taken around the second count instead of after it. A
+    # single reading AFTER the fact was what left the last three rounds guessing: it cannot
+    # distinguish "the pipe was gone while ps looked" from "ps looked and did not see it".
+    $pipeBefore = Test-DodonaPipe $nPipe
     $psWithout = PsLanes
+    $pipeAfter = Test-DodonaPipe $nPipe
+    $shimAlive = $null -ne (Get-Process -Id $nInfo.shimPid -ErrorAction SilentlyContinue)
     $results['ps_counts_a_lane_whose_record_is_gone'] =
         if ($psWithout -eq $psWithRecord -and $psWithRecord -ge 1) { 'PASS' }
-        else { "FAIL (ps said $psWithRecord lanes with the record, $psWithout without it; pipe live=$(Test-DodonaPipe $nPipe))" }
+        else { "FAIL (ps said $psWithRecord lanes with the record, $psWithout without it; " +
+               "pipe before=$pipeBefore after=$pipeAfter, shim pid $($nInfo.shimPid) alive=$shimAlive)" }
     # ...and it can still be STOPPED, which is the half that mattered on the day: the shim's
     # own pipe is a door that needs no bookkeeping, and `##shutdown` takes the child tree too.
     Dodona @('stop-all', '--lanes') | Out-Null

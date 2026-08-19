@@ -248,9 +248,36 @@ A pane shows the **short readable** form of what happened; the store keeps every
 
 - **Mid-turn `agent_line` narration never reaches the grid.** Not filtered by a model —
   by construction: an agent ends its turn when it needs you, so anything that needs you
-  IS a `result`, and what it is doing meanwhile is already the presence line, derived in
-  code from `tool_use` events. That is the 5–10× volume cut §2.2 asks for, bought with
-  zero model calls.
+  IS a `result`. That half stands.
+- **The other half of that argument was wrong, and cost the operator four minutes of
+  blank screen (2026-08-19).** It used to end "and what it is doing meanwhile is already
+  the presence line". Presence is ONE COLUMN that every event overwrites, so it holds
+  the newest tool and nothing else: a real turn ran 111 wire lines and 18 tool calls
+  with two sentences on screen, 93 of those lines being `thinking_tokens`, and a
+  tool-only assistant event wrote no row at all — so sixteen of the eighteen steps left
+  no trace anywhere. The operator's words were "staring at a blank screen hoping
+  something's happening".
+- **So there is a third kind now: `progress`, decided in code, three tiers**
+  (`src/Dodona/PaneProgress.cs`, which carries the measurement):
+  - **noise → no row.** `BashOutput`/`KillShell` polling its own shell;
+    `thinking_tokens`, which moves presence to `thinking…` and writes nothing.
+  - **step → one line, FOLDED at render.** Reads, greps, globs, ls, web fetches, todo
+    updates. A run of the same verb becomes `read 6 files: a.cs, b.cs, c.cs +3`, with
+    identical subjects collapsing, so re-reading one file cannot inflate a count.
+  - **act → its own line, always.** An edit, a write, a command (`$ dotnet build …` —
+    the command, not the agent's description of it), a subagent, and **a failed
+    `tool_result`** (`! bash failed: Exit code 2 …`), which is new territory: a
+    tool_result arrives as a `user` event and used to land in an unread raw row, so a
+    build that would not compile was invisible until the turn ended.
+  - **an UNKNOWN tool is an `act`**, deliberately. Claude Code ships new tools, and a
+    classifier defaulting to silence would restore this exact blind spot with no error
+    anywhere — the dead-routing-ladder failure (CLAUDE.md §3) in one file's clothing.
+  Folding happens at READ, never at write: the store keeps one row per tool call, so
+  `UNIQUE(lane_id, seq)` still makes shim redelivery exactly-once, the overlay still
+  shows every step, and the fold stays a pure function with no migration behind it.
+  It costs **zero model calls** — `compression` asserts that no `progress` row ever
+  acquires a `compressed` value, because that is the whole argument for showing them.
+  Between them these still buy the 5–10× volume cut §2.2 asks for.
 - **Turn-finals are always kept and always shortened.** `result` rows go to a warm
   compressor, which must answer in a fixed schema — `{headline ≤90 chars, needs_you,
   options[]}` — so it cannot ramble. `needs_you` renders `BLOCKED — <headline>` with an
@@ -326,8 +353,9 @@ are the authority and they must agree.)*
 - **`pane_events`** — everything a pane would show, in order: `lane_id, ts, kind, body,
   seq, raw, acked, compressed`. `compressed` is the short readable rendering (§5), NULL
   when the row was not eligible or the compressor never answered; `body` is never
-  rewritten. `kind ∈ user_input | agent_line | result | system | wire |
-  announcement`. `seq` is the shim's delivery sequence (NULL for locally-generated
+  rewritten. `kind ∈ user_input | agent_line | progress | result | system | wire |
+  announcement | error`. `progress` is one mid-turn step, code-derived (§5); it is the
+  one kind the pane FOLDS rather than renders row-for-row. `seq` is the shim's delivery sequence (NULL for locally-generated
   rows); `UNIQUE(lane_id, seq)` is what makes shim redelivery exactly-once. `raw` is the
   untouched wire line — the raw truth when `body`'s extraction looks wrong. `acked`
   applies to announcements only (the decision feed persists until acked — acked rows
@@ -649,12 +677,18 @@ when judging legibility: it is the only fixture with more transcript than a pane
 pixels, and lines longer than a pane is wide.
 
 A pane row's `kind` is rendered as colour — `you>` blue, `agent>` violet, `✓` green, `·`
-amber, `wire`/`system` dim mono. In the decision feed every row is an announcement, so
+amber, `wire`/`system` dim mono. A `progress` step has no speaker prefix at all: two
+spaces, dim, mono, subordinate to the turn it sits under — a step is not a voice. In the decision feed every row is an announcement, so
 colour there means **lane**: the title is tinted with the lane's slot colour (same one as
 its pane chip). Rows from the **dispatcher lane are the system's own voice** and get the
 oak's trunk colour with a *round* chip — Dodona is not a seventh lane, and shape says so
 where a hue could be mistaken for one. A grey square chip means a work lane with no grid
 slot (it is in the tray).
+
+`overlayLines` is the maximized pane's own transcript — unfolded, unfiltered,
+uncompressed. The overlay has promised "raw, one keystroke away" (§12) since M3 while
+dumping only its TITLE, so nothing could check the promise; a claim no verb can reach is
+where the next defect lives (CLAUDE.md §3.1). `null` when nothing is maximized.
 
 `ui dump` is unaffected by any of this: `lines` stays an array of `prefix + body` strings,
 because what the UI testifies to must not change shape because it got prettier.

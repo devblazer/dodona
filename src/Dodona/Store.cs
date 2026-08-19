@@ -873,13 +873,27 @@ sealed class Store : IDisposable, ILaneSink
         }
     }
 
-    public List<string> Tail(long laneId, int n)
+    /// <summary>The last n pane rows, formatted for a person: `dodona tail`, and the
+    /// dispatcher's fact sheet.
+    ///
+    /// <paramref name="readableOnly"/> drops the raw `wire` rows, and it exists because
+    /// the fact sheet was quietly feeding them to a model. `Tail(id, 1)` is how §4's
+    /// FactSheet says "last: …" about a lane, and the newest row of a thinking agent is a
+    /// `thinking_tokens` JSON blob — so the brain was being asked to judge a lane's subject
+    /// from 110 characters of `{"type":"system","subtype":"thinking_to`. Not a crash, not
+    /// visible anywhere, just a worse routing decision than the store could support.</summary>
+    public List<string> Tail(long laneId, int n, bool readableOnly = false)
     {
         lock (_lock)
         {
             var rows = new List<string>();
             using var c = _db.CreateCommand();
-            c.CommandText = """
+            c.CommandText = readableOnly ? """
+                SELECT ts, kind, body FROM (
+                    SELECT id, ts, kind, body FROM pane_events
+                    WHERE lane_id = $l AND kind NOT IN ('wire', 'system') ORDER BY id DESC LIMIT $n
+                ) ORDER BY id;
+                """ : """
                 SELECT ts, kind, body FROM (
                     SELECT id, ts, kind, body FROM pane_events WHERE lane_id = $l ORDER BY id DESC LIMIT $n
                 ) ORDER BY id;

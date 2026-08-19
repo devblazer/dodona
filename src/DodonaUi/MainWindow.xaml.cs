@@ -211,6 +211,14 @@ public partial class MainWindow : Window
             window = new { w = (int)Width, h = (int)Height, title = Title, active = IsActive, root = _root },
             pose = _vm.PoseName,
             overlay = _vm.OverlayPane?.Title,
+            // The overlay's LINES, not just its title. The overlay is the one component that
+            // promises "raw, one keystroke away" (§12) — unfiltered kinds, uncompressed
+            // bodies, and since 2026-08-19 the unfolded progress steps — and until this key
+            // existed no check could see any of it. A promise nothing can look at is where the
+            // next defect lives (§3.1, the second instance of that rule); the pane's own
+            // `lines` have been dumpable since M3 and this is the same testimony for the view
+            // beside it. Null when nothing is maximized, like `overlay` above.
+            overlayLines = _vm.OverlayPane?.Lines.Select(l => l.Text).ToList(),
             // THE ASK (LOCATIONS-PLAN P4.2). `ui dump` had NO field for a dialog, which is why
             // PickerWindow and StartLaneWindow are entirely untested — this key is what makes
             // asking checkable at all, and it is the headless half of the one component: the

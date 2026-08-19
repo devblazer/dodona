@@ -266,12 +266,14 @@ Three changes did it, and all three are in `tools/dev.ps1` and `tests/_workspace
   70-second monolith is the real problem; splitting it is unfinished business.
   `DODONA_TEST_CONCURRENCY` overrides; `dev suites --sequential` is the debugging escape hatch.
 - **`dev test unit`** runs the pure logic — the claim algebra, the policy table, repo
-  resolution, path canonicalization, the two routing decisions made in code — with no daemon,
-  no store and no window. **88 checks** (54 before the Locations wave) in **1.8–2.3 s warm**,
-  and ~4.9 s on the first run after a build — corrected 2026-08-19, because this row said
-  "54 checks in about a second" and a measured number stated as fact is exactly what §1 has a
-  whole section about. Still the "one or two seconds" the operator asked for; it does not and
-  cannot replace an acceptance suite.
+  resolution, path canonicalization, the two routing decisions made in code, the progress
+  tiers and their fold — with no daemon, no store and no window. **230 checks** in
+  **1.9–2.3 s warm**, and ~5.6 s on the first run after a build. Corrected twice now: this
+  row said "54 checks in about a second", then **88**, and the real number at
+  `d43dffb` was **189** — nobody had re-counted, which is the same failure §1 has a whole
+  section about, in the section about it. Do not hand-maintain this figure: the suite
+  prints it on every run. Still the "one or two seconds" the operator asked for; it does
+  not and cannot replace an acceptance suite.
 - **`dev test`, `dev suites` and `dev gate` REFUSE a stale build output** rather than testing the
   previous binary (P1.5). None of them ever compiled, and every suite copies its binaries out of
   `src\*\bin\Release`, so an edited-but-unbuilt tree was verified green — measured: a deleted
@@ -487,10 +489,26 @@ suite to what it covers, which is judgement no command can print.
 - **`m1`** is intermittent beside a parallel wave — measured, green 5/5 alone in 8–9 s, and
   `gate_denies_outside_claim` failed 3 of 4 times when it ran next to `m4`'s real build,
   because `dodona gate-hook` returned EMPTY for longer than the check's 20 s retry.
-  **The cause is not known.** It is not the daemon being slow (that path writes
+  **That cause is still not known.** It is not the daemon being slow (that path writes
   `.dodona-bypass.log`, and the log was empty), and it is not PowerShell failing to deliver
-  stdin to `cmd /c` (probed 60× under load, 60/60 delivered). What is left is one of
-  `GateHook`'s three *silent* `return 0` paths, i.e. the gate never reached the daemon.
+  stdin to `cmd /c` (probed 60× under load, 60/60 delivered).
+
+  **A DIFFERENT m1 failure was found and fixed on 2026-08-19, and it was not flaky at
+  all — the claim gate was failing OPEN on every run.** Both gate checks were red on
+  `main` at `d43dffb`, alone and in the wave, and `dev prove` confirmed it: stdin reached
+  `GateHook` with a **UTF-8 BOM** (`Ã¯Â»Â¿{"tool_input":…` in the bypass log),
+  `JsonDocument.Parse` refused it, and the fail-open branch allowed the write **without
+  ever asking the claim algebra**. `Console.In` hands a leading U+FEFF back as an ordinary
+  character, and PS 5.1 writes BOMs by default (§0.2), so this was reachable by any
+  producer piping a file in. `GateHook` strips it now. Two lessons worth more than the
+  fix: a **fail-open** path must be read as a red flag whenever a suite goes red near it,
+  because the failing check is the only thing standing between that and silence; and the
+  loud diagnostic added in P4 (byte count + prefix in the bypass log) is what turned a
+  third round of guessing into one look — a *silent* `return 0` would have hidden this
+  exactly as long as it hid the other one.
+
+  m1 stays SOLO: the deterministic bug is gone, the intermittent EMPTY-stdin one is not
+  explained, and it is still one of `GateHook`'s remaining fail-open paths.
 
 So: **do not "tidy up" `SoloSuites` because a suite looks fast enough to parallelise.** m1 alone
 costs 8 seconds. A gate that is red one run in four for a reason nobody has diagnosed costs far

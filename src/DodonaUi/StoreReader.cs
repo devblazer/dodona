@@ -1,4 +1,5 @@
 using System.IO;
+using Dodona;
 using Microsoft.Data.Sqlite;
 
 namespace DodonaUi;
@@ -180,12 +181,19 @@ sealed class StoreReader : IDisposable
     /// Last n pane lines. Two different questions, two different queries (§5, §12):
     ///
     /// The PANE answers "what has happened in this lane" — so it carries what was said to
-    /// the lane, what came back at the end of a turn, and what the system announced, each
-    /// in its shortest true form (`compressed` when the compressor got to it, the agent's
-    /// own words when it did not). Mid-turn `agent_line` narration is deliberately absent:
-    /// an agent ends its turn when it needs you, so anything that needs you IS a result,
-    /// and what it is doing meanwhile is already on the presence line — derived in code,
-    /// no model, no volume (§2.2). That is the 5–10× cut.
+    /// the lane, what came back at the end of a turn, what the system announced, and, since
+    /// 2026-08-19, what the agent has been DOING meanwhile: `progress` rows, folded (see
+    /// PaneProgress.cs, which carries the measurement and the operator's own words for what the
+    /// silent version felt like).
+    ///
+    /// Mid-turn `agent_line` narration is still absent, and that part of the argument
+    /// stands: an agent ends its turn when it needs you, so anything that needs you IS a
+    /// result. What did NOT stand was the other half — "what it is doing meanwhile is
+    /// already on the presence line". Presence is ONE COLUMN, overwritten by every event,
+    /// so it can only ever hold the newest tool; eighteen tool calls in one measured turn
+    /// left no trace of the first seventeen and the pane sat silent for minutes. A
+    /// `progress` row is that trace, decided in code, no model, one line per run of
+    /// same-verb steps — so the §2.2 volume cut is kept while the blind spot is not.
     ///
     /// The OVERLAY (all=true) answers "what actually came over the wire", so it filters
     /// nothing and compresses nothing — raw one keystroke away (§12).
@@ -206,7 +214,7 @@ sealed class StoreReader : IDisposable
             var shown = v7 ? "COALESCE(compressed, body)" : "body";
             // 'error' is a lane saying it is stuck (e.g. permission denied on its build
             // command) — the one mid-turn thing that must NOT wait for the turn to end.
-            var kinds = v7 ? "'user_input','result','announcement','error'"
+            var kinds = v7 ? $"'user_input','result','announcement','error','{PaneProgress.Kind}'"
                            : "'user_input','agent_line','result','announcement','error'";
             c.CommandText = all
                 ? "SELECT kind, body FROM (SELECT id, kind, body FROM pane_events WHERE lane_id = $l ORDER BY id DESC LIMIT $n) ORDER BY id;"
@@ -217,7 +225,12 @@ sealed class StoreReader : IDisposable
             while (r.Read()) list.Add(new LineSnap(r.GetString(0), r.GetString(1)));
         }
         catch { }
-        return list;
+        // The overlay folds nothing — it is the "what actually came over the wire" answer
+        // and folding it would be the same lie in a smaller font. The pane folds, because
+        // a run of six reads is one fact about the turn, not six.
+        if (all) return list;
+        return PaneProgress.Fold(list.Select(x => (x.Kind, x.Body)))
+                       .Select(x => new LineSnap(x.Kind, x.Body)).ToList();
     }
 
     public record FeedR(long Id, long LaneId, string Ts, string Body, bool Acked);

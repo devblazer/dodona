@@ -3852,7 +3852,7 @@ sealed class Daemon
         sb.Append("Lanes:\n");
         foreach (var l in work)
         {
-            var last = _store.Tail(l.Id, 1).FirstOrDefault() ?? "";
+            var last = _store.Tail(l.Id, 1, readableOnly: true).FirstOrDefault() ?? "";
             var busy = l.Presence.Length > 0 && l.Presence is not ("idle" or "landed" or "system");
             sb.Append($"- {l.Title}: {(busy ? "WORKING NOW" : "idle")}");
             if (l.Id == focusedRow.Id) sb.Append(" [FOCUSED — the operator is looking at this one]");

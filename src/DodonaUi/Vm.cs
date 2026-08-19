@@ -155,7 +155,9 @@ static class Ink
         "announcement" => NoteRow, "error" => BadRow, _ => DimRow,
     };
 
-    public static FontFamily Face(string kind) => kind is "wire" or "system" ? Mono : Prose;
+    // `progress` is machine text — file names, patterns, a command about to run — and mono
+    // is what makes a path legible and a command copyable by eye. Prose is for sentences.
+    public static FontFamily Face(string kind) => kind is "wire" or "system" or "progress" ? Mono : Prose;
 
     /// <summary>Dodona's own voice. The icon is an oak: six lane colours as leaves on one
     /// trunk, and this is that trunk (brightened to read on the dark plate). The system is
@@ -192,6 +194,10 @@ public sealed class LineView
             "agent_line" => "agent> ",
             "result" => "✓ ",
             "announcement" => "· ",
+            // Subordinate on purpose: a step is not a speaker. Dim, mono, and indented
+            // under the turn it belongs to, so a pane full of them still reads as one
+            // conversation rather than a log.
+            "progress" => "  ",
             _ => $"{l.Kind}> ",
         },
     };

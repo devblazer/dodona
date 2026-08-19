@@ -51,6 +51,11 @@
          row. Two parsers of `questions.candidates` would be the two-systems divergence Phase 4
          exists to prevent, and only one of them would ever be tested. -->
     <Compile Include="..\Dodona\Ask.cs" Link="Ask.cs" />
+    <!-- Mid-turn progress, for the strongest form of that same reason: the daemon WRITES
+         `progress` rows and the pane FOLDS them, and a fold that disagreed with the writer
+         about what a row means would be the two-implementations divergence one file over.
+         Pure functions over a tool name and a list of rows — no store, no window. -->
+    <Compile Include="..\Dodona\PaneProgress.cs" Link="PaneProgress.cs" />
     <!-- Ver too, and for the same reason: the UI is its own build with its own hot swap
          (§13), so it has to be able to say which build it is. Ver.Build reads
          typeof(Ver).Assembly, so compiled in here it reports the UI's identity, not the

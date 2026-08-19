@@ -73,6 +73,26 @@ try {
     $status = Dodona @("status")
     Check 'presence_idle_after_result' ($status -match 'presence=idle') $status
 
+    # ---- presence must not LIE while the agent thinks ----
+    #
+    # A long think floods the wire with `system/thinking_tokens` and nothing else -- 93 of
+    # 111 lines in one measured turn on 2026-08-19. Those events used to be dropped whole,
+    # which left `presence` reading as the last TOOL the agent had run: a tile that said
+    # `bash: ls -la docs/...` through ninety seconds of pure reasoning, with the pane clock
+    # beside it ticking (LANE-LIFECYCLE 5) so a stale label looked like a live one. A thought
+    # is not a step, so it still earns no pane row -- only the truth about what is happening.
+    $progBefore = [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM pane_events WHERE lane_id=$sky AND kind='progress'").Trim())
+    Dodona @("say", "$sky", "tool:Read:src/sky/box.cs think:20 sleep:3 then say thinking-done") | Out-Null
+    Wait-Until { (Dodona @("status")) -match 'presence=thinking' } 20000 'presence follows the agent into a think' | Out-Null
+    $status = Dodona @("status")
+    Check 'presence_shows_thinking_not_a_stale_tool' ($status -match 'presence=thinking' -and $status -notmatch 'presence=read: box.cs') $status
+    # And the flood is not transcript: twenty thinking events add ZERO rows. A DELTA, not a
+    # total -- this lane already ran a tool:Write turn earlier in the suite, so an absolute
+    # count would have asserted something true about the SUITE rather than about the product.
+    # The +1 is the Read, which is what makes this a measurement instead of a zero.
+    $progAfter = [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM pane_events WHERE lane_id=$sky AND kind='progress'").Trim())
+    Check 'thinking_writes_no_pane_rows' (($progAfter - $progBefore) -eq 1) "progress rows went $progBefore -> $progAfter (only the Read may count)"
+
     # ---- tier-0 prefix routing ----
     $r = Dodona @("input", "sky: hello via prefix")
     Check 'tier0_prefix_routes' ($r -match '-> SKY \(tier 0\)') $r

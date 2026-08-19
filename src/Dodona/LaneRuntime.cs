@@ -128,6 +128,18 @@ sealed class LaneRuntime
                         var why = d.RootElement.TryGetProperty("message", out var msg) ? msg.GetString() : "denied";
                         body = $"permission denied: {tool} — {Truncate(why ?? "", 140)}";
                     }
+                    else if (sub == "thinking_tokens")
+                    {
+                        // PRESENCE MUST NOT LIE WHILE IT WAITS. These arrive in their
+                        // hundreds during a long think (93 of one turn's 111 wire lines),
+                        // and until now they left presence reading as the last TOOL the
+                        // agent ran -- so a tile said `bash: ls -la docs/...` for ninety
+                        // seconds of pure reasoning. The pane clock next to it was ticking
+                        // (LANE-LIFECYCLE §5), which made a stale label look like a live
+                        // one. No pane row: a thought is not a step, and this is the
+                        // meaningless volume the operator asked to have dropped.
+                        _store.LanePresence(Id, "thinking…");
+                    }
                     // else: kind stays "wire", body stays raw
                     break;
                 }
@@ -149,10 +161,36 @@ sealed class LaneRuntime
                                 else if (inp.TryGetProperty("command", out var cm)) detail = Truncate(cm.GetString() ?? "", 40);
                             }
                             _store.LanePresence(Id, $"{tool.ToLowerInvariant()}: {detail}".TrimEnd(':', ' '));
+
+                            // AND A ROW, which presence cannot be. Presence is one column
+                            // that every event overwrites, so it can only ever say what is
+                            // happening *now* — eighteen tool calls in one measured turn
+                            // left two sentences on screen and no trace of the other
+                            // sixteen (PaneProgress.cs carries the measurement). The row is the
+                            // trace; Progress decides in code whether it is worth one.
+                            var seen = c.TryGetProperty("input", out var pin) ? pin : default;
+                            var (tier, text) = PaneProgress.FromTool(tool, seen);
+                            if (tier != ProgressTier.Noise && text.Length > 0)
+                                // seq stays NULL: the seq of this wire line belongs to the
+                                // row written below it, and UNIQUE(lane_id, seq) is what
+                                // makes shim redelivery exactly-once. A progress row is a
+                                // DERIVED row -- it must not compete for that key.
+                                _store.PaneEvent(Id, PaneProgress.Kind, text, null, raw);
+                            RememberTool(c, tool);
                         }
                     }
                     body = sb.ToString();
-                    if (body.Length == 0) return;            // tool-only assistant event: presence updated, no pane line
+                    if (body.Length == 0) return;            // tool-only assistant event: the progress row above is the pane line
+                    break;
+                case "user":
+                    // A tool_result comes back as a `user` event, and a FAILED one is the
+                    // most valuable mid-turn line there is: a build that will not compile,
+                    // a command with an unbalanced quote, a path that is not there. It used
+                    // to fall through to an unread raw `wire` row, so the operator learned
+                    // about it -- if at all -- when the turn ended. Successes stay silent:
+                    // the tool_use row above already said the step happened, and saying it
+                    // twice is the volume §2.2 refuses to spend.
+                    ReportFailedResults(d.RootElement);
                     break;
                 case "result":
                     kind = "result";
@@ -185,6 +223,61 @@ sealed class LaneRuntime
         // The row is already written and the pane can already show it. Compression is a
         // later, optional improvement to a row that is complete without it (§5).
         if (kind == "result" && rowId > 0 && body.Length > 0) OnResult?.Invoke(Id, rowId, body);
+    }
+
+    // ------------------------------------------------------- which tool_use id was which
+    //
+    // A tool_result names only the id of the call it answers, so the id has to be kept to
+    // say "bash failed" rather than "something failed". BOUNDED, and small: a turn is
+    // dozens of calls, not thousands, and this is a live daemon holding one of these per
+    // lane forever. Oldest out first when it fills -- a result always follows its call
+    // closely, so an id old enough to evict is an id whose answer already came and went.
+    readonly Dictionary<string, string> _toolNames = new(StringComparer.Ordinal);
+    readonly Queue<string> _toolOrder = new();
+    const int ToolMemory = 64;
+
+    void RememberTool(JsonElement block, string tool)
+    {
+        if (!block.TryGetProperty("id", out var idp) || idp.ValueKind != JsonValueKind.String) return;
+        var id = idp.GetString();
+        if (id is null or "") return;
+        lock (_toolNames)
+        {
+            if (!_toolNames.TryAdd(id, tool)) return;
+            _toolOrder.Enqueue(id);
+            while (_toolOrder.Count > ToolMemory) _toolNames.Remove(_toolOrder.Dequeue());
+        }
+    }
+
+    string? ToolNamed(JsonElement block)
+    {
+        if (!block.TryGetProperty("tool_use_id", out var idp) || idp.ValueKind != JsonValueKind.String) return null;
+        var id = idp.GetString();
+        if (id is null or "") return null;
+        lock (_toolNames) return _toolNames.TryGetValue(id, out var t) ? t : null;
+    }
+
+    /// <summary>Write a progress row for every FAILED tool result in a user event. Silent on
+    /// success, and silent on our own injected input (which is `text` blocks, not
+    /// `tool_result` ones), so this can never echo the operator back at themselves.</summary>
+    void ReportFailedResults(JsonElement root)
+    {
+        if (!root.TryGetProperty("message", out var m) || !m.TryGetProperty("content", out var content)
+            || content.ValueKind != JsonValueKind.Array) return;
+        foreach (var c in content.EnumerateArray())
+        {
+            if (c.ValueKind != JsonValueKind.Object) continue;
+            if (!c.TryGetProperty("type", out var tp) || tp.GetString() != "tool_result") continue;
+            if (!c.TryGetProperty("is_error", out var err) || err.ValueKind != JsonValueKind.True) continue;
+            // `content` is a string on the shapes observed live, but the API allows an
+            // array of blocks; take the string when it is one and fall back to the raw
+            // text of whatever else it is, rather than saying nothing.
+            var text = c.TryGetProperty("content", out var cc)
+                ? (cc.ValueKind == JsonValueKind.String ? cc.GetString() : cc.GetRawText())
+                : null;
+            var line = PaneProgress.FromFailedResult(ToolNamed(c), text);
+            if (line is not null) _store.PaneEvent(Id, PaneProgress.Kind, line, null, null);
+        }
     }
 
     public void Say(string text)

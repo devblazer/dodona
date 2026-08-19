@@ -92,6 +92,42 @@ try {
     Check 'routed_input_reaches_pane' (($sky.lines -join '|') -match 'you> say focus works') ($sky.lines -join '|')
     Check 'focus_marked_in_ui' ($sky.focused -eq $true -and ($d.slots | Where-Object { $_.title -eq 'WATER' }).focused -ne $true) ''
 
+    # ---- mid-turn progress (PaneProgress.cs): the pane stops going silent for minutes ----
+    #
+    # THE INCIDENT. On 2026-08-19 the operator watched a real lane work for four minutes on
+    # one turn: 111 wire lines, 18 tool calls, and exactly TWO sentences on screen. Their own
+    # words for it were "staring at a blank screen hoping something's happening". Every tool
+    # call had been dropped on purpose -- a tool-only assistant event updated `presence` and
+    # returned without writing a row -- and presence is ONE column, so it could only ever show
+    # the newest of the eighteen. These four checks are the wiring: a tool on the wire has to
+    # become a row, the row has to reach the tile, a run of them has to fold, and an edit and a
+    # failure have to keep their own lines. The tiers and the fold algebra are covered case by
+    # case in tests\Dodona.Tests (unit, ~1s); what only a real daemon and a real window can
+    # prove is that the two ends are connected at all.
+    Dodona @("say", "$skyLane", "tool:Read:src/a.cs tool:Read:src/b.cs tool:Read:src/c.cs tool:Read:src/d.cs tool:Edit:src/keep.cs bash:dotnet build -c Release toolfail:Exit code 2 unexpected EOF say progress done") | Out-Null
+    Wait-Until { ((@((DumpOrNull).slots | Where-Object { $_.title -eq 'SKY' }).lines) -join '|') -match 'progress done' } 25000 'the tool-heavy turn finishes' | Out-Null
+    $d = Dump
+    $sky = $d.slots | Where-Object { $_.title -eq 'SKY' }
+    $lines = @($sky.lines)
+    $joined = $lines -join '|'
+    Check 'midturn_tool_calls_reach_the_pane' ($joined -match 'read 4 files') $joined
+    # ONE line for the run, not four. `read a.cs|read b.cs|...` would mean the fold never ran.
+    Check 'a_run_of_steps_folds_to_one_line' (@($lines | Where-Object { $_ -match 'read \d+ files' }).Count -eq 1 -and
+        $joined -notmatch 'read a\.cs\|') $joined
+    # An edit changed the operator's files and a command ran on their machine: neither may be
+    # averaged into a count of steps, and a failure least of all.
+    Check 'acts_and_failures_keep_their_own_lines' ($joined -match 'edited keep\.cs' -and
+        $joined -match [regex]::Escape('$ dotnet build -c Release') -and $joined -match 'bash failed') $joined
+    # NO DATA LOST TO THE FOLD. The store keeps one row per tool call (`seq` dedup depends on
+    # it) and the overlay is the "what actually came over the wire" answer, so it must show the
+    # four reads individually -- the fold is a pane rendering, never a filter on the truth.
+    Dodona @("ui", "overlay", "SKY") | Out-Null
+    Wait-Until { $null -ne (DumpOrNull).overlay } 25000 'the overlay opens over SKY' | Out-Null
+    $ov = ((Dump).overlayLines) -join '|'
+    Check 'the_overlay_still_shows_every_step' ($ov -match 'read a\.cs' -and $ov -match 'read d\.cs' -and
+        $ov -notmatch 'read 4 files') $ov
+    Dodona @("ui", "overlay", "off") | Out-Null
+
     # ---- blocked-on-you (§8): refused merge -> border+glyph+badge+presence+feed row ----
     Dodona @("token-request", "1") | Out-Null      # on-approval, unapproved -> refused
     Wait-Until { (@((DumpOrNull).slots | Where-Object { $_.title -eq 'WATER' }).blocked) -eq $true } 25000 'the WATER pane shows blocked-on-you' | Out-Null

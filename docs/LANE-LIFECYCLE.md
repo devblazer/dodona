@@ -182,6 +182,46 @@ The third is the one that turns "has it gone to sleep?" from a feeling into an a
 
 ---
 
+## 5.1 "Is it working" needs a TRANSCRIPT, not only a label — **IMPLEMENTED (2026-08-19)**
+
+§5 above answered *is this lane alive* — the ticking clock, `quiet Nm`, `unreachable`.
+It did not answer *what is it doing*, and the two are not the same question. Measured on
+the operator's own machine, one turn: **four minutes, 111 wire lines, 18 tool calls, two
+sentences on screen.** Their words: *"you can't see it doing anything… conscious of the
+hours staring at a blank screen, hoping something's happening."* A live clock beside a
+silent transcript reads as a hang.
+
+The fix is `progress` rows — three tiers decided in code, folded at render (DEBUGGING.md
+§5, `src/Dodona/PaneProgress.cs`). What matters here is the shape of the mistake it
+corrects, because this file exists to stop it recurring: the silence was **designed**,
+on an argument that was half right. "Anything that needs you is a result" is true.
+"What it is doing meanwhile is already the presence line" was not — presence is one
+column, overwritten by every event, so it can only ever show the newest of eighteen
+steps. **A cut is only compression if something shorter takes its place.** Where nothing
+does, it is a blind spot, and it will be reported as one — by the person watching it.
+
+### Rejected while building it — do not re-propose
+
+- **Put `agent_line` narration back in the pane.** The cheapest edit, and wrong: it is
+  the agent's prose about its own work, unbounded and unstructured, which is what §5
+  removed for good reason. A step derived from a tool event is bounded by construction.
+- **Ask a model to summarise the steps.** Quota is the scarce resource (CLAUDE.md §0.1)
+  and there is no judgement to buy: `{"file_path":"…/Sim.cs"}` → `read Sim.cs` is a
+  mapping, not an opinion. Paying haiku per tool call would invert §2.2's volume cut.
+- **Fold at WRITE time (one rolling row per run, updated in place).** Fewer rows, and it
+  breaks the property the store is built on: a folded row has to be rewritten by a shim
+  replay, and `UNIQUE(lane_id, seq)` exists precisely so redelivery cannot do that.
+  Folding at read costs one pure function and keeps the overlay complete.
+- **Default an unclassified tool to silence.** It reads as tidy and is the same defect
+  wearing a fallback: the next tool Claude Code ships would silently vanish from every
+  pane, with nothing anywhere saying so.
+- **A pane row per `thinking_tokens` event.** 93 rows for one turn's reasoning. It moves
+  presence to `thinking…` instead, which is what a person actually wants to know, and
+  which also stopped presence from lying (it used to show the last TOOL through minutes
+  of pure thought, under a clock that made the stale label look live).
+
+---
+
 ## 6. Open questions
 
 - After a lane's ticket lands and the lane is kept, should the agent be retired

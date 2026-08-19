@@ -9,6 +9,14 @@ using System.Text.RegularExpressions;
 // Directives inside the user text make turns deterministic and schedulable:
 //   sleep:N       — wait N seconds mid-turn (a long "thinking" turn to kill daemons under)
 //   say <text>    — the result event carries exactly <text>
+//   tool:Name:arg — a tool_use event with `file_path` = arg. EVERY occurrence, in order, so a
+//                   turn can be many calls — which is what mid-turn progress rows are about
+//                   (one call was enough for presence, a single column; a fold is not).
+//   bash:<cmd>    — a tool_use whose input is a `command`, the other shape Progress reads
+//   toolfail:<m>  — a FAILED tool_result for the last tool_use, as a `user` event with
+//                   is_error: the half of the wire the pane showed nothing of at all
+//   think:N       — N `system/thinking_tokens` events, emitted AFTER the tools, the way a
+//                   real agent floods the wire while reasoning (93 of one turn's 111 lines)
 //   env:NAME      — the result event carries the value of environment variable NAME, or
 //                   `(unset)`. This is how a check sees what the SPAWN SITE actually put in
 //                   an agent's environment (Phase 0c, DODONA_WORKSPACE).
@@ -301,9 +309,17 @@ while ((line = Console.ReadLine()) is not null)
         message = new { role = "assistant", content = new object[] { new { type = "text", text = $"working on: {text}" } } },
     });
 
-    // tool:Name:arg — emit a claude-shaped tool_use event (drives presence derivation)
-    var tool = Regex.Match(text, @"tool:(\w+):(\S+)");
-    if (tool.Success)
+    // tool:Name:arg — emit a claude-shaped tool_use event (drives presence derivation AND
+    // the mid-turn progress rows, Progress.cs). EVERY occurrence, in order: one call was
+    // enough to test presence, which is a single column, but a progress row exists
+    // precisely because a turn is MANY calls — the fold, the dedupe of a repeated subject
+    // and "the operator can still see the sixteenth step" are all unreachable with one.
+    // The id is per-occurrence so a `toolfail:` below can name the tool it answers.
+    var toolIds = new List<(string Id, string Name)>();
+    foreach (Match tool in Regex.Matches(text, @"tool:(\w+):(\S+)"))
+    {
+        var id = $"fake-tool-{toolIds.Count + 1}";
+        toolIds.Add((id, tool.Groups[1].Value));
         Emit(new
         {
             type = "assistant",
@@ -311,9 +327,74 @@ while ((line = Console.ReadLine()) is not null)
             message = new
             {
                 role = "assistant",
-                content = new object[] { new { type = "tool_use", id = "fake-tool-1", name = tool.Groups[1].Value, input = new { file_path = tool.Groups[2].Value } } },
+                content = new object[] { new { type = "tool_use", id, name = tool.Groups[1].Value, input = new { file_path = tool.Groups[2].Value } } },
             },
         });
+    }
+
+    // bash:<command...> — a tool_use whose input is a `command`, not a `file_path`. The
+    // two shapes take different branches in Progress.FromTool (a file is named by its leaf,
+    // a command is shown as it will run), and a directive that could only produce one of
+    // them left the other testable only by reading the code.
+    var bash = Regex.Match(text, @"bash:(.+?)(?:\s+(?:tool|toolfail|say|sleep|ratelimit):|$)");
+    if (bash.Success)
+    {
+        var id = $"fake-tool-{toolIds.Count + 1}";
+        toolIds.Add((id, "Bash"));
+        Emit(new
+        {
+            type = "assistant",
+            session_id = sessionId,
+            message = new
+            {
+                role = "assistant",
+                content = new object[] { new { type = "tool_use", id, name = "Bash", input = new { command = bash.Groups[1].Value.Trim() } } },
+            },
+        });
+    }
+
+    // toolfail:<message> — the FAILED tool_result for the last tool_use emitted above,
+    // shaped as the wire carries it: a `user` event with is_error. This is the half of the
+    // stream the pane never showed at all, so without this directive the only way to see a
+    // failing mid-turn tool was to watch a real agent get something wrong.
+    var fail = Regex.Match(text, @"toolfail:(.+?)(?:\s+(?:tool|bash|say|sleep|ratelimit):|$)");
+    if (fail.Success)
+        Emit(new
+        {
+            type = "user",
+            session_id = sessionId,
+            message = new
+            {
+                role = "user",
+                content = new object[]
+                {
+                    new
+                    {
+                        type = "tool_result",
+                        tool_use_id = toolIds.Count > 0 ? toolIds[^1].Id : "fake-tool-unknown",
+                        is_error = true,
+                        content = fail.Groups[1].Value.Trim(),
+                    },
+                },
+            },
+        });
+
+    // think:N — emit N `system/thinking_tokens` events, the shape a real agent floods the
+    // wire with while it reasons (measured: 93 of one turn's 111 lines). Emitted AFTER the tool
+    // events above, which is both the real order (an agent reasons about what it just read)
+    // and the one that can be OBSERVED: it makes `thinking…` the last presence before the
+    // turn's sleep, where a check can still see whether the daemon left a stale tool there.
+    var think = Regex.Match(text, @"think:(\d+)");
+    if (think.Success)
+        for (var i = 1; i <= int.Parse(think.Groups[1].Value); i++)
+            Emit(new
+            {
+                type = "system",
+                subtype = "thinking_tokens",
+                estimated_tokens = i * 50,
+                estimated_tokens_delta = 50,
+                session_id = sessionId,
+            });
 
     // ratelimit:0.42 — emit the CLI's rate_limit_event shape (observed live 2026-08-17),
     // so the quota indicator is testable without a real session ever being consulted.

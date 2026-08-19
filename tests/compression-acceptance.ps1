@@ -113,6 +113,7 @@ try {
     Check 'turn_final_gets_compressed' ($row -match '^1\|1') $row
     Check 'compression_is_recorded_as_an_event' ([int]((Rows "SELECT COUNT(*) FROM events WHERE kind='compressed'").Trim()) -ge 1) ''
 
+
     $body = Rows "SELECT length(body) FROM pane_events WHERE kind='result' AND lane_id=1 ORDER BY id DESC LIMIT 1"
     Check 'raw_body_is_never_overwritten' ([int]($body.Trim()) -eq $long.Length) "$body vs $($long.Length)"
 
@@ -157,6 +158,25 @@ try {
     $blocked = Rows "SELECT compressed FROM pane_events WHERE kind='result' AND lane_id=1 ORDER BY id DESC LIMIT 1"
     $emdash = [string][char]0x2014
     Check 'blocked_uses_the_fixed_schema' ($blocked -match "BLOCKED $emdash" -and $blocked -match 'options:') $blocked
+
+    # ---- mid-turn progress rows are FREE, and must stay free ----
+    #
+    # Quota is the scarce resource (CLAUDE.md 0.1), and the whole argument for showing
+    # mid-turn steps again is that deciding what they say costs no model call at all: a tier
+    # and a phrase, in code, from the tool event (PaneProgress.cs). The compressor pool is
+    # warm right here, so this is the moment that claim is checkable -- a progress row that
+    # ever picked up a `compressed` value would mean every tool call any agent makes now
+    # spends haiku turns, which is the opposite of the 5-10x cut 2.2 asks for.
+    Dodona @("say", "1", "tool:Read:src/a.cs tool:Read:src/b.cs tool:Edit:src/c.cs say steps done") | Out-Null
+    Wait-Until { [int]((Rows "SELECT COUNT(*) FROM pane_events WHERE kind='progress'").Trim()) -ge 3 } 25000 'the progress rows land' | Out-Null
+    $steps = Rows "SELECT COUNT(*) FROM pane_events WHERE kind='progress'"
+    $paid = Rows "SELECT COUNT(*) FROM pane_events WHERE kind='progress' AND compressed IS NOT NULL"
+    Check 'progress_rows_are_written' ([int]($steps.Trim()) -ge 3) "progress rows: $steps"
+    # Both halves in one assertion, on purpose: "none of them were compressed" is
+    # trivially true of a store with no progress rows in it, so a check written as that
+    # alone would pass against the build this feature does not exist in -- VACUOUS, and
+    # a guard that cannot fail is decoration (CLAUDE.md 0.3).
+    Check 'progress_rows_never_reach_a_compressor' ([int]($steps.Trim()) -ge 3 -and [int]($paid.Trim()) -eq 0) "progress rows: $steps, of which compressed: $paid"
 
     Dodona @("ui", "screenshot", "--out", "$out\compressed.png") | Out-Null
     Dodona @("ui", "close") | Out-Null
