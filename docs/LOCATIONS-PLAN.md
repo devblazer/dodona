@@ -770,6 +770,111 @@ one-line check somebody should add.
 
 ---
 
+### P3.A delivered, branch `loc-p3a` (2026-08-19) — and the three items closed with it
+
+**P3.A: rung 4 asked nobody, for two days, and every check passed the whole time.** Phase 3
+wrote a `routing_decisions` row at tier `ask`, a `project_unknown` event and an announcement;
+Phase 4 built an overlay that renders a `questions` row. Nothing connected them. The fix is the
+two parts Phase 4 specified, plus the one thing neither had needed yet:
+
+- **Part 1, at the hold site** (`Daemon.SpawnForAsync`, one call): `AskWhichProject` opens a
+  `questions` row with `kind='route'`, `subject` = **the held sentence, whole**, and candidates
+  built by `Ask.RouteCandidates`. Idempotent on (kind, subject) for `AskForRepo`'s reason. The
+  row goes in the **workspace** store — D-L11 stands untouched, and no scope column was added
+  anywhere, because scope is which store the row is in.
+- **Part 2, in `Daemon.AnswerQuestion`**: `Ask.KindRoute` and a `case` that delivers
+  `q.Subject` through `SpawnForAsync`, which gained ONE optional parameter (`answeredProject`).
+  That parameter is the only input that skips the ladder, and it still goes through
+  `TryProject`, so `held_input_invents_no_lane` holds and the lane is created **by answering**
+  and at no earlier moment. `AnswerQuestion` became `async` (its single caller already was).
+- **The candidates are NAMES, never paths** (CLAUDE.md §3.1, and the operator's directive):
+  `Ask.RouteCandidates` takes leaves, and `ProjectLadder.ByName` resolves an answer back over
+  a closed list — the same closed-list match `ClassifyProjectAsync` already made on the cheap
+  tier's reply, whose inline copy was **deleted in favour of the shared one**. `Ask.cs` is
+  linked into `DodonaUi` and `ProjectLadder.cs` is not, which is why the names cross that
+  boundary rather than the resolver.
+
+**Two orderings are load-bearing, and both are one line each.**
+
+- **A route answer is resolved BEFORE the row is closed.** `QuestionAnswer` is guarded on
+  `state='open'`, so there is no re-opening a question — and a route question closed without
+  delivering loses the held sentence for good. A project detached between the ask and the answer
+  therefore prints what un-sticks it, writes `question_answer_refused`, and leaves the row open.
+- **A route question has no declination.** `declined` was `picked.Value == "no"` for every kind;
+  a project in a folder called `no` would have had a perfectly good answer recorded as
+  `withdrawn` and its sentence silently never delivered.
+
+**The escalation now asks the focused lane's own project's manager.** Phase 5 handed this over as
+prose: the lane ladder's escalation inside `RouteInput` passed the DEFAULT project while the fact
+sheet it sends describes the **focused** lane and its siblings. It passes
+`RegistrationKey(focusedRow, ProjectPaths())` now, following `BrainReview`'s shape — and that
+returns `""` for a lane no project owns, which `BrainProject` turns back into the first project,
+so a one-project workspace is unchanged. Proved red: `brain-hi projects=[…proja…]` against work
+living in B.
+
+**The one-project event count exists now, as a WHITELIST rather than a total** — a plain count
+would go red for a reason nobody could read.
+`workspace:a_one_project_workspace_writes_no_project_ladder_event` demands that the event kinds
+written while a one-project workspace routes one typed sentence are exactly
+`lane_auto_created, lane_config, lane_connected, lane_started, policy_choice, say, shim_spawned`,
+and names anything else in its own detail string. Demonstrated red by adding a rung ahead of the
+`only` short-circuit: *`outside the allowed set=[project_guessed,question_opened]`* — which is
+the "caught by name" the note above asked for. Its sibling
+`a_one_project_workspace_opens_no_question` covers the other half.
+
+**`ProjectPaths()`'s one registry read per typed sentence is still invisible, and deliberately
+so.** It writes no event and prints nothing, so an event whitelist cannot see it; the honest
+record stays the code comment in `ResolveProjectAsync` that admits it, rather than a claim of
+byte-for-byte identity that is not quite true.
+
+**`dev prove`: 19 PROVEN, 6 VACUOUS-by-construction — and every one of the six was demonstrated
+red by breaking the behaviour.** The reds that mattered most, read back from the real output:
+
+| check | suite | what HEAD did instead |
+|---|---|---|
+| `the_project_hold_opens_a_question_row` | workspace | `questions=` — no row at all |
+| `the_question_offers_every_project_by_name` | workspace | `ids=[] blob=` |
+| `a_route_answer_naming_nothing_offered_is_refused` | workspace | `error: no question -1` |
+| `answering_the_project_question_opens_the_lane_there` | workspace | `error: no question -1 lanes=6->6` |
+| `the_answered_rung_records_that_the_operator_decided` | workspace | `rung=named how=leaf` (the previous decision) |
+| `the_escalation_asks_the_focused_lanes_own_projects_manager` | brain | `brain-hi projects=[…proja…] want B=…projb…` |
+| `the_routing_question_reaches_the_operators_window` | ui-use | `ask` was null, forever |
+| `the_ui_answer_verb_reaches_a_routing_question` | ui-use | `error: nothing is being asked` |
+| `a_project_choice_is_a_real_button_a_person_can_click` | ui-use | `no automation element named ask:<projb>` |
+| `answering_in_the_window_delivers_the_held_sentence_to_the_chosen_project` | ui-use | `lanes=` — nothing was ever created |
+
+The six VACUOUS ones are negative pins and one precondition; each was demonstrated by a
+deliberate break, rebuilt, read red, and reverted:
+
+- `a_one_project_workspace_writes_no_project_ladder_event` / `a_one_project_workspace_opens_no_question`
+  / `opening_a_question_still_invents_no_lane` — a rung ahead of the short-circuit plus a lane
+  spawned at the hold: `outside the allowed set=[project_guessed,question_opened]`,
+  `1|route|open|make the header quite a lot taller`, `before=0 after=1`.
+- `an_ambiguous_sentence_is_held_rather_than_placed` / `a_rendered_routing_question_still_invents_no_lane`
+  — the bottom rung made to return the first project: `-> HEADER (started on opus/high (default))`
+  and `1|HEADER|work|…proja…`.
+- `the_routing_overlay_closes_when_its_row_closes` — `Shell.OpenAsk` made unconditional (Phase 4's
+  own technique): `{"id":99,…,"question":"DELIBERATE BREAK","shown":true,…}`.
+
+**`ui-use` now covers the gap Phase 4 named.** A real two-project workspace, an ambiguous
+sentence, the overlay rendering the router's own question, `dodona ui answer <project>` through
+`MainWindow.AnswerAsk` — the button's own method — and the held sentence arriving in a lane in
+the project that was picked. Nothing in that section fakes a row.
+
+**Becomes impossible:** a rung called `ask` that asks nobody; a held sentence that can only be
+released by retyping it; a routing question offering somewhere to browse; an expensive-tier
+manager reasoning about another project's lanes; a rung inserted ahead of the one-project
+short-circuit passing unnoticed.
+
+**Left undone, deliberately:** a route question is not withdrawn if the same sentence is later
+delivered another way (by naming a project and retyping). It stays open, answerable, and
+answering it delivers that sentence again — which is what the operator asked for both times.
+Visible and bounded, so it is recorded rather than guessed at. Also still open from Phase 4: the
+group-scope question has no acceptance check, because producing a real concierge question needs
+the concierge's model tiers and the suite that has that fixture has no window.
+
+---
+
 ## Phase 4 — asking, as one component with two render modes
 
 **The question already exists as a row** — `questions` in the concierge store, opened by `Ask`
@@ -881,7 +986,7 @@ and says so.
 
 | item | what | for whom |
 |---|---|---|
-| P3.A | **Rung 4 opens a question row.** Part 1, at the hold site: alongside the `routing_decisions` row, `_store.QuestionOpen(<the held sentence>, <candidate projects as `[{id,name,why}]`>, kind: "route", subject: <the held input>)`. The overlay then renders it with no further change. Part 2, in `Daemon.AnswerQuestion`: a new `Ask.KindRoute` constant beside `Ask.KindRepoInit` (deliberately NOT added by Phase 4 — an unused constant reads as support that is not there) and a `case` for it that delivers the held sentence to a lane in the chosen project — that is `SpawnForAsync`, which is Phase 3's, which is why this is filed here and not built in Phase 4. `Ask.RepoInitCandidates` is the shape to copy. | Phase 3 |
+| P3.A **(BUILT, branch `loc-p3a` — see Phase 3's P3.A section)** | **Rung 4 opens a question row.** Part 1, at the hold site: alongside the `routing_decisions` row, `_store.QuestionOpen(<the held sentence>, <candidate projects as `[{id,name,why}]`>, kind: "route", subject: <the held input>)`. The overlay then renders it with no further change. Part 2, in `Daemon.AnswerQuestion`: a new `Ask.KindRoute` constant beside `Ask.KindRepoInit` (deliberately NOT added by Phase 4 — an unused constant reads as support that is not there) and a `case` for it that delivers the held sentence to a lane in the chosen project — that is `SpawnForAsync`, which is Phase 3's, which is why this is filed here and not built in Phase 4. `Ask.RepoInitCandidates` is the shape to copy. | Phase 3 |
 
 **Becomes impossible:** a refusal that tells a GUI user to go and type a command; a question that
 evaporates when the window closes; an ask with a second answer path behind it; a question rendered

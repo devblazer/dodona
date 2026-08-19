@@ -366,10 +366,13 @@ are the authority and they must agree.)*
   of `tools`'.
 - **`routing_decisions`** — every routed input (§4/§5): `ts, input, tier, target_lane,
   delivered_lane, confidence, retargeted, undone`. `tier` is the VERDICT that decided it:
-  `prefix` | `generic` | `addendum` | `new-task` | `first` | `focus` | `ask`. A row with
+  `prefix` | `generic` | `addendum` | `new-task` | `first` | `focus` | `ask` | `answered`. A row with
   `tier='ask'` and a NULL `delivered_lane` is the one to look for — the sentence was HELD and
   the operator asked, because guessing between "new work" and "continues something" is the one
-  routing mistake that cannot be undone. `undone` is reserved for the UI's undo keystroke —
+  routing mistake that cannot be undone. **`tier='answered'` with `confidence='operator'` is the
+  SAME sentence arriving, later, at the lane an answer created (P3.A): a project hold writes two
+  rows for one sentence and both are true — it was asked about, and it was then delivered.**
+  `undone` is reserved for the UI's undo keystroke —
   free labeled data for tuning the confidence threshold.
 - **`kv`** — small state: `focused_lane`, `dispatcher_lane` (`autopublish_last_tried` was
   DELETED in Phase 2b — the drift watcher compares two SHAs now and needs no remembered
@@ -428,7 +431,7 @@ are the authority and they must agree.)*
   `tier=focus confidence=no-classifier`. That was the live state for two days
   (CLAUDE.md §3) because the classifier was looked up by a role nothing ever created.
   **Project-routing kinds (LOCATIONS-PLAN Phase 3) — which project a typed sentence opened a
-  lane in:** `project_chosen` (`rung=named|live how=leaf|alias|spoken|sole-live|classified`,
+  lane in:** `project_chosen` (`rung=named|live|answered how=leaf|alias|spoken|sole-live|classified|operator`,
   plus the project path — **never written for a one-project workspace**, where there is no
   decision to record and the whole phase must be invisible), `classified_project` (the cheap
   tier was asked, because several projects held live lanes — this is the one row that costs
@@ -438,7 +441,13 @@ are the authority and they must agree.)*
   exists**; the detail carries every project it could have meant), and
   `project_gone_at_spawn` (a rung's answer stopped being a project between the ladder's read
   and the spawn — trap T4 arriving on the typed-input path). A `routing_decisions` row with
-  `tier=ask confidence=no-project` is the project hold seen from the other side. Compression kinds: `compressed` (with latency and before→after sizes),
+  `tier=ask confidence=no-project` is the project hold seen from the other side.
+  **The hold also opens a `questions` row with `kind='route'` (P3.A), and `question_opened` /
+  `question_answered` carry its id.** Answering delivers `questions.subject` — the held sentence,
+  kept whole for exactly that — so a store where `project_unknown` exists and no `route` question
+  does is the two-day gap this closed: rung 4 asked and nothing could render the question.
+  `question_answer_refused` means the answer named a project the workspace no longer has, and the
+  row was deliberately LEFT OPEN so the sentence is not lost. Compression kinds: `compressed` (with latency and before→after sizes),
   `compressor_timeout`, `compressor_failed`. Lifecycle kinds: `lane_stopped`,
   `lane_dormant` (its ticket landed — the agent was retired, the lane keeps the thread),
   `lane_respawned` (a fresh agent resumed the recorded session).

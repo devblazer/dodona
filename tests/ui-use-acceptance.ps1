@@ -835,6 +835,111 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     (& $dodona ui close --workspace $ws3.Id) | Out-Null
     Wait-Until { $null -eq (AskDumpOrNull) } 20000 'the ask window is gone' | Out-Null
     (& $dodona stop-daemon --workspace $ws3.Id) | Out-Null
+
+    # =====================================================================================
+    # THE ROUTER'S OWN QUESTION, RENDERED AND ANSWERED (LOCATIONS-PLAN P3.A)
+    #
+    # WHAT PHASE 4 COULD NOT TEST, AND SAID SO. The section above uses P4.5's repo question
+    # because it is produced by a real code path; the ROUTER's rung 4 -- "we do not know which
+    # project, so ask" -- wrote a `routing_decisions` row, an event and an announcement and
+    # opened NO QUESTION ROW, so the overlay never saw it. Phase 4 deliberately did not write a
+    # fixture faking one: a green over a row no code path produces proves nothing.
+    #
+    # It produces one now, so this is the whole loop through the real product: an ambiguous
+    # sentence is HELD, the window shows the question, `ui answer` answers it through
+    # MainWindow.AnswerAsk -- THE ONE ANSWER PATH (D-L4, P4.3), the same method the button's
+    # Click handler calls -- and the held sentence lands in a lane in the project that was
+    # picked. Nothing here fakes a row, and nothing here calls a daemon command the button
+    # could not have sent.
+    #
+    # TWO PROJECTS, NO NAME IN THE SENTENCE, NO LIVE LANE: that is `no-name-no-live-lane`, the
+    # rung that holds. It costs no model -- `ProjectLadder.Decide` reaches it in code -- so this
+    # section starts no classifier and burns no quota (CLAUDE.md §2.6).
+    $tp4 = New-TwoProjectWorkspace $dodona 'uiroute'
+    foreach ($p in @($tp4.A, $tp4.B)) {
+        Set-Content "$p\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0; brain = $false } | ConvertTo-Json)
+    }
+    $daemon4 = Start-Process $dodona -ArgumentList "daemon", "--workspace", $tp4.Id -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon4.out" -RedirectStandardError "$out\daemon4.err"
+    Wait-Daemon $tp4.CtlPipe | Out-Null
+    function Rt([string[]]$a) {
+        $ErrorActionPreference = 'Continue'
+        (& $dodona ($a + @('--workspace', $tp4.Id))) | Out-String
+    }
+    function RtDumpOrNull() { try { (& $dodona ui dump --workspace $tp4.Id) | Out-String | ConvertFrom-Json } catch { $null } }
+    # TRIMMED, and tolerant, for the two reasons the `Q3` helper above records: Invoke-StoreSql
+    # ends in `| Out-String` so every answer arrives with a trailing newline, and a store this
+    # section reads before the table exists must fail the CHECK rather than abort the suite.
+    function Q4([string]$sql) { try { "$(Invoke-StoreSql $tp4.Store $sql)".Trim() } catch { '' } }
+    $routeUi = Start-Process $ui -ArgumentList "--workspace", $tp4.Id, "--test-window" -PassThru
+    Wait-Until { $null -ne (RtDumpOrNull) } 30000 'the two-project window answers ui dump' | Out-Null
+
+    # ---- the sentence is held, and the WINDOW is what says so ----------------------------
+    $rtHeld = Rt @('input', 'make the header quite a lot taller')
+    Check 'an_ambiguous_sentence_is_held_rather_than_placed' (($rtHeld -replace '\s+', ' ') -match 'held: not sure which project') `
+        ($rtHeld -replace '\s+', ' ')
+    Wait-Until { ($script:r4 = RtDumpOrNull) -and $script:r4.ask -and $script:r4.ask.shown -eq $true } `
+        25000 'the window renders the routing question' | Out-Null
+    $r4 = RtDumpOrNull
+    # THE GAP, STATED AS AN ASSERTION: before this, `ask` was null here forever while the store
+    # carried a `routing_decisions` row at tier `ask`. The rung asked nobody.
+    Check 'the_routing_question_reaches_the_operators_window' `
+        ($null -ne $r4 -and $null -ne $r4.ask -and $r4.ask.shown -eq $true) `
+        ($(if ($null -eq $r4) { 'the ui pipe did not answer' } else { $r4.ask | ConvertTo-Json -Compress }))
+    Check 'the_routing_question_asks_which_project' ("$($r4.ask.question)" -match 'Which project') "$($r4.ask.question)"
+    $r4vals = @($r4.ask.choices).value
+    Check 'the_routing_question_offers_the_projects' `
+        (($r4vals -contains $tp4.ALeaf) -and ($r4vals -contains $tp4.BLeaf)) ($r4vals -join ',')
+    # A routing question names PROJECTS, never paths to navigate (CLAUDE.md §3.1). Same assertion
+    # `the_ask_offers_no_filesystem_navigation` makes about the repo question, on the source that
+    # actually enumerates folders -- which is the one that could regress into a file picker.
+    Check 'the_routing_question_offers_no_filesystem_navigation' `
+        ($r4vals.Count -ge 2 -and @($r4vals | Where-Object { $_ -match '[\\/]' -or $_ -match '^[A-Za-z]:' }).Count -eq 0) `
+        ($r4vals -join ',')
+    # No lane yet, and this is the invariant P3.A had to preserve: the question exists, the work
+    # does not. `brain:held_input_invents_no_lane` says it for the lane ladder; this says it for
+    # the project ladder, from the outside, with a window open on it.
+    Check 'a_rendered_routing_question_still_invents_no_lane' ((Q4 "SELECT COUNT(*) FROM lanes WHERE role='work'") -eq '0') `
+        ((Q4 "SELECT id, title, role, cwd FROM lanes") -replace '\s+', ' ')
+    # A real button, named for the value the verb takes -- the mechanical link between the pixels
+    # and the answer path (P4.3). The repo question's buttons are `ask:yes`/`ask:no`; a routing
+    # question's are named for the projects, and if the choices were not clickable affordances the
+    # overlay would be a status line telling a person to go and type.
+    Reset-UiWindow
+    # The title is `Dodona — <workspace name>`, and the pattern is deliberately NOT `Dodona*`:
+    # earlier sections leave other Dodona windows around, and matching one of those would look
+    # like this check failing when it had never found the right window.
+    $rtWin = UiWindow "Dodona*$($tp4.Name)*"
+    Check 'a_project_choice_is_a_real_button_a_person_can_click' `
+        ($null -ne $rtWin -and $null -ne (ByName $rtWin "ask:$($tp4.BLeaf)")) `
+        "no automation element named ask:$($tp4.BLeaf) -- the projects are not clickable"
+
+    # ---- ONE ANSWER PATH: `ui answer` is the button's own method ---------------------------
+    # This verb calls MainWindow.AnswerAsk, which is what AskChoice_Click calls, which sends the
+    # same `{cmd:"answer", id, answer}` the CLI's `dodona answer` sends. So a green here is a
+    # statement about the code the BUTTON runs, not about a second headless path beside it.
+    # THE SECOND project, never the first: A is `_primary`, which is what every spawn site
+    # answered before the projects work, so asserting A is an assertion no build can fail.
+    $rtAns = (& $dodona ui answer $tp4.BLeaf --workspace $tp4.Id) | Out-String
+    Check 'the_ui_answer_verb_reaches_a_routing_question' ($rtAns -match 'answered') $rtAns.Trim()
+    Wait-Until { (Q4 "SELECT COUNT(*) FROM lanes WHERE role='work'") -eq '1' } 30000 'answering opens the lane' | Out-Null
+    Check 'answering_in_the_window_delivers_the_held_sentence_to_the_chosen_project' `
+        ((Q4 "SELECT COUNT(*) FROM lanes WHERE role='work'") -eq '1' -and
+         (Q4 "SELECT cwd FROM lanes WHERE role='work' ORDER BY id DESC LIMIT 1") -eq $tp4.B) `
+        "lanes=$((Q4 'SELECT id, title, cwd FROM lanes WHERE role=''work''') -replace '\s+', ' ') want='$($tp4.B)'"
+    Wait-Until { (Q4 "SELECT COUNT(*) FROM pane_events WHERE kind='user_input' AND body LIKE '%quite a lot taller%'") -ge '1' } `
+        25000 'the held sentence reaches the lane it created' | Out-Null
+    Check 'the_words_the_operator_typed_are_what_the_agent_receives' `
+        ((Q4 "SELECT COUNT(*) FROM pane_events WHERE kind='user_input' AND body LIKE '%quite a lot taller%'") -eq '1') `
+        ((Q4 "SELECT lane_id, kind, body FROM pane_events WHERE kind='user_input'") -replace '\s+', ' ')
+    # The overlay goes away because the ROW closed, not because it was told to (m3 doctrine).
+    Wait-Until { ($script:r4 = RtDumpOrNull) -and $null -eq $script:r4.ask } 20000 'the routing overlay follows its row' | Out-Null
+    Check 'the_routing_overlay_closes_when_its_row_closes' ($null -eq (RtDumpOrNull).ask) `
+        ((RtDumpOrNull).ask | ConvertTo-Json -Compress)
+
+    (& $dodona ui close --workspace $tp4.Id) | Out-Null
+    Wait-Until { $null -eq (RtDumpOrNull) } 20000 'the routing window is gone' | Out-Null
+    (& $dodona stop-daemon --workspace $tp4.Id) | Out-Null
 }
 finally {
     # 'Continue' FOR THE WHOLE CLEANUP, and this is not a style choice -- it is the fix for a
@@ -847,7 +952,7 @@ finally {
     # nothing. 59 checks were computed and thrown away, silently, on 2026-08-19's baseline run.
     # A cleanup block must never be abortable by a diagnostic line.
     $ErrorActionPreference = 'Continue'
-    foreach ($proc in $uiProc, $shellUi, $bareUi, $askUi, $daemon, $daemon2, $daemon3) {
+    foreach ($proc in $uiProc, $shellUi, $bareUi, $askUi, $routeUi, $daemon, $daemon2, $daemon3, $daemon4) {
         if ($proc -and -not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force } catch { } }
     }
     # The swap successor is a NEW pid the variables above never saw — resolve it by the
@@ -864,6 +969,7 @@ finally {
     Stop-WorkspaceShims $wsDir
     if ($ws2) { Stop-WorkspaceShims $ws2.Dir }
     if ($ws3) { Stop-WorkspaceShims $ws3.Dir }
+    if ($tp4) { Stop-WorkspaceShims $tp4.Dir }
     Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
     # The shell's input box starts a concierge on demand (§4: boot-to-zero must not be a dead
     # end), so this suite is responsible for stopping it -- a concierge is machine-global, and

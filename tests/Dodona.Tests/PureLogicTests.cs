@@ -1251,6 +1251,34 @@ public class ProjectLadderTests
     [Fact]
     public void A_single_word_handle_is_never_a_spoken_match() =>
         Assert.False(ProjectLadder.Spoken("start on alpha", "alpha"));
+
+    /// <summary>P3.A: an answer arriving from outside this process — the cheap tier's reply, or the
+    /// operator's own answer to a rung-4 question — becomes a project only through the closed list.
+    /// One resolver for both, because two copies of "does this name mean one of these projects"
+    /// drift the moment one of them learns something.</summary>
+    [Fact]
+    public void A_project_name_resolves_back_to_its_project_by_leaf_or_by_path()
+    {
+        Assert.Equal(Beta, ProjectLadder.ByName(Two, "project-zed"));
+        Assert.Equal(Beta, ProjectLadder.ByName(Two, "PROJECT-ZED"));
+        Assert.Equal(Beta, ProjectLadder.ByName(Two, @"c:\WS\project-zed\"));
+        Assert.Equal(Alpha, ProjectLadder.ByName(Two, "  alpha  "));
+    }
+
+    /// <summary>
+    /// A name the list does not contain is null, and the caller must REFUSE. Two cases, both real:
+    /// a model that invented a folder must not be able to place an agent in it, and a question
+    /// answered after its project was detached must not deliver work into somebody else's tree
+    /// (trap T4 on the answer path).
+    /// </summary>
+    [Theory]
+    [InlineData("atlantis")]
+    [InlineData("alph")]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void A_name_no_project_answers_to_resolves_to_nothing(string? name) =>
+        Assert.Null(ProjectLadder.ByName(Two, name));
 }
 
 public class LiveProjectEvidenceTests
@@ -1406,5 +1434,41 @@ public class AskTests
         Assert.True(Ask.IsFreeForm("  NEW:harbour"));
         Assert.False(Ask.IsFreeForm("harbour"));
         Assert.False(Ask.IsFreeForm(null));
+    }
+
+    /// <summary>P3.A: the routing question's own candidates. Same round trip as the repo
+    /// question's — written by the daemon, parsed by the window, held to it here.</summary>
+    [Fact]
+    public void A_route_questions_candidates_parse_back_to_the_projects_it_offered()
+    {
+        var choices = Ask.Choices(Ask.RouteCandidates(new[] { "engine", "tools" }));
+        Assert.Equal(new[] { "engine", "tools" }, choices.Select(c => c.Value));
+        Assert.Equal(new[] { "engine", "tools" }, choices.Select(c => c.Label));
+        // Recency order is the daemon's (ProjectsByRecency), and the first one says why it is
+        // first: an ordering the operator cannot see is one they have to guess at.
+        Assert.False(string.IsNullOrEmpty(choices[0].Why));
+        Assert.Null(choices[1].Why);
+    }
+
+    /// <summary>
+    /// CLAUDE.md §3.1, and the reason this takes NAMES rather than paths: a routing question names
+    /// projects, never somewhere to navigate. `ui-use`'s `the_ask_offers_no_filesystem_navigation`
+    /// asserts the same property on the rendered choices; this is the source it renders.
+    /// </summary>
+    [Fact]
+    public void A_route_question_carries_no_path_anywhere_in_it()
+    {
+        var blob = Ask.RouteCandidates(new[] { "engine", "project-zed" });
+        Assert.DoesNotContain(@"\", blob);
+        Assert.DoesNotContain("/", blob);
+        Assert.DoesNotContain(":\\", blob);
+    }
+
+    /// <summary>A workspace whose projects were all detached between the ask and the render is a
+    /// question with no buttons, not a crash — the same totality every other blob gets.</summary>
+    [Fact]
+    public void A_route_question_with_no_candidates_is_no_choices_and_never_an_exception()
+    {
+        Assert.Empty(Ask.Choices(Ask.RouteCandidates(Array.Empty<string>())));
     }
 }

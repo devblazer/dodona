@@ -1022,6 +1022,78 @@ PRAGMA user_version = 8;
     #   live    a project has a lane in  code when exactly one does; the cheap tier when several
     #   ask     nothing to go on         HOLD the sentence -- no lane, nothing delivered
     #
+    # ---- FIRST, THE PROPERTY THE WHOLE PLAN RESTS ON: ONE PROJECT WRITES NOTHING NEW -----
+    # Phase 3 left this undone and said so: the one-project workspace is identical BY
+    # CONSTRUCTION (`ProjectLadder.Decide` answers `only` before the liveness read, the registry
+    # read and any model, and `project_chosen` is not written) and identical BY THE ELEVEN SUITES
+    # that run one-project workspaces staying green -- but NOTHING COUNTED THE EVENTS, so a future
+    # rung inserted AHEAD of the `only` short-circuit would not be caught by name. The operator's
+    # own machine is a one-project workspace; this is the check for it.
+    #
+    # A WHITELIST, NOT A COUNT, and that is the point: any event kind this path did not write
+    # before -- including one that does not exist yet -- appears in the detail string by name. A
+    # plain total would go red for a reason nobody could read.
+    #
+    # THE WINDOW IS DETERMINISTIC ON PURPOSE. `brain=false` and `compressors=0`, so nothing
+    # fires-and-forgets into the events table behind the input (BrainReview would spawn a
+    # manager whose own events land whenever they land), and DODONA_NO_AUTOSTART means no
+    # warm-up. No live lanes either, so the input takes RouteInput's first-sentence path --
+    # code only, no classifier, nothing to time out.
+    #
+    # WHAT THIS DELIBERATELY DOES NOT SEE: `ProjectPaths()` is one registry read per typed
+    # sentence that a one-project workspace did not pay before this phase. It writes no event and
+    # prints nothing (it degrades to the first project if the registry will not open), so it is
+    # invisible here and stays recorded in the code comment that admits it, rather than being
+    # glossed as byte-for-byte.
+    $oneProj = Join-Path (Use-SuiteTemp) ("dodona-one-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force "$oneProj\src" | Out-Null
+    Set-Content "$oneProj\src\only.cs" "// the only project"
+    Set-Content "$oneProj\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0; brain = $false } | ConvertTo-Json)
+    DodonaBare @("workspace-create", "--name", "onlyone", "--member", $oneProj) | Out-Null
+    # ConvertFrom-Json emits a JSON ARRAY as ONE pipeline item in PS 5.1, so it lands in a
+    # variable before anything filters it (CLAUDE.md 0.2).
+    $oneAll = (DodonaBare @("workspaces", "--json")) | ConvertFrom-Json
+    $oneId = (@($oneAll) | Where-Object { $_.name -eq 'onlyone' } | Select-Object -First 1).id
+    $oneW = (& $dodona where --workspace $oneId --json) | Out-String | ConvertFrom-Json
+    StartDaemonFor $oneId | Out-Null
+    function One([string[]]$a) { DodonaBare ($a + @('--workspace', $oneId)) }
+    function OneRows([string]$sql) { Invoke-StoreSql $oneW.store $sql }
+    $oneMax = [int](OneRows "SELECT COALESCE(MAX(id),0) FROM events").Trim()
+    One @("input", "make the header quite a lot taller") | Out-Null
+    Wait-Until { ([int](OneRows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()) -eq 1 } `
+        30000 'the one-project workspace opens its lane' | Out-Null
+    # Wait for the TURN TO FINISH, not just for the lane row: reading the event kinds while the
+    # turn is still in flight would measure a moment earlier than the one this check is about.
+    # The store, not `tail`, because this is a claim about rows and `tail` renders them.
+    Wait-Until { ([int](OneRows "SELECT COUNT(*) FROM pane_events WHERE kind='result'").Trim()) -ge 1 } `
+        30000 'the only project''s lane finishes its turn' | Out-Null
+    $oneKinds = @((OneRows "SELECT DISTINCT kind FROM events WHERE id > $oneMax ORDER BY kind") -split "`r?`n" |
+                  ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    # Every kind a one-project typed sentence wrote before the projects work existed: a lane being
+    # born (`shim_spawned`, `lane_started`, `lane_connected`, `lane_config`), the policy that chose
+    # its model, the fact that it was auto-created, and the sentence being said to it. Not one of
+    # them is about WHICH project, because with one project there is nothing to be about.
+    #
+    # ADDING TO THIS LIST IS A DECISION ABOUT THE OPERATOR'S OWN MACHINE, not a test fix. If a rung
+    # ever lands ahead of the `only` short-circuit, its event shows up in the detail below by name
+    # and this line is where somebody has to justify it.
+    $oneAllowed = @('lane_auto_created', 'lane_config', 'lane_connected', 'lane_started',
+                    'policy_choice', 'say', 'shim_spawned')
+    $oneUnexpected = @($oneKinds | Where-Object { $oneAllowed -notcontains $_ })
+    # `-ge 1` FIRST, deliberately: an empty set contains no unexpected kind either, so without it
+    # this passes against a window that never opened -- the vacuous shape `dev prove` exists for.
+    Check 'a_one_project_workspace_writes_no_project_ladder_event' `
+        ($oneKinds.Count -ge 1 -and $oneUnexpected.Count -eq 0) `
+        "kinds=[$($oneKinds -join ',')] outside the allowed set=[$($oneUnexpected -join ',')]"
+    # ...and it asks nothing. One project is one answer, so there is no question to open -- the
+    # `questions` table must be untouched, which is also what `ui-use`'s
+    # `a_one_project_workspace_is_never_asked_anything` asserts from the window's side.
+    Check 'a_one_project_workspace_opens_no_question' `
+        ((OneRows "SELECT COUNT(*) FROM questions").Trim() -eq '0') `
+        ((OneRows "SELECT id, kind, state, subject FROM questions") -replace '\s+', ' ')
+    Stop-WorkspaceShims $oneW.dir
+    StopDaemonFor $oneId
+
     # A FRESH WORKSPACE, not the one above, and that is deliberate. The Phase 2 section leaves
     # live lanes in both projects and a detached third, so `only`, `named` and the single-live
     # rung could not be told apart in it -- and a rung test that cannot fail for the right
@@ -1066,6 +1138,65 @@ PRAGMA user_version = 8;
     Check 'the_project_hold_says_how_to_answer_it' `
         ((P3Rows "SELECT body FROM pane_events WHERE body LIKE '%which project%' ORDER BY id DESC LIMIT 1") -match 'lane-start') `
         (P3Rows "SELECT body FROM pane_events WHERE body LIKE '%which project%' ORDER BY id DESC LIMIT 1")
+
+    # ---- P3.A: THE `ask` RUNG NOW ASKS SOMEBODY ------------------------------------------
+    # THE GAP THIS CLOSES. Phase 3 built this rung and Phase 4 built the overlay that renders a
+    # `questions` row, and NOTHING CONNECTED THEM for two days: the hold wrote a
+    # `routing_decisions` row at tier `ask`, a `project_unknown` event and an announcement, and
+    # the operator's window never showed a routing question at all. Every check above this line
+    # passed the whole time. "Ask" asked nobody.
+    #
+    # THE ROW IS IN THE WORKSPACE STORE, and that is D-L11 rather than convenience: a workspace
+    # daemon may never read the concierge's store (§2), and every suite -- plus any machine whose
+    # concierge is asleep -- runs daemons without a concierge at all. Scope is WHICH STORE the row
+    # is in, which is why no scope column was needed anywhere. The query below is against this
+    # workspace's own store, so it is also the assertion that no concierge was involved.
+    #
+    # The `questions` table has existed since Phase 4, so this can fail against HEAD without
+    # taking the suite down with it -- unlike a check naming a column a migration adds, which
+    # `Invoke-StoreSql` correctly turns into a throw and `dev prove` then reports as MISSING.
+    Wait-Until { ([int](P3Rows "SELECT COUNT(*) FROM questions WHERE kind='route' AND state='open'").Trim()) -ge 1 } `
+        20000 'the hold opens a route question' | Out-Null
+    $q4 = (P3Rows "SELECT id FROM questions WHERE kind='route' AND state='open' ORDER BY id LIMIT 1").Trim()
+    Check 'the_project_hold_opens_a_question_row' ($q4 -match '^\d+$') `
+        "questions=$((P3Rows 'SELECT id, kind, state, subject FROM questions') -replace '\s+', ' ')"
+    # '-1' when there is no row, so every query below stays syntactically valid: a missing id must
+    # make the checks that follow FAIL, never make `Invoke-StoreSql` throw and report them MISSING.
+    $q4id = if ($q4 -match '^\d+$') { $q4 } else { '-1' }
+    # THE HELD SENTENCE, VERBATIM. `subject` is the only place it exists between the hold and the
+    # answer, and answering DELIVERS it -- so a truncated or reworded subject would silently
+    # deliver something the operator never typed. The rendered `input` column is the one that
+    # gets shortened, because that one is read rather than replayed.
+    Check 'the_question_carries_the_held_sentence_whole' `
+        ((P3Rows "SELECT subject FROM questions WHERE id=$q4id").Trim() -eq 'make the header quite a lot taller') `
+        ((P3Rows "SELECT input, subject FROM questions WHERE id=$q4id") -replace '\s+', ' ')
+    # NAMES, NOT PATHS (CLAUDE.md §3.1, operator directive: no folder UI, ever). A routing question
+    # names projects; it does not offer somewhere to navigate. `ui-use`'s
+    # `the_ask_offers_no_filesystem_navigation` asserts the same property on the rendered choices;
+    # this asserts it where the daemon writes it, which is the only place it can be guaranteed.
+    $q4blob = (P3Rows "SELECT candidates FROM questions WHERE id=$q4id").Trim()
+    $q4parsed = $null
+    try { $q4parsed = $q4blob | ConvertFrom-Json } catch { }
+    $q4vals = @(@($q4parsed).id | Where-Object { $_ })
+    Check 'the_question_offers_every_project_by_name' `
+        (($q4vals -contains $p3.ALeaf) -and ($q4vals -contains $p3.BLeaf)) "ids=[$($q4vals -join ',')] blob=$q4blob"
+    Check 'the_question_offers_no_filesystem_navigation' `
+        ($q4vals.Count -ge 2 -and @($q4vals | Where-Object { $_ -match '[\\/]' -or $_ -match '^[A-Za-z]:' }).Count -eq 0) `
+        "ids=[$($q4vals -join ',')]"
+    # AND STILL NO LANE. The question exists; the work does not. Answering is what creates it
+    # (asserted at the end of this section), which is what keeps `held_input_invents_no_lane`'s
+    # guarantee true one level down -- an ask that pre-created a lane "ready to receive" would
+    # have put an agent in a folder nobody chose, which is the whole error this rung avoids.
+    Check 'opening_a_question_still_invents_no_lane' ((P3Work) -eq $held4Before) "before=$held4Before after=$(P3Work)"
+    # A near-miss answer is REFUSED and the question STAYS OPEN. Asking exists because guessing was
+    # wrong, so the one moment the operator actually told us the truth is the worst possible moment
+    # to start inferring -- and a refusal that closed the row would lose the held sentence for good,
+    # because `QuestionAnswer` is guarded on `state='open'` and there is no re-opening it.
+    $bogus4 = P3 @("answer", $q4id, "atlantis")
+    Check 'a_route_answer_naming_nothing_offered_is_refused' `
+        ((($bogus4 -replace '\s+', ' ') -match 'not one of the answers') -and
+         (P3Rows "SELECT state FROM questions WHERE id=$q4id").Trim() -eq 'open') `
+        "out=$($bogus4 -replace '\s+', ' ') state='$((P3Rows "SELECT state FROM questions WHERE id=$q4id").Trim())'"
 
     # ---- rung 3: THE SENTENCE NAMES A PROJECT. Code, free, and no model is asked ----------
     P3 @("input", "tidy up the changelog in $($p3.BLeaf)") | Out-Null
@@ -1216,6 +1347,50 @@ PRAGMA user_version = 8;
         (([int](P3Rows "SELECT COUNT(*) FROM events WHERE kind='project_chosen'").Trim()) -gt $opChosen) `
         "project_chosen went $opChosen -> $([int](P3Rows "SELECT COUNT(*) FROM events WHERE kind='project_chosen'").Trim())"
     $env:DODONA_NO_AUTOSTART = "1"
+
+    # ---- P3.A part 2: ANSWERING THE QUESTION IS WHAT CREATES THE LANE -------------------
+    # Deliberately at the END of this section rather than beside the question it answers: this
+    # ADDS a live lane, and the rungs above depend on which projects hold live lanes -- a check
+    # that quietly changed the fixture for the eight checks after it would be the concierge
+    # suite's `$names[1]` trap in a new place.
+    #
+    # `$q4` was opened by the rung-4 hold at the top of this section and has been open ever since,
+    # which is itself the point: a question is a ROW, so it outlives the daemon restart the
+    # operator-path block just did. A pending question that evaporated would make asking worse
+    # than guessing.
+    #
+    # THE SECOND PROJECT, never the first. A is `_primary`, so "the lane landed in A" is an
+    # assertion no build can fail -- the rule four VACUOUS verdicts taught this section.
+    $ansBefore = P3Work
+    $ans4 = P3 @("answer", $q4id, $p3.BLeaf)
+    Wait-Until { (P3Work) -eq $ansBefore + 1 } 30000 'answering the route question opens a lane' | Out-Null
+    $aLane = P3NewestWorkLane
+    $aLaneId = if ($aLane -match '^\d+$') { $aLane } else { '-1' }
+    # THE LANE COUNT IS PART OF THE ASSERTION, not only of the wait: this section keeps choosing
+    # B, so on a build that delivered nothing "the newest work lane" is the PREVIOUS one -- which
+    # is also in B, and a cwd-only check would go green on the failure it exists to catch.
+    Check 'answering_the_project_question_opens_the_lane_there' `
+        (((P3Work) -eq $ansBefore + 1) -and ((P3Cwd $aLaneId) -eq $p3.B)) `
+        "out=$($ans4 -replace '\s+', ' ') lanes=$ansBefore->$(P3Work) cwd='$(P3Cwd $aLaneId)' want='$($p3.B)'"
+    # ...AND THE HELD SENTENCE ITSELF ARRIVES. A lane existing is not the claim: delivering the
+    # words the operator typed twenty checks ago is, and `questions.subject` is the only place
+    # they were kept. A route answer that opened an empty lane would pass the check above.
+    Check 'the_held_sentence_itself_reaches_the_new_lane' `
+        (([int](P3Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$aLaneId AND kind='user_input' AND body LIKE '%quite a lot taller%'").Trim()) -ge 1) `
+        ((P3Rows "SELECT kind, body FROM pane_events WHERE lane_id=$aLaneId") -replace '\s+', ' ')
+    # Every rung that places a lane records which evidence decided. "The operator said so" is
+    # evidence like any other, and without this row the ONE rung a person actually answered would
+    # be the only rung with nothing saying why the lane is where it is.
+    Check 'the_answered_rung_records_that_the_operator_decided' `
+        ((P3Chosen) -match 'rung=answered how=operator') (P3Chosen)
+    # Two routing rows for one sentence, and both are true: it WAS asked about (tier `ask`, no
+    # lane), and it WAS then delivered (tier `answered`, to the lane the answer created).
+    Check 'the_answered_delivery_joins_the_routing_chain' `
+        ((P3Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 1") -match 'answered\|operator') `
+        (P3Rows "SELECT tier, confidence, delivered_lane FROM routing_decisions ORDER BY id DESC LIMIT 1")
+    Check 'answering_closes_the_question_row' `
+        ((P3Rows "SELECT state, answer FROM questions WHERE id=$q4id") -match "answered\|$([regex]::Escape($p3.BLeaf))") `
+        ((P3Rows "SELECT state, answer FROM questions WHERE id=$q4id") -replace '\s+', ' ')
 
     Stop-WorkspaceShims $p3.Dir
     DodonaBare @("stop-daemon", "--workspace", $p3.Id) | Out-Null

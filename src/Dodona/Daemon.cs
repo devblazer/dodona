@@ -1770,8 +1770,8 @@ sealed class Daemon
             }
             case "answer":
             {
-                foreach (var line in AnswerQuestion(e.GetProperty("id").GetInt64(),
-                                                    e.GetProperty("answer").GetString() ?? ""))
+                foreach (var line in await AnswerQuestion(e.GetProperty("id").GetInt64(),
+                                                          e.GetProperty("answer").GetString() ?? ""))
                     w.WriteLine(line);
                 break;
             }
@@ -2605,7 +2605,7 @@ sealed class Daemon
     /// guessing was wrong; a fuzzy answer would reintroduce the guess at the one moment the
     /// operator had actually told us the truth.
     /// </summary>
-    List<string> AnswerQuestion(long id, string answer)
+    async Task<List<string>> AnswerQuestion(long id, string answer)
     {
         var lines = new List<string>();
         var q = _store.Question(id);
@@ -2621,9 +2621,35 @@ sealed class Daemon
             return lines;
         }
 
+        // A ROUTE ANSWER IS RESOLVED BEFORE THE ROW IS CLOSED, and that ordering is the whole
+        // guard. `QuestionAnswer` is guarded on `state='open'`, so there is no re-opening a
+        // question -- and a route question closed without delivering loses the held sentence,
+        // which is the one thing this rung exists to protect. Every other kind is safe to close
+        // first because a failed action leaves nothing unrecoverable behind.
+        string? answeredProject = null;
+        if (q.Kind == Ask.KindRoute)
+        {
+            answeredProject = ProjectLadder.ByName(ProjectPaths(), picked.Value);
+            if (answeredProject is null)
+            {
+                // Only reachable if the project was detached between the ask and the answer --
+                // trap T4 arriving on the answer path. Say what un-sticks it and leave the
+                // question open, so the sentence is still deliverable to a project that is here.
+                lines.Add($"error: \"{picked.Label}\" is no longer a project of workspace {_wsName} " +
+                          $"(projects here: {string.Join(", ", ProjectPaths().Select(ProjectLadder.Leaf))}) — " +
+                          $"question {id} is still open; answer it with one of those");
+                _store.Event("question_answer_refused", null, $"question {id} kind={q.Kind} answer={picked.Value}: project gone");
+                return lines;
+            }
+        }
+
         // `withdrawn`, not `answered`, for a declined question: the two are different facts and
         // a later "why is there no repo" wants to know which one happened.
-        var declined = picked.Value.Equals("no", StringComparison.OrdinalIgnoreCase);
+        //
+        // A ROUTE QUESTION HAS NO DECLINATION, and excluding it is not tidiness: its choices are
+        // project names, so a project in a folder called `no` would otherwise have a perfectly
+        // good answer recorded as `withdrawn` and its sentence silently never delivered.
+        var declined = q.Kind != Ask.KindRoute && picked.Value.Equals("no", StringComparison.OrdinalIgnoreCase);
         _store.QuestionAnswer(id, picked.Value, declined ? "withdrawn" : "answered");
         _store.Event("question_answered", null, $"question {id} kind={q.Kind} -> {picked.Value}");
         lines.Add($"answered: question {id} -> {picked.Label}");
@@ -2640,11 +2666,29 @@ sealed class Daemon
                 Announce("[dodona] no repo made — lanes keep working without git; only tickets need one");
                 lines.Add("nothing was created; ask again by creating a ticket");
                 break;
+            // ROUTING'S RUNG 4 (LOCATIONS-PLAN P3.A, part 2). The sentence has been sitting in
+            // `subject` undelivered since the ladder held it; the operator has now said where, so
+            // deliver it — through `SpawnForAsync`, the ONE spawn path, with the answered project
+            // forced past a ladder that has already admitted it does not know.
+            //
+            // THE LANE IS CREATED HERE AND NOWHERE EARLIER. `brain:held_input_invents_no_lane` and
+            // `workspace:a_held_sentence_invents_no_lane` are the two checks that hold the other
+            // half of it: holding invents nothing, and answering is what makes a lane exist.
+            case Ask.KindRoute:
+            {
+                var (laneId, msg, choice) = await SpawnForAsync(q.Subject, null, null, answeredProject);
+                if (laneId < 0) { lines.Add(msg); break; }
+                // The routing row the hold could not write: it recorded tier `ask` with no lane,
+                // and this is the same sentence finally reaching one. Two rows for one sentence is
+                // the honest record — it WAS asked about, and it WAS then delivered.
+                _store.RoutingInsert(q.Subject, "answered", laneId, laneId, "operator");
+                lines.Add($"delivered to {msg} in {ProjectLadder.Leaf(answeredProject!)} " +
+                          $"on {choice.Describe} — undo: dodona lane-stop {laneId}");
+                break;
+            }
             // A kind with no case here answers the ROW and does nothing else, which is the right
             // default for a question that was only ever "tell me which one" — the caller reads the
-            // answer off the row. The next one to arrive is routing's rung 4 (LOCATIONS-PLAN P3.A):
-            // it needs a case, because delivering the held sentence to the chosen project is
-            // `SpawnForAsync`, which belongs to Phase 3.
+            // answer off the row.
         }
         return lines;
     }
@@ -2679,6 +2723,41 @@ sealed class Daemon
         lines.Add(text);
         lines.Add($"answer it in the window, or: dodona answer {id} yes   (or: dodona answer {id} no)");
         return lines;
+    }
+
+    /// <summary>
+    /// Open (or re-find) the "which project is this sentence for?" question — LOCATIONS-PLAN
+    /// P3.A, part 1. Returns its id, which every announcement and reply carries so the sentence
+    /// can be released from anywhere.
+    ///
+    /// **The candidates are NAMES.** No paths reach the question row: §3.1 has no folder UI, and
+    /// a routing question names projects rather than offering somewhere to browse. The answer
+    /// comes back as a name and <see cref="ProjectLadder.ByName"/> resolves it against the
+    /// projects this workspace still has.
+    ///
+    /// **`subject` is the held sentence, whole and untruncated**, because answering DELIVERS it.
+    /// That is the one column that must survive verbatim; the `input` column is the question a
+    /// person reads, so it is the one that gets shortened.
+    ///
+    /// **Idempotent on (kind, subject)**, for the reason <see cref="AskForRepo"/> is: the overlay
+    /// renders one question at a time, so a second identical row would appear the instant the
+    /// first was answered and read as the system not having listened. Two DIFFERENT held
+    /// sentences are two genuine questions and do queue — oldest first, which is the order the
+    /// uncertainty was created in.
+    /// </summary>
+    long AskWhichProject(string text, IReadOnlyList<string> candidates)
+    {
+        var existing = _store.OpenQuestions()
+            .FirstOrDefault(q => q.Kind == Ask.KindRoute &&
+                                 q.Subject.Equals(text, StringComparison.Ordinal));
+        if (existing is not null) return existing.Id;
+        var names = candidates.Select(ProjectLadder.Leaf).ToList();
+        var id = _store.QuestionOpen($"Which project is “{Truncate(text, 60)}” for?",
+                                     Ask.RouteCandidates(names), Ask.KindRoute, text);
+        _store.Event("question_opened", null,
+            $"question {id} kind={Ask.KindRoute} candidates={(names.Count == 0 ? "none" : string.Join(",", names))} " +
+            $"subject={Truncate(text, 80)}");
+        return id;
     }
 
     /// <summary>`RepoInitOp` writes to a pipe; an answer needs its words as a list. One buffer
@@ -3609,6 +3688,18 @@ sealed class Daemon
         // NOTHING has been delivered yet, and that is the point. Guessing here is the one
         // mistake that cannot be taken back, so the ladder's top rung is a question.
         var laneList = string.Join("\n", work.Select(l => $"- {l.Title} (lane {l.Id})"));
+        // THE FOCUSED LANE'S OWN PROJECT ASKS ITS OWN PROJECT'S MANAGER (Phase 5, handed to
+        // Phase 3 as prose). This call site passed the default -- the workspace's FIRST project --
+        // while the fact sheet it sends describes the focused lane and its siblings: project B's
+        // lanes reasoned about by project A's manager, which is the cross-project confusion the
+        // projects work removed everywhere else it could reach. `BrainReview` already resolves the
+        // reviewed lane's own registration and this follows that shape exactly.
+        //
+        // `RegistrationKey` returns "" for a work lane in a folder no project owns, and
+        // `BrainProject` turns that back into the first project -- so a workspace with one project
+        // is byte-for-byte unchanged, which is the property every phase of this plan is measured
+        // against.
+        var escalationProject = RegistrationKey(focusedRow, ProjectPaths());
         var hi = await AskBrainHiAsync(
             "Decide where one line of operator input belongs in a multi-agent orchestrator.\n" +
             FactSheet(text, work, focusedRow) +
@@ -3616,7 +3707,8 @@ sealed class Daemon
             "An existing lane keeps it only when the input clearly continues that lane's thread: either it is " +
             "aimed at work that lane is doing now, or it is a small correction to what that lane just finished.\n" +
             "Reply ONLY one line of JSON: {\"kind\":\"generic|addendum|new-task|unclear\",\"target\":\"<LANE TITLE for addendum>\"," +
-            "\"confidence\":\"high|medium|low\",\"reason\":\"<=60 chars\"}");
+            "\"confidence\":\"high|medium|low\",\"reason\":\"<=60 chars\"}",
+            escalationProject);
 
         string? hKind = null, hTarget = null, hReason = "";
         var hConf = "low";
@@ -3896,9 +3988,11 @@ sealed class Daemon
             var conf = d.RootElement.TryGetProperty("confidence", out var c) ? c.GetString() ?? "low" : "low";
             _store.Event("classified_project", routerId, $"project={name} confidence={conf} input={Truncate(text, 80)}");
             if (conf == "low" || name is null or "" or "none") return null;
-            return candidates.FirstOrDefault(x =>
-                ProjectLadder.Leaf(x).Equals(name, StringComparison.OrdinalIgnoreCase) ||
-                x.Equals(name, StringComparison.OrdinalIgnoreCase));
+            // ONE name->project resolver, in ProjectLadder, shared with the operator's own answer
+            // to a rung-4 question (P3.A). This was an inline FirstOrDefault; two copies of "does
+            // this name mean one of these projects" drift the moment one of them learns something,
+            // which is why Concierge.Mentions moved into ProjectLadder as well.
+            return ProjectLadder.ByName(candidates, name);
         }
         catch { _store.Event("classifier_failed", routerId, Truncate(reply, 120)); return null; }
     }
@@ -3915,14 +4009,31 @@ sealed class Daemon
     /// same way by every caller (`if (id &lt; 0) return msg`), which is why the held case can be
     /// reported here — the alternative was a second return channel through four call sites.
     /// </summary>
-    async Task<(long Id, string Msg, Choice Choice)> SpawnForAsync(string text, string? ovModel, string? ovEffort)
+    async Task<(long Id, string Msg, Choice Choice)> SpawnForAsync(string text, string? ovModel, string? ovEffort,
+                                                                  string? answeredProject = null)
     {
         var name = NameFromText(text);
         var choice = Policy.Resolve(text, _config.Rules, _config.Model, _config.Effort, ovModel, ovEffort);
 
         // PHASE 3'S ONE LINE. This used to be `_primary` -- the first project, always, with a
         // comment saying that choosing one from a sentence was Phase 3's job. It is.
-        var pv = await ResolveProjectAsync(text);
+        //
+        // `answeredProject` is the ONE input that skips the ladder, and only ever arrives from
+        // `AnswerQuestion` (P3.A): the operator has just told us which project, so re-running a
+        // ladder that already said "I do not know" would hold the sentence a second time and
+        // discard the answer. It is still validated below like every other rung's answer.
+        ProjectVerdict pv;
+        if (answeredProject is not null)
+        {
+            // Recorded here rather than in ResolveProjectAsync, which never sees this path: every
+            // rung that places a lane writes one `project_chosen` row saying which evidence
+            // decided, and "the operator said so" is evidence like any other. Without it the one
+            // rung a person actually answered would be the one rung with no record.
+            pv = new ProjectVerdict("answered", answeredProject, "operator", Array.Empty<string>());
+            _store.Event("project_chosen", null, $"rung={pv.Rung} how={pv.How} project={pv.Project}");
+        }
+        else pv = await ResolveProjectAsync(text);
+
         if (pv.Project is null)
         {
             // Rung 4: HOLD. No lane row, nothing said to any agent -- the same shape the lane
@@ -3930,11 +4041,22 @@ sealed class Daemon
             var list = pv.Candidates.Count == 0 ? "none" : string.Join(" / ", pv.Candidates.Select(ProjectLadder.Leaf));
             _store.RoutingInsert(text, "ask", null, null, "no-project");
             _store.Event("project_unknown", null, $"how={pv.How} candidates={list} input={Truncate(text, 80)}");
+            // ...AND IT OPENS A QUESTION ROW, which is P3.A and is what makes "ask" mean asking
+            // somebody. Phase 3 built this rung, Phase 4 built the overlay that renders a
+            // `questions` row, and for two days nothing connected them: rung 4 wrote a
+            // `routing_decisions` row at tier `ask`, an event and an announcement, and the
+            // operator's window never showed a routing question at all. The row goes in the
+            // WORKSPACE store (D-L11) -- scope is which store the row is in, and a daemon that
+            // needed a live concierge to ask about its own work would be unable to ask in
+            // precisely the cases routing matters.
+            var qid = AskWhichProject(text, pv.Candidates);
             Announce($"[dodona] not sure which project “{Truncate(text, 45)}” is for — NOT delivered yet. " +
-                     $"Projects here: {list}. Name one in the sentence, or " +
-                     $"`dodona lane-start --title <NAME> --project <path>` and say it there.");
+                     $"Projects here: {list}. Answer in the window, or `dodona answer {qid} <project>`; " +
+                     $"naming one in the sentence works too, as does " +
+                     $"`dodona lane-start --title <NAME> --project <path>`.");
             return (-1, $"held: not sure which project this is for — nothing was delivered. " +
-                        $"Name one of {list} in the sentence, or start a lane with --project.", choice);
+                        $"Answer question {qid} ({list}), name one of them in the sentence, " +
+                        $"or start a lane with --project.", choice);
         }
         // Through TryProject, always: a rung's answer is still only a folder until the thing that
         // validates folders has seen it (P2.1). Belt and braces on purpose -- every candidate here

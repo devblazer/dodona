@@ -142,6 +142,30 @@ static class ProjectLadder
         return null;
     }
 
+    /// <summary>
+    /// A project NAME, resolved back to one of a CLOSED list of projects — the inverse of
+    /// <see cref="Leaf"/>, and the only way an answer from outside this process becomes a folder.
+    ///
+    /// Two callers, deliberately one implementation: the cheap tier's reply on the `classify`
+    /// rung, and the operator's own answer to a rung-4 question (LOCATIONS-PLAN P3.A). Both are
+    /// "a name arrived from somewhere that cannot be trusted to name a real project", and both
+    /// must resolve against a list this workspace still owns or refuse — a model that invents a
+    /// folder must not be able to place an agent in it, and neither must a stale answer to a
+    /// question asked before a `workspace-detach`.
+    ///
+    /// The full path is accepted too, through <see cref="Key"/> rather than string equality, so
+    /// `dodona answer 3 C:\src\Engine` works for someone who typed it and casing never decides.
+    /// Returns null when nothing matches; the caller REFUSES. It does not guess, for the reason
+    /// the whole ask exists.
+    /// </summary>
+    public static string? ByName(IReadOnlyList<string> candidates, string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        var n = name!.Trim();
+        return candidates.FirstOrDefault(x => Leaf(x).Equals(n, StringComparison.OrdinalIgnoreCase))
+            ?? candidates.FirstOrDefault(x => Key(x) == Key(n));
+    }
+
     /// <summary>The folder's own name — what a person says when they mean this project.</summary>
     public static string Leaf(string projectPath) =>
         projectPath.TrimEnd('\\', '/') is var t && t.Length > 0

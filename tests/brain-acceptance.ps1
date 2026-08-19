@@ -535,6 +535,52 @@ try {
             (($scopeA -eq $tp.A -or $scopeA -eq $tp.B) -and ($scopeB -eq $tp.A -or $scopeB -eq $tp.B) -and $scopeA -ne $scopeB) `
             "lane $(Nth $brainIds 0) scope='$scopeA'  lane $(Nth $brainIds 1) scope='$scopeB'"
 
+        # ---- THE ESCALATION ASKS THE FOCUSED LANE'S OWN PROJECT'S MANAGER ----------------
+        # Phase 5 handed this to Phase 3 as prose, deliberately unnumbered. `EnsureBrainAsync` and
+        # `AskBrainHiAsync` take a project, and `BrainReview` already resolves the reviewed lane's
+        # own registration -- but the lane ladder's escalation inside `RouteInput` still passed the
+        # DEFAULT, which is the workspace's first project, while the fact sheet it sends describes
+        # the FOCUSED lane and its siblings. So project B's lanes were reasoned about by project
+        # A's manager: the cross-project confusion the projects work removed everywhere else.
+        #
+        # HOW THIS IS FORCED WITHOUT A MODEL: `routekind:unclear` makes the fake classifier answer
+        # unclear, which is the one verdict that escalates to the expensive tier -- and the
+        # expensive tier is created on demand, so the brain-hi lane that appears is the one this
+        # call site asked for, and its `project` column is the answer.
+        #
+        # PROJECT B, NEVER A. A is `_primary`, so a check asserting A cannot fail against the
+        # build that always answered A -- four VACUOUS verdicts taught this plan that rule.
+        Tp @("router-start", "--child", $fake) | Out-Null
+        Wait-Until { (AsInt (TpRows "SELECT COUNT(*) FROM lanes WHERE role='router' AND state='alive'")) -eq 1 } `
+            25000 'the two-project workspace has a classifier' | Out-Null
+        $escLane = Tp @("lane-start", "--title", "BETAWORK", "--project", $tp.B, "--child", $fake)
+        if ($escLane -notmatch 'lane (\d+)') { throw "lane-start in project B failed: $escLane" }
+        $escLaneId = $Matches[1]
+        Tp @("say", "$escLaneId", "say beta up") | Out-Null
+        Wait-Until { (Tp @("tail", "$escLaneId", "10")) -match 'beta up' } 20000 'the project-B lane answers' | Out-Null
+        Tp @("input", "routekind:unclear hikind:new-task say something ambiguous") | Out-Null
+        Wait-Until { (AsInt (TpTry "SELECT COUNT(*) FROM lanes WHERE role='brain-hi' AND state='alive'")) -ge 1 } `
+            30000 'the escalation creates an expensive-tier manager' | Out-Null
+        # EVERY brain-hi row, not the newest one. The newest would be the wrong question to ask:
+        # the escalated verdict then SPAWNS a lane, whose `BrainReview` escalates in turn and
+        # already passed the right project -- so `ORDER BY id DESC LIMIT 1` could read that second
+        # session and go green against a build where the first one was still scoped to A. The claim
+        # is that NO expensive-tier manager was ever created for project A over project B's work.
+        $hiScopes = (TpTry "SELECT group_concat(project) FROM (SELECT project FROM lanes WHERE role='brain-hi' ORDER BY id)").Trim()
+        Check 'the_escalation_asks_the_focused_lanes_own_projects_manager' `
+            (($hiScopes -match [regex]::Escape($tp.B)) -and ($hiScopes -notmatch [regex]::Escape($tp.A))) `
+            "brain-hi projects=[$hiScopes] want B='$($tp.B)' and never A='$($tp.A)'"
+        # Tidy up before the restart section reads brain counts: the expensive tier, the classifier
+        # and the work lanes are this check's fixture, not the next one's.
+        foreach ($role in 'brain-hi', 'router', 'work') {
+            foreach ($lid in @((TpTry "SELECT id FROM lanes WHERE role='$role' AND state='alive'").Trim() -split "`r?`n" |
+                               Where-Object { $_ -match '^\d+$' })) {
+                Tp @("lane-stop", $lid) | Out-Null
+            }
+        }
+        Wait-Until { (AsInt (TpTry "SELECT COUNT(*) FROM lanes WHERE state='alive' AND role IN ('brain-hi','router','work')")) -eq 0 } `
+            25000 'the escalation fixture is cleared' | Out-Null
+
         # ---- A RESTART ADOPTS BOTH AND RETIRES NEITHER -----------------------------------
         # The exact failure: `_brainLo` is one scalar, so the adoption loop overwrote it and
         # the surplus loop shut the other one down. Two projects, one daemon restart, one

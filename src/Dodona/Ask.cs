@@ -107,9 +107,47 @@ public static class Ask
         new { id = "no",  name = "not now", why = "lanes keep working without git; only tickets need a repo" },
     });
 
+    /// <summary>
+    /// The candidates for the ROUTE question — "which project is this sentence for?"
+    /// (LOCATIONS-PLAN P3.A). Takes project NAMES, not paths, and that is the whole shape of it:
+    ///
+    /// * **No paths, ever.** CLAUDE.md §3.1 has no folder UI, and a routing question names
+    ///   projects rather than offering somewhere to navigate. `ui-use`'s
+    ///   `the_ask_offers_no_filesystem_navigation` asserts that no choice VALUE carries a
+    ///   separator or a drive letter, and this must keep satisfying it.
+    /// * **Names, so the daemon does the resolving.** The answer comes back as a name and the
+    ///   daemon turns it into a project with <c>ProjectLadder.ByName</c> over the projects it
+    ///   still has — the same closed-list match <c>ClassifyProjectAsync</c> already makes on the
+    ///   cheap tier's answer, so a name that no longer belongs to a project is a refusal rather
+    ///   than a folder somebody guessed at. It also means this file needs nothing from
+    ///   `ProjectLadder`, which is NOT linked into DodonaUi — the window parses this blob.
+    /// * **Two projects whose folders share a leaf name are ambiguous here**, exactly as they
+    ///   already are for the classifier rung, which offers leaves and matches leaves back. Same
+    ///   limitation, one place, and the fix (if it is ever wanted) belongs in `ProjectLadder`
+    ///   where both rungs would get it.
+    ///
+    /// <paramref name="names"/> arrives in recency order (`Daemon.ProjectsByRecency`), so the
+    /// first one says why it is first: an ordering the operator cannot see is an ordering they
+    /// have to guess at.
+    /// </summary>
+    public static string RouteCandidates(IEnumerable<string> names) => JsonSerializer.Serialize(
+        names.Select((n, i) => new
+        {
+            id = n,
+            name = n,
+            why = i == 0 ? "most recently worked in" : null,
+        }).ToArray());
+
     /// <summary>The `kind` a repo question carries. The UI never reads `kind` — it renders the
     /// seven shared columns and nothing else — but the daemon needs it to know what answering
     /// MEANS, and a string constant is how the two sides agree without either importing the
     /// other's file twice.</summary>
     public const string KindRepoInit = "repo-init";
+
+    /// <summary>The `kind` the router's rung 4 carries (LOCATIONS-PLAN P3.A). Answering one
+    /// DELIVERS the held sentence — `questions.subject` holds it whole for exactly that — into a
+    /// new lane in the project the operator named. Phase 4 deliberately did not add this
+    /// constant: an unused `kind` with no `case` behind it reads as support that is not there,
+    /// and for two days rung 4 asked a question nothing could render.</summary>
+    public const string KindRoute = "route";
 }
