@@ -178,7 +178,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | `test <suite>...` | One or more named suites, run concurrently. `--sequential` for one at a time. |
 | `test unit` | The pure logic — no daemon, no store, no window. **~1 second**; run it while you edit. |
 | `suites` | All twelve, **three at a time** (69e8003 lowered it from five; `ui-use` went intermittently red at five). Measured on this machine 2026-08-19: **93 s** at 69e8003 and **100 s** with Phase 3's fifteen extra checks, not the 54–72 s this row claimed — the range predates both the concurrency change and Phase 3's eleven extra m0 checks. Still a gate before committing rather than the twenty-minute event the table claimed before that. |
-| `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. |
+| `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. Three verdicts: PROVEN, VACUOUS (it passes against HEAD — rewrite it), MISSING (it never ran). |
+| `prove <suite>:<check> ...` | The same, for MANY checks: grouped by suite and **one run per suite**, because a suite run prints every check it ran. Phase 3 ran m0 eleven times to read eleven lines of one run's output — 46 minutes for what is 40 seconds. Reach for this form by default. |
 | `gate` | The pre-commit gate: runs the suites, then **asserts** nine invariants — nothing left running in the build output, a suite run that dirtied nothing, **no wrapper or agent process that outlived the run** (I3), the commit guard deployed and unoverridden, the live build’s commit resolvable in `git log`, the full run inside its time budget (I7), and **no changed file quietly altering its BOM or line endings** (P7.5 — that has happened three times and twice went unnoticed until someone read a diff). Prints the one row of `RECOVERY-PHASES` §2 it does not cover yet, so it can never be mistaken for a full pass. `dev gate <suite>` runs the same machinery over less, in ~20 s, and says PARTIAL on every line. |
 | `ship` | build + suites + publish. |
 | `worktree <name>` | a tree of your own under `.claude\worktrees\`. All work goes in one (§0.0). |
@@ -673,7 +674,26 @@ over one repo is two merge tokens over one main, which is the race this system e
 prevent. If `tests/workspace-acceptance.ps1`'s exclusivity checks ever go red, that is a
 correctness incident, not a flaky test.
 
-## 5.1 Delivery is a skill
+## 5.1 Delivery is a skill — and so are the three traps that keep recurring
+
+`.claude/skills/` carries what CLAUDE.md cannot: a rule that arrives **at the moment of the
+action** rather than at session start. That distinction is not theoretical. §0.2's
+heredoc-backslash trap was written down, had been read, and was violated three times in one
+session anyway — not from disagreement but because forty minutes had passed. Alongside `/ship`:
+
+- **`check-authoring`** — writing or editing an acceptance check. What may be asserted on
+  (processes and store rows, never an instantaneous pipe read), `Invoke-StoreSql`, and the fact
+  that a check is worth nothing until `dev prove` has seen it red.
+- **`file-patching`** — rewriting a tracked file with a script. Backslash collapse, BOM, bare
+  LF, parse-checking, and reading your own diff stat against `git diff -w`.
+- **`probe-hygiene`** — launching a daemon, shim or agent by hand. Isolated `DODONA_HOME`,
+  binaries from `Use-TestBinaries`, `status` is not read-only, and no machine-wide mutation
+  while a verification is in flight.
+
+**If one of these turns out to be skipped as reliably as a section of this file was, promote its
+contents to enforcement and delete the skill.** Do not write a fourth one (D-6).
+
+## 5.1.1 Delivery itself
 
 `/ship` (`.claude/skills/ship/SKILL.md`) is the complete build → suites → commit →
 publish → verify-the-swap path. Use it rather than improvising the sequence; when the

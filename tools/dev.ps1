@@ -759,9 +759,39 @@ function Do-Suites {
 # the named suite there, and demands that the named check FAILS. If it passes, the check is
 # vacuous -- exactly the trap that made a bad respawn fix look verified.
 function Do-Prove {
-    if (-not $Rest -or $Rest.Count -lt 2) { Abort "need a suite and a check name" "dev prove m3 respawned_ticket_lane_returns_to_its_worktree" }
-    $suite = $Rest[0]; $check = $Rest[1]
-    Say "== prove: '$check' must FAIL against HEAD =="
+    # TWO FORMS, and the second one is P7.4b -- the change that actually made proving cheap:
+    #
+    #   dev prove m0 shim_exits_when_its_agent_dies              one check  (unchanged)
+    #   dev prove m0:check_a m0:check_b brain:check_c            many, ONE run per suite
+    #
+    # The insight is embarrassingly simple and it cost 46 minutes to not have: a suite run
+    # prints EVERY check it ran, so judging eleven m0 checks needs ONE m0 run, not eleven. The
+    # session that shipped Phase 3 ran m0 eleven separate times to read eleven lines that all
+    # appear together in any single run of it. Fifteen proofs, nineteen suite runs, 46 minutes --
+    # for what is two suite runs of work.
+    #
+    # This is why P7.4 (the build cache) was the wrong thing to reach for first, and why its
+    # justification had to be measured before it could be corrected: the build was never the
+    # cost. The cost was running the same failing suite over and over, each time waiting out the
+    # same deadlines, to read a different line of the same output.
+    if (-not $Rest -or $Rest.Count -lt 1) { Abort "need a suite and a check name" "dev prove m3 respawned_ticket_lane_returns_to_its_worktree  --  or  dev prove m0:check_a m0:check_b" }
+    $pairs = @()
+    if (@($Rest | Where-Object { $_ -match ':' }).Count -gt 0) {
+        foreach ($a in $Rest) {
+            if ($a -notmatch '^([^:]+):(.+)$') { Abort "cannot read '$a' as suite:check" "mixing the one-check and many-check forms is not supported; use m0:check_a m0:check_b" }
+            $pairs += [pscustomobject]@{ Suite = $Matches[1]; Check = $Matches[2] }
+        }
+    }
+    else {
+        if ($Rest.Count -lt 2) { Abort "need a suite and a check name" "dev prove m3 respawned_ticket_lane_returns_to_its_worktree" }
+        $pairs += [pscustomobject]@{ Suite = $Rest[0]; Check = $Rest[1] }
+    }
+    $suiteNames = @($pairs | ForEach-Object { $_.Suite } | Sort-Object -Unique)
+    foreach ($n in $suiteNames) {
+        if ($n -ne 'unit' -and -not (Test-Path "$repo\tests\$n-acceptance.ps1")) { Abort "no suite '$n'" "one of: $((AllSuites) -join ', ')" }
+    }
+    Say $(if ($pairs.Count -eq 1) { "== prove: '$($pairs[0].Check)' must FAIL against HEAD ==" }
+          else { "== prove: $($pairs.Count) check(s) across $($suiteNames.Count) suite(s) must FAIL against HEAD ==" })
 
     $dirty = @(git -C $repo status --porcelain -- 'src' 'tests')
     if ($dirty.Count -eq 0) { Abort "src and tests are identical to HEAD, so there is no change to prove" "make the fix first, leave it uncommitted, then run prove" }
@@ -828,26 +858,58 @@ function Do-Prove {
         # HEAD was left registered in `git worktree list`.
         #
         # One code path now reaches one verdict, and it carries the deadline with it.
-        $r = Complete-Suite (Start-Suite $suite "$wt\tests\$suite-acceptance.ps1")
-        $o = $r.Output
-        foreach ($x in $r.Problems) { Say "  note: $x" }
-        $line = @($o | Select-String -Pattern ([regex]::Escape($check) + ':') | Select-Object -First 1)
-        if ($line.Count -eq 0) {
-            Abort "check '$check' never ran against HEAD" "the check must exist in your working tests/ AND be reached on this code path; see $log"
+        # ONE RUN PER SUITE. Solo suites stay solo (unit compiles into src\...\bin and every
+        # other suite copies out of it; m1 is intermittent beside a parallel wave) -- the same
+        # rules Run-Suites obeys, for the same reasons, because this worktree has one bin too.
+        $runs = @{}
+        foreach ($n in @($suiteNames | Where-Object { (SoloSuites) -contains $_ })) {
+            $runs[$n] = Complete-Suite (Start-Suite $n "$wt\tests\$n-acceptance.ps1")
         }
-        $txt = $line[0].Line.Trim()
-        Say "against HEAD: $txt"
-        if ($txt -match ': FAIL') {
-            Say ""
-            Say "PROVEN: the check fails without your change, so it has teeth."
+        $wave = @($suiteNames | Where-Object { (SoloSuites) -notcontains $_ })
+        $cap = SuiteConcurrency
+        $started = @()
+        foreach ($n in $wave) {
+            while ((@($started | Where-Object { -not $_.Proc.HasExited }).Count) -ge $cap) { Start-Sleep -Milliseconds 150 }
+            $started += Start-Suite $n "$wt\tests\$n-acceptance.ps1"
         }
-        else {
-            Say ""
-            Say "VACUOUS: the check PASSES against HEAD, so it does not test your change."
-            Say "         Rewrite it before trusting it. (This is the exact trap of 2026-08-18.)"
-            Say "log: $log"
-            exit 1
+        foreach ($h in $started) { $runs[$h.Name] = Complete-Suite $h }
+
+        foreach ($n in $suiteNames) {
+            foreach ($x in $runs[$n].Problems) { Say "  note: $n : $x" }
         }
+
+        # A check that never RAN is not vacuous, it is unproven, and the two must not be
+        # conflated: vacuous means "your change is not what makes it fail", missing means "this
+        # code path was never reached", and only the second one might be a typo in the name.
+        $proven = 0; $vacuous = 0; $missing = 0
+        Say ""
+        foreach ($pr in $pairs) {
+            $o = $runs[$pr.Suite].Output
+            $line = @($o | Select-String -Pattern ([regex]::Escape($pr.Check) + ':') | Select-Object -First 1)
+            if ($line.Count -eq 0) {
+                Say "  MISSING  $($pr.Suite) $($pr.Check) -- never ran against HEAD"
+                $missing++
+                continue
+            }
+            $txt = $line[0].Line.Trim()
+            if ($txt -match ': FAIL') { Say "  PROVEN   $txt"; $proven++ }
+            else { Say "  VACUOUS  $txt"; $vacuous++ }
+        }
+
+        Say ""
+        if ($missing -gt 0) {
+            Say "$missing check(s) NEVER RAN. Each must exist in your working tests/ AND be reached on"
+            Say "this code path -- a check behind an earlier failure in the same suite never gets there."
+        }
+        if ($vacuous -gt 0) {
+            Say "$vacuous check(s) VACUOUS: they PASS against HEAD, so they do not test your change."
+            Say "         Rewrite them before trusting them. (This is the exact trap of 2026-08-18.)"
+        }
+        if ($vacuous -eq 0 -and $missing -eq 0) {
+            Say $(if ($proven -eq 1) { "PROVEN: the check fails without your change, so it has teeth." }
+                  else { "PROVEN: all $proven check(s) fail without your change, so they have teeth." })
+        }
+        else { Say "log: $log"; exit 1 }
     }
     finally {
         # THE TREE IS KEPT ON PURPOSE -- it is the cache. It costs one directory per commit, it is
