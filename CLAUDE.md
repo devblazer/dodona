@@ -602,36 +602,51 @@ generics ("stop", "no", "try again") are decided in code and stay instant. On do
 the sentence is HELD and you are asked — nothing is delivered. Without a warm brain, behaviour
 is unchanged (focused lane), which is why the suites are unaffected.
 
-## 3.2 `dodona status` is not a read-only command — it SUMMONS a daemon
+## 3.2 Commands that observe, and commands that ACT
 
-**Do not use `status` to check whether anything is running.** Start-on-demand means any client
-command summons the workspace daemon if it is not up (§2), and a summoned daemon runs its
-warm-up: it creates the router, the brain and the compressor pool, and **each of those is a
-real `claude -p --model haiku` process**. So a "quick health check" against the operator's live
-workspace starts five model-backed agents on a machine they believed was idle.
+**`dodona status` used to summon a daemon. It does not any more, and that is enforced in code**
+rather than warned about here — this section is the warning that failed, kept because the
+incident is why the enforcement exists.
+
+Start-on-demand means a client command summons the workspace daemon if it is not up (§2), and a
+summoned daemon runs its warm-up: router, brain and the compressor pool, **each a real
+`claude -p --model haiku` process**. Measured on a real wake with the default config: **four**
+of them. So a "quick health check" used to start four model-backed agents on a machine the
+operator believed was idle.
 
 That happened on 2026-08-19, to a session that had just finished writing the tooling to stop
-exactly this class of thing. The operator had nothing running; the agent ran `status` twice
-while verifying a publish, and left behind one daemon and five haiku lanes. Two hours later it
-diagnosed its own five leaked shims as "machine contention" and moved a suite out of the
-parallel wave on that evidence — a wrong conclusion drawn from self-inflicted noise.
+exactly this class of thing. The operator had nothing running; the agent ran `status` twice while
+verifying a publish, and left behind one daemon and five haiku lanes. Two hours later it
+diagnosed its own leaked shims as "machine contention" and moved a suite out of the parallel wave
+on that evidence — a wrong conclusion drawn from self-inflicted noise.
 
 **Quota was not burned, and the reason is worth knowing**: `inputs=0 results=0` on every lane.
 Existing costs nothing; only a TURN costs quota (LANE-LIFECYCLE §2). It was recoverable. It was
 still a machine the operator did not ask for.
 
-What to use instead, none of which starts anything:
+A command whose name promises a reading must not change what it reads. So `status` is now on the
+no-summon list beside `stop-daemon`: against a sleeping workspace it says so and starts nothing.
+Three checks in `m0` hold it, each proved red — against the old build they read *"a daemon
+appeared: status started one"* and *"lanes went 10 -> 11"*.
+
+None of these start anything:
 
 ```powershell
+dodona status                # now safe: reports ASLEEP rather than waking the workspace
 dodona where [--json]        # ids, paths, pipe names, and whether a daemon is LIVE
 dodona version [--json]      # what a binary is, including its commit
 dodona ps                    # what is actually running, machine-wide
 ```
 
+**These still summon, deliberately** — bringing the daemon back is what the caller wants, and the
+shims have been buffering the whole time: `say`, `tail`, `input`, `lane-start`, `tickets`, and the
+rest. Reach for one of those when you mean to wake a workspace, and expect the four warm-up
+processes that come with it.
+
 And when you must run a real command against a live workspace — `publish` in particular, which
-§2 requires — say so in your report, because it is an action on the operator's machine and not
-a measurement of it. Anything you only want to *observe* belongs in an isolated
-`$env:DODONA_HOME` (§5), the same rule the suites already follow.
+§2 requires — say so in your report, because it is an action on the operator's machine and not a
+measurement of it. Anything you only want to *observe* belongs in an isolated `$env:DODONA_HOME`
+(§5), the same rule the suites already follow.
 
 ## 4. Never kill processes by name
 

@@ -245,6 +245,35 @@ dodona ps                      # LANES column, per workspace
 dodona stop-all --lanes        # then it must report what it stopped, and ps must go to zero
 ```
 
+### Verified against REAL models, 2026-08-19
+
+Everything above was proved with the fake agent. The operator then authorised spending quota to
+validate real-world behaviour, so it was. One workspace at a time, isolated `DODONA_HOME`, a
+scratch repo — never their own — and the PUBLISHED build.
+
+| what | result |
+|---|---|
+| a workspace wake | **four real `claude` processes** warm: brain, router, two compressors, roles correct in the store |
+| a sentence typed and submitted with Enter | went through the real `PreviewKeyDown` path; box cleared |
+| first sentence, nothing live | `tier=first confidence=only` — spawned a lane on opus/high with an undo line. **Correct and by design**: with no live work lane there is nothing to disambiguate, so the classifier is not asked. Do not read `classified=0` here as the old dead-router bug; that one is `tier=focus confidence=no-classifier`, and `routing_unrouted` was 0 |
+| second sentence, a lane live | **the real classifier decided**: `kind=addendum target=HEIGHT confidence=high` in 5071 ms, reason *"Refine mask to use curvature alongside height"*, delivered to that lane. This is the ladder that was DEAD IN PRODUCTION for two days, now proved live with a real model rather than a fixture |
+| a real agent doing real work | edited its file and reported accurately |
+| **the claim gate, under a real agent** | told to write one file inside its claim and one outside, it reported `src/foam.cs: SUCCEEDED` and `docs/notes.md: DENIED`, and disk agreed exactly. `.dodona-bypass.log` absent, so the gate never failed open. **The safety model (§6 layer 1) holds against a real `claude -p` running bypassPermissions**, which had only ever been asserted from a measurement, never demonstrated |
+| P3.2 against a real agent | killed only the agent by recorded pid: the shim exited itself, **after draining all 14 buffered lines**. The fake agent emits one to three, so the DRAIN half of P3.2 had never been under load |
+| cleanup, every run | 0 processes under any Dodona path, 0 lane pipes |
+
+**Still not covered, and these are the ones most likely to surface next:** two real work lanes
+running concurrently; `approve` → `land` → merge with real work in the ticket (the gate and the
+worktree were checked, the merge token path was not); a long session, so the 30-minute lease and
+a hot swap mid-turn are still only exercised at 2 seconds and with fakes.
+
+**Two probe bugs worth recording, because both wasted a run.** An instruction to the real agent
+embedded `"` inside a native-command argument and PowerShell 5.1 mangled it — the agent received
+a truncated sentence and sensibly asked for the rest, so that run said nothing about the gate.
+And a cleanup check counted `claude`/`node` BY NAME machine-wide, reporting 18 survivors that were
+the session's own tooling; by PATH it was 0. Both are the traps this repo already documents,
+committed by the probe whose own skill forbids them.
+
 **Cost / breaks:** `lane-respawn` can no longer reattach to a shim whose agent crashed — correct,
 there is nothing to reattach to, and m0 covers the respawn path. A `stop-all` that leaves lanes
 running now loses those agents after the lease (30 min) rather than never; the lane ROW survives
