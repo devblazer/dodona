@@ -316,6 +316,17 @@ function Invoke-StoreSql([string]$db, [string]$sql) {
     # Native stderr is capturable ONLY with Continue + `2> file` (CLAUDE.md 0.2): under the
     # suites' `Stop`, python writing one warning line would throw NativeCommandError, and under
     # SilentlyContinue the record is eaten -- which is how this was invisible in the first place.
+    # PIN BOTH ENDS OF THE PIPE TO UTF-8. Carried in from compression-acceptance's local copy
+    # (P7.3), where it fixed a real incident and where it was the ONLY copy that had it: a
+    # redirected child's stdio defaults to the OEM codepage (CLAUDE.md 0.2) and python's stdout to
+    # the ANSI one, so an em dash left the store as U+2014, went out as cp1252 0x97 and came back
+    # decoded as cp850 -- and `blocked_uses_the_fixed_schema`, which compares against
+    # [char]0x2014, failed in one shell and passed in another. A suite whose verdict depends on
+    # which console started it is not a suite. m0 and brain never had this and were one em dash
+    # away from the same thing.
+    $prevEnc = [Console]::OutputEncoding
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $env:PYTHONIOENCODING = 'utf-8'
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $errFile = Join-Path ([System.IO.Path]::GetTempPath()) ("dodona-sql-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + ".err")
@@ -337,7 +348,8 @@ for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is No
     }
     finally {
         $ErrorActionPreference = $prev
-        Remove-Item env:DODONA_TEST_SQL, env:DODONA_TEST_DB -ErrorAction SilentlyContinue
+        [Console]::OutputEncoding = $prevEnc
+        Remove-Item env:DODONA_TEST_SQL, env:DODONA_TEST_DB, env:PYTHONIOENCODING -ErrorAction SilentlyContinue
         Remove-Item $errFile -Force -ErrorAction SilentlyContinue
     }
 }

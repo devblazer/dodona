@@ -41,30 +41,13 @@ function Dump() { Dodona @('ui', 'dump') | ConvertFrom-Json }
 # "not answering yet" as a VALUE rather than an exception, so a Wait-Until can poll it.
 function DumpOrNull() { try { Dump } catch { $null } }
 function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$name] = if ($cond) { 'PASS' } else { "FAIL $detail".Trim() } }
-function Rows([string]$sql) {
-    # The query travels via an environment variable, not string interpolation: a query
-    # that ENDS in a '...' literal inside '''...''' makes four quotes in a row, which is
-    # a Python syntax error. Env transport has no quoting at all to collide with.
-    $db = $storeDb
-    $env:DODONA_TEST_SQL = $sql
-    # Pin BOTH ends of the pipe to UTF-8. A redirected child's stdio defaults to the OEM
-    # codepage (CLAUDE.md 0.2), and Python's own stdout defaults to the ANSI one -- so an
-    # em dash left the store as U+2014, went out as cp1252 0x97 and came back decoded as
-    # cp850 as an accented u. `blocked_uses_the_fixed_schema` compares against
-    # [char]0x2014 and failed for that and only that, in one shell and not another. A suite
-    # whose verdict depends on which console started it is not a suite.
-    $prevEnc = [Console]::OutputEncoding
-    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-    $env:PYTHONIOENCODING = 'utf-8'
-    $o = (python -c "
-import sqlite3, os
-db = sqlite3.connect(r'$db')
-for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is None else str(x) for x in r))
-") | Out-String
-    [Console]::OutputEncoding = $prevEnc
-    Remove-Item env:DODONA_TEST_SQL -ErrorAction SilentlyContinue
-    $o
-}
+# The last of the three local copies (P7.3). Delegates to the shared helper, which now carries
+# BOTH of this copy's hard-won properties -- the query travels by environment variable so no
+# amount of quoting in the SQL can collide with python's, and both ends of the pipe are pinned to
+# UTF-8 (the em-dash incident that made `blocked_uses_the_fixed_schema` shell-dependent) -- and
+# adds the one this copy lacked: it THROWS on a sqlite error instead of returning an empty string
+# that casts to 0 and passes whatever assertion it is put in front of.
+function Rows([string]$sql) { Invoke-StoreSql $storeDb $sql }
 
 # A turn-final long enough to be worth compressing: the daemon deliberately skips
 # anything already short, so a 40-character result must NOT spend a model call.

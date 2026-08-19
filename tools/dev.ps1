@@ -766,14 +766,54 @@ function Do-Prove {
     $dirty = @(git -C $repo status --porcelain -- 'src' 'tests')
     if ($dirty.Count -eq 0) { Abort "src and tests are identical to HEAD, so there is no change to prove" "make the fix first, leave it uncommitted, then run prove" }
 
-    $wt = Join-Path $env:TEMP ("dodona-prove-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
-    Say "worktree of HEAD: $wt"
-    git -C $repo worktree add --detach $wt HEAD 2>&1 | ForEach-Object { Say "  $_" }
+    # ONE WORKTREE PER COMMIT, KEPT (P7.4). This used to make a GUID-named worktree, cold-build
+    # the whole solution into it, and delete it again -- every single invocation. Measured on the
+    # session that shipped Phase 3: nineteen proofs, all against the SAME commit, ~19 minutes
+    # spent rebuilding an identical tree, and 45 % of that session sat inside `dev prove`.
+    #
+    # The waste is not the point. The INCENTIVE is: an expensive proof is one people batch,
+    # defer, or skip, and skipped proving is the root of every believed-a-green-check incident in
+    # CLAUDE.md 0.3. Making the tool cheap is the only durable way to make it used, which is the
+    # same argument that took the suites from twenty minutes to ninety seconds (Phase 4).
+    #
+    # THERE IS NO CACHE MARKER AND NO STALENESS QUESTION, deliberately. The worktree is named for
+    # the commit, so its src\ can only ever be that commit; `dotnet build` still runs every time
+    # and MSBuild decides what to redo. A build stamp we maintained ourselves would be a second
+    # source of truth about what is built, which is exactly the mistake auto-publish made with
+    # `.built-from` (CLAUDE.md 2). Incremental is ~6 s against ~60 s cold.
+    $head = (git -C $repo rev-parse HEAD).Trim()
+    $proveRoot = Join-Path $env:TEMP 'dodona-prove'
+    New-Item -ItemType Directory -Force $proveRoot | Out-Null
+    $wt = Join-Path $proveRoot $head.Substring(0, 12)
+
+    # Every OTHER commit's tree goes, so this never becomes an unbounded pile of worktrees and
+    # `git worktree list` keeps saying something true. Registered ones need `worktree remove`;
+    # a directory git has forgotten (a killed run) is just deleted.
+    foreach ($old in @(Get-ChildItem $proveRoot -Directory -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Name -ne $head.Substring(0, 12) })) {
+        git -C $repo worktree remove --force $old.FullName 2>&1 | ForEach-Object { Add-Content -Path $log -Value $_ -Encoding utf8 }
+        Remove-Item $old.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        Say "  pruned an older prove tree: $($old.Name)"
+    }
+
+    $reused = Test-Path (Join-Path $wt 'Dodona.sln')
+    if ($reused) { Say "worktree of HEAD (reused): $wt" }
+    else {
+        Remove-Item $wt -Recurse -Force -ErrorAction SilentlyContinue
+        Say "worktree of HEAD (new): $wt"
+        git -C $repo worktree add --detach $wt HEAD 2>&1 | ForEach-Object { Say "  $_" }
+        if (-not (Test-Path (Join-Path $wt 'Dodona.sln'))) { Abort "could not create a worktree of HEAD at $wt" 'a stale registration may be in the way: git worktree prune, then retry' }
+    }
     try {
         # The TEST comes from your working tree (it is the new check); the CODE comes from
         # HEAD (it is the code that must fail it). That is the whole trick.
+        #
+        # CLEARED FIRST, now that the tree is reused: Copy-Item -Force overwrites but never
+        # deletes, so a suite you renamed or removed would linger from an earlier proof and could
+        # still be the one that runs. Also drops the previous proof's <suite>-output directories.
+        Remove-Item "$wt\tests\*" -Recurse -Force -ErrorAction SilentlyContinue
         Copy-Item "$repo\tests\*" "$wt\tests\" -Recurse -Force
-        Say "building HEAD ..."
+        Say $(if ($reused) { "building HEAD (incremental) ..." } else { "building HEAD (cold, first proof at this commit) ..." })
         $b = & dotnet build "$wt\Dodona.sln" -c Release 2>&1
         Add-Content -Path $log -Value $b -Encoding utf8
         if ($LASTEXITCODE -ne 0) { Abort "HEAD does not build, so it cannot be used as a baseline" "commit a buildable baseline first; see $log" }
@@ -810,7 +850,11 @@ function Do-Prove {
         }
     }
     finally {
-        git -C $repo worktree remove --force $wt 2>&1 | ForEach-Object { Say "  $_" }
+        # THE TREE IS KEPT ON PURPOSE -- it is the cache. It costs one directory per commit, it is
+        # pruned at the top of the next run, and `dev prove` is the only thing that reads it.
+        # Nothing runs out of it after the suite ends: I1 is asserted over src\...\bin in THIS
+        # repo, and a suite copies its binaries into its own DODONA_HOME anyway (P1.1).
+        Say "kept for the next proof at this commit: $wt"
     }
     Say "log: $log"
 }
@@ -1183,6 +1227,69 @@ function Do-Gate {
         $bad++
     }
 
+    # P7.5: NO SILENT ENCODING CHANGE. Two questions, because the damage has arrived two
+    # different ways and each is invisible to the other check.
+    #
+    # (a) BOM. Phase 3 added one to seven files -- a patch script written with utf-8-sig -- and it
+    #     was caught only because a human happened to read the diff. Compared byte-exact against
+    #     `git cat-file blob`, which is PLUMBING and so runs no smudge filter, captured through
+    #     cmd's redirect because PowerShell's `>` re-encodes and would invent the difference.
+    #
+    # (b) LINE ENDINGS. The Phase 7 commit rewrote a whole file's endings and turned a 105-line
+    #     insert into a 1214-line phantom diff. core.autocrlf=true here, so git stores LF and
+    #     checks out CRLF; a script that derives its newline from the WORKING TREE sees CRLF and
+    #     double-converts, and the extra CR survives normalisation. There is no BOM involved, so
+    #     (a) cannot see it -- but the churn is enormous and a whitespace-blind diff does not
+    #     share it. Ratio, not equality: real edits differ a little, a rewrite differs 20x.
+    $encBad = @()
+    foreach ($row in @(git -C $repo status --porcelain)) {
+        if ($row.Length -lt 4) { continue }
+        $code = $row.Substring(0, 2)
+        # untracked and deleted have no HEAD blob to compare against
+        if ($code.Contains('?') -or $code.Contains('D')) { continue }
+        $rel = $row.Substring(3).Trim('"')
+        if ($rel -match ' -> ') { $rel = ($rel -split ' -> ')[-1].Trim('"') }
+        $full = Join-Path $repo $rel
+        if (-not (Test-Path $full)) { continue }
+        $tmp = Join-Path $env:TEMP ("dodona-headblob-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + ".bin")
+        cmd /c "git -C ""$repo"" cat-file blob ""HEAD:$rel"" > ""$tmp"" 2>nul" | Out-Null
+        if (-not (Test-Path $tmp)) { continue }
+        try {
+            $hb = [System.IO.File]::ReadAllBytes($tmp)
+            $wb = [System.IO.File]::ReadAllBytes($full)
+            $hBom = ($hb.Length -ge 3 -and $hb[0] -eq 0xEF -and $hb[1] -eq 0xBB -and $hb[2] -eq 0xBF)
+            $wBom = ($wb.Length -ge 3 -and $wb[0] -eq 0xEF -and $wb[1] -eq 0xBB -and $wb[2] -eq 0xBF)
+            if ($hBom -ne $wBom) { $encBad += "$rel -- BOM was $(if ($hBom) { 'REMOVED' } else { 'ADDED' }) by this change" }
+        }
+        catch { }
+        finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
+    $plainChurn = 0; $blindChurn = 0
+    foreach ($n in @(git -C $repo diff --numstat HEAD)) {
+        $f2 = $n -split "`t"
+        if ($f2.Count -ge 2 -and $f2[0] -ne '-') { $plainChurn += [int]$f2[0] + [int]$f2[1] }
+    }
+    foreach ($n in @(git -C $repo diff -w --numstat HEAD)) {
+        $f2 = $n -split "`t"
+        if ($f2.Count -ge 2 -and $f2[0] -ne '-') { $blindChurn += [int]$f2[0] + [int]$f2[1] }
+    }
+    if ($plainChurn -gt 40 -and $blindChurn -gt 0 -and $plainChurn -gt (3 * $blindChurn)) {
+        $encBad += "$plainChurn changed line(s), but only $blindChurn survive a whitespace-blind diff -- that is a line-ending rewrite, not an edit"
+    }
+
+    if ($encBad.Count -eq 0) {
+        Say "  PASS  P7.5 no changed file altered its BOM, and no diff is mostly whitespace churn"
+    }
+    else {
+        Say "  FAIL  P7.5 a change is altering file ENCODING, not just content:"
+        foreach ($e in $encBad) { Say "          $e" }
+        Say "          Scripts must emit bare LF and let core.autocrlf do its job -- never derive the"
+        Say "          newline from the working tree, and never write with utf-8-sig unless HEAD has a BOM."
+        Say "          Confirm by hand with: git show -w --stat  against the plain --stat."
+        $bad++
+    }
+
     Say ""
     Say "-- not covered yet (RECOVERY-PHASES section 2), so this gate does NOT mean these hold --"
     Say "  not yet -- phase 5   repo lint clean: no control bytes, every named test path real (I8)"
@@ -1193,7 +1300,7 @@ function Do-Gate {
               else { "GATE SELF-TEST FAILED -- $bad problem(s)" })
     }
     else {
-        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 8 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
+        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 9 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
     }
     Say "log: $log"
     if ($bad -gt 0) { exit 1 }
