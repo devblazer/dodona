@@ -1226,6 +1226,7 @@ int Ui()
 {
     if (pos.Count == 0) return Fail("ui verb required: dump | screenshot | pose <name> | overlay <PANE|off> | " +
                                     "type <text> | compose <text> | key <enter|shift+enter|escape> | input-resize <dy|reset> | " +
+                                    "listen <on|off|toggle> | heard <text> [--partial] [--epoch <n>] | " +
                                     "answer <choice> | lane <action> <n> | workspace <name> | update <exe> | close");
     return pos[0] switch
     {
@@ -1252,6 +1253,15 @@ int Ui()
             ? Client(new { verb = "lane", action = pos[1], lane = laneN }, UiPipeName())
             : Fail("ui lane <focus|stop|respawn|collapse|expand> <lane>"),
         "input-resize" => pos.Count > 1 ? UiResize(pos[1]) : Fail("ui input-resize <dy|reset>"),
+        // Dictation, focus-free (docs/VOICE-INPUT-PLAN.md §5). `listen` is the mic button and
+        // lands in MainWindow.SetListening, the method Mic_Click calls. `heard` is a recognition
+        // result and lands in MainWindow.OnHeard -- the same method the real engine's event
+        // raises into, which is why it is not gated behind a test flag: a check drives the
+        // affordance a person touches rather than a rehearsal of it (the `ui type` reasoning,
+        // one layer down).
+        "listen" => pos.Count > 1 ? Client(new { verb = "listen", state = pos[1] }, UiPipeName())
+                                  : Fail("ui listen <on|off|toggle>"),
+        "heard" => pos.Count > 1 ? UiHeard() : Fail("ui heard <text> [--partial] [--epoch <n>]"),
         // Give a band the grid — the same code path a click takes, without needing focus.
         "workspace" => pos.Count > 1 ? Client(new { verb = "workspace", workspace = pos[1] }, UiPipeName()) : Fail("ui workspace <name|id>"),
         "overlay" => pos.Count > 1 ? Client(new { verb = "overlay", pane = pos[1] }, UiPipeName()) : Fail("ui overlay <PANE|off>"),
@@ -1269,6 +1279,25 @@ int UiResize(string arg)
     if (!double.TryParse(arg, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var dy))
         return Fail("ui input-resize <dy|reset>");
     return Client(new { verb = "input-resize", dy }, UiPipeName());
+}
+
+// A recognition result, spoken at the window (docs/VOICE-INPUT-PLAN.md §5). The words are
+// EVERYTHING after the verb, joined -- so `ui heard new line` is the phrase "new line" and not a
+// flag. --partial marks an unsettled hypothesis, which D-V6 keeps out of the box entirely; it
+// renders beside the indicator and appears in dump.listen.partial.
+//
+// --epoch drives the submit race (§4) end to end: a result stamped with an older epoch is the
+// tail of a sentence already sent, and must be dropped rather than opening the next message.
+// Without it a check could only reach that path through a unit test.
+int UiHeard()
+{
+    var words = string.Join(" ", pos.Skip(1));
+    var partial = One("partial") is not null;
+    var epochArg = One("epoch");
+    if (epochArg is not null && !long.TryParse(epochArg, out _)) return Fail($"--epoch must be a number, not '{epochArg}'");
+    return epochArg is null
+        ? Client(new { verb = "heard", text = words, partial }, UiPipeName())
+        : Client(new { verb = "heard", text = words, partial, epoch = long.Parse(epochArg) }, UiPipeName());
 }
 
 // ---------------------------------------------------------------- client role
@@ -1390,7 +1419,7 @@ static (string? cmd, string root, PathSource rootSource, Dictionary<string, List
     // added -- the one the LEFT ALONE message tells you to use -- has never once worked. Found
     // by running it (`stop-all --lanes --orphans` named two ghost lanes, then left them);
     // reading the code that prints the message would never have shown it.
-    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk", "shell", "concierge", "lanes", "orphans" };
+    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk", "shell", "concierge", "lanes", "orphans", "partial" };
 
     string? cmd = null;
     string root = Environment.CurrentDirectory;

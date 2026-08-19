@@ -190,7 +190,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | `build` | Builds. Only *real* compile errors reach you; a locked output is named, never mistaken for one. |
 | `test <suite>...` | One or more named suites, run concurrently. `--sequential` for one at a time. **IT DOES NOT BUILD — run `dev build` first or you are testing the PREVIOUS binary.** Suites copy their binaries out of `src\...\bin\Release\...` (`Use-TestBinaries`), and only `prove`, `gate` and `suites` compile. Measured 2026-08-19: a defect was deleted from `Daemon.cs`, `dev test m0` said **26 checks, 0 failed**, and `dev build` + the same command said 1 failed. That is a false green from the tool itself — `LOCATIONS-PLAN.md` P1.5 carries the fix. |
 | `test unit` | The pure logic — no daemon, no store, no window. **~1 second**; run it while you edit. |
-| `suites` | All twelve, **three at a time** (69e8003 lowered it from five; `ui-use` went intermittently red at five). Measured on this machine 2026-08-19: **93 s** at 69e8003 and **100 s** with Phase 3's fifteen extra checks, not the 54–72 s this row claimed — the range predates both the concurrency change and Phase 3's eleven extra m0 checks. Still a gate before committing rather than the twenty-minute event the table claimed before that. |
+| `suites` | All thirteen, **three at a time** (69e8003 lowered it from five; `ui-use` went intermittently red at five). Measured on this machine 2026-08-19: **93 s** at 69e8003 and **100 s** with Phase 3's fifteen extra checks, not the 54–72 s this row claimed — the range predates both the concurrency change and Phase 3's eleven extra m0 checks. Still a gate before committing rather than the twenty-minute event the table claimed before that. |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. Three verdicts: PROVEN, VACUOUS (it passes against HEAD — rewrite it), MISSING (it never ran). |
 | `prove <suite>:<check> ...` | The same, for MANY checks: grouped by suite and **one run per suite**, because a suite run prints every check it ran. Phase 3 ran m0 eleven times to read eleven lines of one run's output — 46 minutes for what is 40 seconds. Reach for this form by default. |
 | `lint` | The repo lint (I8): control bytes, dangling `tests\*.ps1` references in docs, mixed line endings. Sub-second, tracked files only. Asserted by `gate`; run it directly after any scripted edit. |
@@ -299,6 +299,7 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 | publish, hot swap, provenance | `dev test m4 publish` |
 | workspaces, members, repo exclusivity | `dev test workspace` |
 | anything a person clicks or types | `dev test ui-use` |
+| dictation: the box, the mic toggle, spoken words | `dev test voice` — ~13 s, opens no microphone |
 | compression | `dev test compression` |
 | the dispatcher brain, the routing ladder | `dev test brain` |
 | the concierge, the fence | `dev test concierge` |
@@ -307,7 +308,7 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 - **While iterating**: `dev test unit` for anything that is a function (~1 s), then the one or
   two suites your change actually touches. Anything that must start a daemon has a ~7 second
   floor, and that is the honest target.
-- **Before you MERGE to main**: `dev gate`, once — all twelve plus the seven assertions, about
+- **Before you MERGE to main**: `dev gate`, once — all thirteen plus the ten assertions, about
   80 s of suites and ~15 s of its own two builds. This is the only moment the full set is
   required, and skipping it is how a stale test survives for months (two did).
 - **Three consecutive failed verification attempts**: stop and report. Do not grind.
@@ -450,7 +451,7 @@ the design doc records the revision.
 
 ## 3. Verify with the suites, not by looking
 
-Twelve model-free suites, all fake agents, all free. **Run them through `dev test`, never by
+Thirteen model-free suites, all fake agents, all free. **Run them through `dev test`, never by
 invoking the `.ps1` directly** — the wrapper is what enforces that a suite which crashed, hung
 or never reported is a FAILURE rather than a blank line (P4.4), and it is what runs them five
 at a time:
@@ -474,6 +475,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 | `brain` | the dispatcher brain, its routing ladder, and the no-second-brain-beside-a-live-one guard |
 | `concierge` | the group-scope ladder, the fence, the review-behind |
 | `publish` | publish targeting: `--all` spares foreign instances |
+| `voice` | dictation: speech composes and can never send (docs/VOICE-INPUT-PLAN.md Phase A) |
 
 **The per-suite durations that were a column here are gone (P5.2).** They drifted: two were
 wrong by more than double before Phase 7 corrected them, and a table nobody can trust is worse
@@ -578,7 +580,29 @@ dodona ui compose "<text>"          # type WITHOUT sending — `type` always sub
 dodona ui key shift+enter | enter   # the keystroke, through the real PreviewKeyDown path
 dodona ui input-resize <dy|reset>   # the grip: +px taller, reset = fit the text
 dodona ui lane <focus|stop|respawn|collapse|expand> <n>   # a tile's five actions
+dodona ui listen <on|off|toggle>    # the mic button, in the method Mic_Click calls
+dodona ui heard "<text>" [--partial] [--epoch <n>]   # a recognition result, through the real splice
 ```
+
+**The box LISTENS now, and speech can never send** (docs/VOICE-INPUT-PLAN.md Phase A). The
+operator's constraint, verbatim: *"Send will still need an enter."* That is not a rule anyone has
+to keep — `Dictation.DictationAct` has no member that means send, so the decision layer cannot
+ask for a submit, and `MainWindow.OnHeard` calls `ComposeInput` and `InputKey` and nothing else.
+The words "enter", "send", "submit" and "go" are ordinary text because there is nowhere else for
+them to go. `voice:spoken_send_words_do_not_submit` says so at a live window.
+
+The toggle is remembered in `ui.json` beside the box height, the mic glyph in the grip strip has
+three states (off / listening / **error**, because on-and-deaf must never look like on), and
+`ui dump` gained a `listen` key (`state`, `engine`, `says`, `partial`, `error`, `dropped`,
+`remembered`). **`DODONA_UI_MIC=off` refuses to construct a real recogniser at all**, and
+`tests/_workspace.ps1` sets it for every suite — so no suite can ever open the operator's
+microphone, which would be §4's incident in a new costume. `=fail` forces the error state, which
+is otherwise unreachable without unplugging something.
+
+**The engine is wired but UNVERIFIED.** `SapiRecognizer` (System.Speech, one PackageReference)
+compiles and is behind the seam; nothing has confirmed it *hears* anything, because that needs a
+voice. Which engine actually ships is D-V8's spike, which has not been run. Do not describe
+dictation as working end to end until someone has spoken to it.
 
 `ui dump` gained an `input` key (`text`, `lines`, `height`, `fit`, `sized`, `remembered`,
 `hint`) — `lines` is LOGICAL lines, not wrapped rows; `fit` is the default height and

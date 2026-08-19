@@ -65,6 +65,16 @@ function Use-IsolatedDodonaHome([string]$tag) {
     $dir = Join-Path (Use-SuiteTemp) ("dodona-home-$tag-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force $dir | Out-Null
     $env:DODONA_HOME = $dir
+
+    # NO SUITE MAY EVER OPEN THE OPERATOR'S MICROPHONE (docs/VOICE-INPUT-PLAN.md D-V4).
+    # This is the hard, machine-level override: Recognizers.Create refuses to CONSTRUCT a real
+    # recogniser when it is set, so the window gets the fake and nothing touches a device.
+    # It lives here rather than in each suite for the same reason DODONA_HOME does -- a rule
+    # every suite must remember is a rule one suite will forget, and the one that forgets would
+    # grab the microphone while the operator is in a call, which is CLAUDE.md 4's incident in
+    # a new costume.
+    $env:DODONA_UI_MIC = 'off'
+
     $dir
 }
 

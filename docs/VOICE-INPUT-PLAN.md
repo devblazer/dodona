@@ -309,20 +309,40 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 prove `
   ui-use:listening_toggle_persists ui-use:heard_text_lands_in_box_unsent
 ```
 
-| suite | check | the defect that must make it red |
-|---|---|---|
-| `unit` | `dictation_never_submits` | point `OnHeard` at `SubmitInput` |
-| `unit` | `spoken_enter_is_inert` | add "enter" to the punctuation table |
-| `unit` | `spoken_new_line_inserts_one` | drop the newline mapping |
-| `unit` | `splice_lands_at_caret` | append at end instead |
-| `unit` | `stale_epoch_result_dropped` | ignore the epoch |
-| `unit` | `error_state_is_not_listening` | let `Describe` report `error` as listening |
-| `ui-use` | `heard_text_lands_in_box_unsent` | as above, at the window level: `ui heard "hello"` then dump — `input.text` is `hello` and `feed` gained nothing |
-| `ui-use` | `spoken_send_words_do_not_submit` | `ui heard "send"` must leave the feed untouched |
-| `ui-use` | `enter_still_sends_after_dictation` | the operator's actual constraint, end to end |
-| `ui-use` | `listening_toggle_persists` | close the window, reopen, `dump.listen.state` is still `listening` |
-| `ui-use` | `partial_is_not_in_input_text` | splice partials |
-| `ui-use` | `no_modal_when_the_mic_fails` | the window must still answer `ui dump` with the mic forced to fail |
+**BUILT AND VERIFIED 2026-08-20.** Twenty-five checks, not twelve — the table below is what
+was actually written, with the verdict each one carries. The unit half is proved by
+break-and-revert (D-V11, because `dev prove` refuses the `unit` suite and says why); the
+acceptance half by `dev prove voice:<check> ...`, one run for all seventeen.
+
+| suite | check | verdict | the defect that made it red |
+|---|---|---|---|
+| `unit` | `Dictation_never_submits` | PROVEN | added `Submit` to `DictationAct` → *"DictationAct has a member meaning send: Submit"* |
+| `unit` | `Spoken_enter_is_inert` | PROVEN | put "enter" in the punctuation table → *Expected: enter, Actual: !* |
+| `unit` | `Spoken_new_line_inserts_one` | PROVEN | deleted the newline arm → *Expected: Newline, Actual: Insert* |
+| `unit` | `Spoken_new_paragraph_inserts_two` | (covered by the same break) | |
+| `unit` | `Splice_lands_at_caret` | PROVEN | caret from `text.Length` → *Expected: 7, Actual: 18* |
+| `unit` | `Splice_spaces_and_capitalises` | (5 cases) | |
+| `unit` | `Splice_attaches_punctuation_without_a_space` | | |
+| `unit` | `Stale_epoch_result_dropped` | PROVEN | `ShouldDrop => false` → *Expected: Drop, Actual: Insert* |
+| `unit` | `Error_state_is_not_listening` | PROVEN | `Error` described as "listening" → *Found: "listening"* |
+| `unit` | `The_state_machine_can_always_recover_and_always_stop` | | |
+| `voice` | `dictation_starts_off` | PROVEN | `state=[]` |
+| `voice` | `the_listen_verb_reaches_the_window_at_all` | PROVEN | `reply=[]` |
+| `voice` | `the_suite_never_opens_a_real_microphone` | PROVEN | `engine=[]` |
+| `voice` | `heard_text_lands_in_box_unsent` | PROVEN | `text=[]` |
+| `voice` | `dictation_capitalises_the_start_of_the_box` | PROVEN | `text=[]` |
+| `voice` | **`spoken_send_words_do_not_submit`** | PROVEN | the one that matters: "enter", "send", "submit", "go" are text and the box is not cleared |
+| `voice` | `spoken_new_line_inserts_one_at_the_window` | PROVEN | `lines=1 before=1` |
+| `voice` | `partial_is_not_in_input_text` | PROVEN | `partial=[]` |
+| `voice` | `stale_epoch_result_dropped_at_the_window` | PROVEN | `dropped= before=` |
+| `voice` | `enter_still_sends_after_dictation` | PROVEN | `textAfter=[] sent=[]` |
+| `voice` | `the_mic_is_a_real_button` | PROVEN | no element named "microphone" in the UIA tree |
+| `voice` | `clicking_the_mic_toggles_listening` | PROVEN | `button=False` |
+| `voice` | `listening_toggle_persists` | PROVEN | `state=[] remembered=[]` |
+| `voice` | `no_modal_when_the_mic_fails` | **VACUOUS, demonstrated** | see D-V14 — red by injection: `topLevelWindows=2` |
+| `voice` | `a_failed_mic_reads_as_error_not_listening` | PROVEN | `state=[] says=[] error=[]` |
+| `voice` | `a_failed_mic_says_why_in_words` | PROVEN | `says=[]` |
+| `voice` | `the_listening_pose_exists` | PROVEN | *unknown pose 'listening'* |
 
 `ui-use` is the suite that matters here for the reason its own header gives: dumps prove the UI
 *reports* correctly while the first thing a person tries is a dead end. It is also the suite that
@@ -363,9 +383,9 @@ features into one proposal is how the smaller one ships untested.
 
 | phase | what | size | verified by |
 |---|---|---|---|
-| **A** | `Dictation.cs`, the seam, the fake recogniser, `ui listen` / `ui heard`, `dump.listen`, the `listening` pose, all twelve checks | ~350 lines, most of it pure | `dev test unit` (~1 s) + `dev test ui-use` |
-| **Spike 4** | SAPI vs Whisper.net on twenty real sentences, both biased, WER on technical words **and** latency | an afternoon, throwaway | its own verdict table (§6) |
-| **B** | **the engine the spike chose**, the mic glyph and its three states, `ui.json` persistence, `DODONA_UI_MIC` | ~150 lines (SAPI) or ~250 + model bootstrap (Whisper) | manual: talk to it |
+| **A** — **DONE 2026-08-20** | `Dictation.cs`, the seam, the fake recogniser, `ui listen` / `ui heard`, `dump.listen`, the `listening` pose, the mic glyph and its three states, `ui.json` persistence, `DODONA_UI_MIC` | as built | `dev test unit` (250 checks, ~2 s) + `dev test voice` (18 checks, ~13 s) |
+| **Spike 4** — **NOT RUN** | SAPI vs Whisper.net on twenty real sentences, both biased, WER on technical words **and** latency | an afternoon, throwaway | its own verdict table (§6). **Needs a human speaking into a microphone**, so it could not be done unattended and no number for it exists. |
+| **B** | **the engine the spike chose.** `SapiRecognizer` is wired behind the seam and **compiles, but is UNVERIFIED**: nothing has confirmed it hears anything, because confirming that needs a voice. The glyph, persistence and `DODONA_UI_MIC` landed in A rather than here. | — | manual: talk to it |
 
 Phase A and the spike are **independent and can run in either order or at once** — the spike needs
 no Dodona code at all, and Phase A needs no microphone to exist. That is the property worth
@@ -442,3 +462,53 @@ Each of these was a fork hit with the operator asleep. The rule applied was CLAU
   building, hit P1.5's stale-build refusal on all six, and reported **VACUOUS** — a fake verdict
   about a run that never happened, which is the believed-a-green-check disease one level up. The
   driver now treats "STALE BUILD" and a missing tally as `DID-NOT-RUN`, distinct from vacuous.
+
+- **D-V12 — the window checks live in a new `voice` suite, not in `ui-use`.** §8 put them in
+  `ui-use`; the trigger for moving them was stated in advance as "if `ui-use` becomes intermittent
+  or crosses ~90 s". Measured with the checks inside it: **113.1 s**, against a ~70 s baseline for
+  a suite CLAUDE.md already calls a monolith whose failures cascade and which went intermittently
+  red at concurrency 5. Three window restarts is what pushed it over.
+
+  As its own suite the same checks cost **13.2 s**, and they no longer depend on what a thousand
+  lines above them left behind — which `ui-use`'s own comments record as the cause of four
+  separate check rewrites. `voice` is registered in `AllSuites` and `SuiteOrderHint` in
+  `tools/dev.ps1`; it is NOT in `SoloSuites`, on the grounds that `m3` is also a window suite and
+  runs in the wave. If it turns out intermittent beside the wave, that list is where it goes, and
+  the reason belongs in the commit.
+
+- **D-V13 — the indicator sits in the grip strip beside the mic glyph, not in the hint line.**
+  §5 says "the hint gains · listening". The hint is an overlay ON the box and is collapsed the
+  moment the box has text, so a listening indicator there would either vanish exactly when
+  dictation is working or overlap the words being dictated. The grip strip is where §5 already
+  puts the glyph, it is hit-testable, and it stays visible with a full box. `dump.listen.says`
+  carries the same sentence, from the same `Dictation.Describe`, so the screen and the dump still
+  cannot disagree.
+
+- **D-V14 — "a modal blocks the dispatcher" is FALSE, and the check that rested on it was
+  replaced.** `no_modal_when_the_mic_fails` first asserted that the window still answers
+  `ui dump`, reasoning that a `MessageBox` would block the WPF dispatcher and the dump would
+  never return. That reasoning was written down as fact and is wrong: Win32 modal dialogs run
+  their own **nested message pump**, so the dispatcher keeps running while the dialog is up.
+  Measured by putting a real `MessageBox.Show` on the failure path — the suite answered, and the
+  check PASSED with a modal on screen.
+
+  It counts **top-level windows owned by the UI process** now (exactly one), which is a direct
+  observation of the thing D-V3 forbids instead of an inference from a symptom that does not
+  occur. With the modal injected it reads
+  `FAIL answered=True topLevelWindows=2` — note `answered=True`, which is the measurement that
+  killed the first version. This is the general lesson the repo already has a section about,
+  arriving in a new costume: **an assertion is only as good as the mechanism you believe connects
+  it to the defect**, and that belief has to be tested too.
+
+- **D-V15 — `DODONA_UI_MIC` takes `fail` as well as `off`.** The error state is otherwise
+  unreachable without physically unplugging a microphone, and §5/§7 make "on and deaf must never
+  look like on" the property most worth pinning. `fail` constructs no device and reports the same
+  words a missing capture endpoint produces, so the check pins the real sentence. It earns a place
+  in production code for the reason §5 gives about `ui heard`: a test-only path would prove
+  nothing about the real one.
+
+- **D-V16 — `dump.listen` has no `device` key.** §5's sketch shows
+  `"device": "Headset (Realtek)"`. Nothing reads it, no check needs it, and getting the endpoint
+  name out of `System.Speech` is more API than a field nobody consults is worth. `engine` (fake |
+  sapi | none) is what distinguishes the halves, and that is what shipped. Add `device` when
+  something actually asks the question.

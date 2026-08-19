@@ -18,6 +18,12 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+    <!-- SAPI, the in-box speech recogniser (docs/VOICE-INPUT-PLAN.md Phase B). One reference,
+         no TFM change, no model download, no network at runtime and no key. It is NOT the engine
+         the plan chose (D-V8 leaves that to Spike 4, which needs a human speaking into a
+         microphone); it is the seam being real rather than a stub. No suite depends on it:
+         DODONA_UI_MIC=off makes Recognizers.Create refuse to construct it (D-V4). -->
+    <PackageReference Include="System.Speech" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>

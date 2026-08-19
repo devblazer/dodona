@@ -68,7 +68,7 @@ public partial class MainWindow : Window
         };
         pulseTick.Start();
 
-        Loaded += (_, _) => RestoreInputHeight();
+        Loaded += (_, _) => { RestoreInputHeight(); RestoreListening(); };
         Closed += (_, _) => { _cts.Cancel(); _shell.Dispose(); };
     }
 
@@ -193,6 +193,22 @@ public partial class MainWindow : Window
             // which UIA can find but cannot invoke.
             case "workspace":
                 return FocusWorkspace(e.GetProperty("workspace").GetString() ?? "");
+            // Dictation, focus-free, landing where a click and a real utterance land
+            // (docs/VOICE-INPUT-PLAN.md §5). `listen` is the mic button; `heard` is a recognition
+            // result through the REAL OnHeard splice, which is why it is not gated behind a test
+            // flag — a check drives the affordance rather than a rehearsal of it.
+            case "listen":
+                return SetListening(e.GetProperty("state").GetString() ?? "");
+            case "heard":
+            {
+                var heard = e.GetProperty("text").GetString() ?? "";
+                var final = !(e.TryGetProperty("partial", out var pf) && pf.ValueKind == JsonValueKind.True);
+                // The epoch a check can override, so the submit race is drivable end to end and
+                // not only in a unit test. Default is "the operator is still speaking".
+                var epoch = e.TryGetProperty("epoch", out var ep) && ep.ValueKind == JsonValueKind.Number
+                    ? ep.GetInt64() : _submitEpoch;
+                return OnHeard(new Dictation.Heard(heard, final, epoch));
+            }
             case "close":
                 Dispatcher.BeginInvoke(() => Application.Current.Shutdown());
                 return "closing";
@@ -299,6 +315,21 @@ public partial class MainWindow : Window
                 fit = (int)Math.Round(_inputFit),
                 remembered = UiSettings.Load().InputHeight,
             },
+            // Dictation testifies too (docs/VOICE-INPUT-PLAN.md §5). `says` is the SAME sentence
+            // the indicator shows, from the same function, so a check that reads the dump is
+            // reading what is on screen. `partial` carries the unsettled tail that D-V6 keeps
+            // out of input.text, and `dropped` counts submit-race casualties so a silent degrade
+            // cannot hide here.
+            listen = new
+            {
+                state = _listen.ToString().ToLowerInvariant(),
+                engine = _mic?.Engine ?? "none",
+                says = Dictation.Describe(_listen, _listenReason),
+                partial = _partial,
+                error = _listenReason,
+                dropped = _dropped,
+                remembered = UiSettings.Load().Listening,
+            },
         };
         return JsonSerializer.Serialize(dump);
     }
@@ -391,10 +422,33 @@ public partial class MainWindow : Window
             // a decision on screen that no row anywhere is waiting for. The next tick sets the
             // real one, if there is one.
             _vm.Ask = null;
+            // A posed indicator is a fixture too: leaving it up after `pose live` would claim a
+            // microphone is open when none is. Back to what the toggle actually says.
+            if (_mic is null) { _listen = Dictation.ListenState.Off; _listenReason = null; }
+            _partial = "";
+            UpdateListenUi();
             if (_shell.FocusedPoller is Poller fp) fp.OverlayTitle = null;
             _shell.Invalidate();
             return "pose live (store polling resumed)";
         }
+        // The dictation indicator is window state rather than snapshot state, so it is posed
+        // here rather than in Poses.cs. `full` underneath, because the failure a screenshot
+        // catches is an indicator that collides with the grip or the box, not one in isolation.
+        if (name.Equals("listening", StringComparison.OrdinalIgnoreCase))
+        {
+            var listenPose = Poses.Get("full")!.Value;
+            _vm.PoseName = name;
+            _vm.OverlayPane = null;
+            _vm.Toasts.Clear();
+            _vm.Apply(listenPose.Item1);
+            _listen = Dictation.ListenState.Listening;
+            _listenReason = null;
+            _partial = "run the suites for";
+            UpdateListenUi();
+            _vm.Status = $"pose: {name}";
+            return $"pose {name} applied";
+        }
+
         var pose = Poses.Get(name);
         if (pose is null) return $"error: unknown pose '{name}' (have: {string.Join(", ", Poses.Names)}, live)";
         var (snap, overlayTitle, toast) = pose.Value;
@@ -592,6 +646,192 @@ public partial class MainWindow : Window
         InputBox.CaretIndex = at + text.Length;
     }
 
+    // ══ dictation: speech puts words in the box, and has nowhere to send them from ═════
+    //
+    // docs/VOICE-INPUT-PLAN.md Phase A. The operator's constraint, verbatim: "Send will still
+    // need an enter." OnHeard below calls ComposeInput and InputKey; it does NOT reference
+    // SubmitInput, and it could not usefully be made to — Dictation.Decide cannot return a value
+    // that means send (Dictation's class note). `ui-use:spoken_send_words_do_not_submit` speaks
+    // the word at a live window and demands the feed did not move.
+
+    IRecognizer? _mic;
+    Dictation.ListenState _listen = Dictation.ListenState.Off;
+    string? _listenReason;
+    string _partial = "";
+    int _dropped;
+
+    /// <summary>Bumped by <see cref="SubmitInput"/>. A result recognised under an older epoch is
+    /// the tail of a sentence already sent, and is dropped rather than opening the next message
+    /// with it (§4's submit race).</summary>
+    long _submitEpoch;
+
+    /// <summary>
+    /// THE ONE LANDING SITE. The real engine and the fake raise into this method, and so does
+    /// `dodona ui heard` — the same reasoning as `ui type` calling <see cref="SubmitInput"/>
+    /// rather than synthesising a keystroke (§17). A fake feeding a parallel path would prove
+    /// nothing about the real one.
+    ///
+    /// Read what is not here: no SubmitInput, and no branch that could reach one. The words
+    /// "enter", "send", "submit" and "go" arrive as ordinary text and land in the box like any
+    /// others, because <c>DictationAct</c> has nowhere else to put them.
+    /// </summary>
+    public string OnHeard(Dictation.Heard h)
+    {
+        var d = Dictation.Decide(h, _submitEpoch);
+        switch (d.Act)
+        {
+            // Never into InputBox.Text (D-V6): unsettled hypotheses rewrite themselves, and in
+            // the box they would make `ui dump`'s input.text non-deterministic — every existing
+            // input check would go intermittent.
+            case Dictation.DictationAct.Partial:
+                _partial = d.Text;
+                break;
+
+            case Dictation.DictationAct.Insert:
+            {
+                _partial = "";
+                var (insert, caret) = Dictation.Splice(InputBox.Text, InputBox.SelectionStart,
+                                                       InputBox.SelectionLength, d.Text);
+                ComposeInput(insert);          // the method a typed character lands in
+                InputBox.CaretIndex = caret;
+                break;
+            }
+
+            // Through InputKey(shift: true) — the same method Shift+Enter uses — rather than a
+            // "\n" written into Text, so a dictated newline and a typed one scroll the caret
+            // identically.
+            case Dictation.DictationAct.Newline:
+                _partial = "";
+                InputKey(shift: true);
+                break;
+            case Dictation.DictationAct.Paragraph:
+                _partial = "";
+                InputKey(shift: true);
+                InputKey(shift: true);
+                break;
+
+            // Counted, not silent. A dropped tail is the one behaviour here a person would find
+            // baffling, and a silent degrade is a bug (§0.1) — `ui dump`'s listen.dropped is where
+            // it shows. Status is deliberately left alone: it carries the daemon's words, and a
+            // dictation aside overwriting them would be a second silent degrade.
+            case Dictation.DictationAct.Drop:
+                _dropped++;
+                break;
+        }
+        UpdateListenUi();
+        return d.Act.ToString().ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// The mic button and `ui listen`, in ONE method (§3.1: an affordance no verb can reach is
+    /// where the next defect will live — the five lane actions shipped that defect twice).
+    /// </summary>
+    public string SetListening(string what)
+    {
+        switch ((what ?? "").Trim().ToLowerInvariant())
+        {
+            case "on": ArmMic(); break;
+            case "off": DisarmMic(); break;
+            // A toggle, not a button (the operator's first invariant). Error counts as ON for
+            // the purpose of toggling: the thing to do with a mic that failed is turn it off.
+            case "toggle":
+                if (_listen == Dictation.ListenState.Off) ArmMic(); else DisarmMic();
+                break;
+            default:
+                return $"error: unknown listen state '{what}' (on | off | toggle)";
+        }
+        UpdateListenUi();
+        UiSettings.SaveListening(_listen != Dictation.ListenState.Off);
+        return $"listen {_listen.ToString().ToLowerInvariant()}";
+    }
+
+    /// <summary>Arming never throws and never blocks. A failure arrives as a REASON and the box
+    /// keeps typing normally — a dead recogniser may make the box deaf, but must never be able
+    /// to make it unusable, since the box is the one thing you would use to report the problem
+    /// (the argument UiSettings already makes about a corrupt ui.json).</summary>
+    void ArmMic()
+    {
+        DisarmMic();                                  // fresh each time: re-arming an existing
+        _listenReason = null;                         // instance would double every subscription
+        _listen = Dictation.ListenState.Starting;
+
+        _mic = Recognizers.Create(out var why);
+        if (why is not null)
+        {
+            _listen = Dictation.ListenState.Error;
+            _listenReason = why;
+            return;
+        }
+
+        // The engine's thread is not the UI thread; OnHeard touches controls, so it marshals.
+        _mic.Heard += h => Dispatcher.InvokeAsync(() => OnHeard(h));
+        _mic.Failed += r => Dispatcher.InvokeAsync(() =>
+        {
+            _listen = Dictation.ListenState.Error;
+            _listenReason = r;
+            UpdateListenUi();
+        });
+        _mic.Start();
+
+        // Start() is synchronous: it has either raised Failed by now or it is running. That is
+        // why Starting needs no deadline here — §7 asks for one so the state cannot be sat in
+        // forever, and a transition that cannot linger satisfies it more cheaply than a timer.
+        if (_listen == Dictation.ListenState.Starting) _listen = Dictation.ListenState.Listening;
+    }
+
+    void DisarmMic()
+    {
+        try { _mic?.Stop(); _mic?.Dispose(); } catch { /* stopping must not be able to fail */ }
+        _mic = null;
+        _partial = "";
+        _listen = Dictation.ListenState.Off;
+        _listenReason = null;
+    }
+
+    /// <summary>Restore the remembered toggle (D-V2). A toggle that resets itself is a button,
+    /// which is not what was asked for; and publish hot-swaps this window (§2), so an
+    /// unremembered toggle would go silently deaf on every swap — the "quietly outdated" failure
+    /// the standing directive names. DODONA_UI_MIC=off still outranks it, in Recognizers.Create.</summary>
+    void RestoreListening()
+    {
+        if (UiSettings.Load().Listening == true) ArmMic();
+        UpdateListenUi();
+    }
+
+    /// <summary>The indicator and `ui dump` are two renderings of ONE sentence
+    /// (Dictation.Describe), so the screen and the dump cannot disagree about what is
+    /// happening. Three states, and the third is the point: on-and-deaf must never look like
+    /// on (§5).</summary>
+    void UpdateListenUi()
+    {
+        var words = Dictation.Describe(_listen, _listenReason);
+        // The unsettled tail renders BESIDE the words, never in the box (D-V6). Whether it
+        // should render inline instead is the one open UI question in the proposal (§6.2); it
+        // costs a RichTextBox and does not change what a check reads.
+        ListenStatus.Text = _partial.Length > 0 ? $"{words} · {_partial}" : words;
+        ListenStatus.Visibility = words.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+
+        var colour = _listen switch
+        {
+            Dictation.ListenState.Listening or Dictation.ListenState.Starting => Color.FromRgb(0x6F, 0xA8, 0xDC),
+            // The amber this window already uses for "needs your attention", not a new red: a
+            // failed mic is a thing to notice, not an emergency.
+            Dictation.ListenState.Error => Color.FromRgb(0xE0, 0xA9, 0x4E),
+            _ => Color.FromRgb(0x5A, 0x60, 0x69),
+        };
+        var brush = new SolidColorBrush(colour);
+        MicGlyph.Stroke = brush;
+        // Outline when off, filled when armed — readable at a glance without reading the words.
+        MicGlyph.Fill = _listen == Dictation.ListenState.Off ? Brushes.Transparent : brush;
+        MicButton.ToolTip = words.Length == 0 ? "Dictation — click to listen" : $"Dictation: {words}";
+    }
+
+    void Mic_Click(object sender, RoutedEventArgs e)
+    {
+        SetListening("toggle");
+        e.Handled = true;
+    }
+
     // Auto-grow stops here; a deliberate drag may go further, because the operator asking
     // for more room has said something the default cannot know.
     const double InputAutoCap = 200;
@@ -675,6 +915,12 @@ public partial class MainWindow : Window
     {
         var text = InputBox.Text.Trim();
         if (text.Length == 0) return;
+
+        // THE SUBMIT RACE (§4). Everything the recogniser was in the middle of hearing belongs
+        // to THIS message. Anything delivered after this point carries an older epoch and is
+        // dropped, instead of opening the next message with the tail of the last one.
+        _submitEpoch++;
+        _partial = "";
 
         // Always sends. If there is nowhere to route, the daemon starts a lane and says
         // so — the UI does not get to invent a dialog for that, because deciding where

@@ -51,7 +51,7 @@ function Abort([string]$why, [string]$fix) {
 function AllSuites {
     # 'unit' first: it is the cheapest thing that can fail, so a full run finds a broken
     # claim algebra in under a second instead of four minutes in.
-    'unit', 'm0', 'm1', 'm2', 'm3', 'm4', 'workspace', 'ui-use', 'compression', 'brain', 'concierge', 'publish'
+    'unit', 'm0', 'm1', 'm2', 'm3', 'm4', 'workspace', 'ui-use', 'voice', 'compression', 'brain', 'concierge', 'publish'
 }
 
 # ---------------------------------------------------------------- blockers
@@ -706,7 +706,7 @@ function SoloSuites { , @('unit', 'm1', 'ui-use') }
 # Measured 2026-08-19, each suite alone: ui-use 42.5, m4 28.4, publish ~30, brain 23.4,
 # m3 16.6, workspace 13.8, compression 11.7, concierge 11.1, m1 7.7, m2 7.7, m0 7.0.
 function SuiteOrderHint {
-    , @('ui-use', 'publish', 'm4', 'brain', 'm3', 'workspace', 'compression', 'concierge', 'm1', 'm2', 'm0')
+    , @('ui-use', 'publish', 'm4', 'brain', 'voice', 'm3', 'workspace', 'compression', 'concierge', 'm1', 'm2', 'm0')
 }
 
 # HOW MANY AT ONCE. THREE. The number is measured, and it was 5 until 5 was shown to be wrong.

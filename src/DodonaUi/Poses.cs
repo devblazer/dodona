@@ -25,6 +25,11 @@ static class Poses
         // and because reaching either from live state needs a refused ticket or a stumped
         // concierge. Every new affordance owes a deterministic pose (CLAUDE.md §3).
         "ask", "ask-group",
+        // Dictation armed, with an unsettled tail beside the indicator
+        // (docs/VOICE-INPUT-PLAN.md §5). Every new affordance owes a deterministic pose
+        // (CLAUDE.md §3), and this one cannot be reached from live state without a microphone
+        // and somebody talking into it — which is precisely the state no suite may create.
+        "listening",
     };
 
     static PaneSnap Pane(long id, string title, string presence, int badge = 0, bool blocked = false,

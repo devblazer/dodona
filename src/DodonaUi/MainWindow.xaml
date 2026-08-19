@@ -390,6 +390,30 @@
                             </ControlTemplate>
                         </Thumb.Template>
                     </Thumb>
+                    <!-- Dictation (docs/VOICE-INPUT-PLAN.md §5). Three states and the third is
+                         the point: OFF is an outline, LISTENING is filled in the status blue,
+                         ERROR is filled amber with the reason in words beside it. A toggle that
+                         is on and deaf must never look like a toggle that is on.
+                         A Path and not a glyph character: a font that lacks the codepoint would
+                         render a box, and §0.2's non-ASCII trap has cost this project rounds. -->
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Right"
+                                VerticalAlignment="Center" Margin="0,0,4,0">
+                        <TextBlock x:Name="ListenStatus" FontSize="11" Margin="0,0,6,0"
+                                   VerticalAlignment="Center" Foreground="#FF6FA8DC"
+                                   Visibility="Collapsed" TextTrimming="CharacterEllipsis"
+                                   MaxWidth="320"/>
+                        <Button x:Name="MicButton" Click="Mic_Click" Width="16" Height="18"
+                                Padding="0" Background="Transparent" BorderThickness="0"
+                                Cursor="Hand" AutomationProperties.Name="microphone"
+                                ToolTip="Dictation — click to listen">
+                            <Path x:Name="MicGlyph" Stretch="Uniform" Width="9" Height="13"
+                                  Stroke="#FF5A6069" StrokeThickness="1.2" Fill="Transparent"
+                                  Data="M5,0.6 C6.2,0.6 7.1,1.5 7.1,2.7 L7.1,6.6 C7.1,7.8 6.2,8.7 5,8.7
+                                        C3.8,8.7 2.9,7.8 2.9,6.6 L2.9,2.7 C2.9,1.5 3.8,0.6 5,0.6 Z
+                                        M0.9,6.2 C0.9,8.5 2.7,10.3 5,10.3 C7.3,10.3 9.1,8.5 9.1,6.2
+                                        M5,10.3 L5,12.8"/>
+                        </Button>
+                    </StackPanel>
                     <Grid Grid.Row="1">
                         <TextBox x:Name="InputBox" FontSize="13" Padding="6,4" Background="#FF262A30"
                                  Foreground="#FFD8DCE0" BorderBrush="#FF3A3E44" CaretBrush="#FFD8DCE0"
