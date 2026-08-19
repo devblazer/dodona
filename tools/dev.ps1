@@ -422,6 +422,21 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 #   unit  is `dotnet test`, which builds Dodona.Tests AND its ProjectReference to Dodona --
 #         straight into src\Dodona\bin. So it runs alone.
 #
+#   m1    is here for a reason that is MEASURED BUT NOT ROOT-CAUSED, and saying so is the
+#         point. Alone it is green 3 runs out of 3 in 8-9 s. Run beside m4's real build it
+#         fails `gate_denies_outside_claim` and takes 30 s, because `dodona gate-hook`
+#         returns EMPTY -- no deny, and no `.dodona-bypass.log` either -- continuously for
+#         more than the 20 s the check now retries for. Empty output with no bypass log can
+#         only be one of GateHook's three SILENT `return 0` paths (unreadable stdin,
+#         unparseable stdin, or no file_path), so the hook is not reaching the daemon at all;
+#         it is not the daemon being slow, which would have written the log. Three hypotheses
+#         were tested and all three were wrong: it is not the fail-open-on-pipe-error path
+#         (no log), and it is not PowerShell failing to deliver stdin to `cmd /c` (probed 60
+#         times under load, 60/60 delivered). Running it alone costs ~8 s of wall clock and
+#         makes the gate deterministic, which is worth more than the 8 s. The real question --
+#         whether layer 1 should fail CLOSED instead of silently open -- is a safety-model
+#         decision for the operator, not something to paper over with a longer retry.
+#
 # m4 IS DELIBERATELY NOT ON THIS LIST, and RECOVERY-PHASES P4.3 says it should be ("its
 # internal publish builds the tree's own obj/"). That is half right, and the half it gets
 # wrong is the half that matters: publish passes -p:BaseOutputPath=<temp>\ per project
@@ -436,7 +451,7 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 # shim-info, neutral cwd); Instance.Scoped() hashes that home into the concierge and shell
 # ids, so two suites cannot collide on a pipe; every root is a GUID temp directory; and every
 # UI launch carries --test-window, so it renders off-screen and never takes focus.
-function SoloSuites { , @('unit') }
+function SoloSuites { , @('unit', 'm1') }
 
 # Longest first. With a concurrency cap, start order decides the wall clock: begin the 45
 # second suite last and it finishes 45 seconds after everything else already has. This list is

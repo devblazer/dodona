@@ -127,10 +127,18 @@ try {
     $bypassed = if (Test-Path $bypass) { (Get-Content $bypass -Raw).Trim() } else { '' }
     Check 'gate_denies_outside_claim' ($deny -match '"permissionDecision":"deny"') `
         "hook=$hookCmd output=[$($deny.Trim())] bypass-log=[$bypassed]"
-    # A fail-open is not a gate failure -- but it must never be SILENT, because the only
-    # evidence it happened is a file nobody reads (CLAUDE.md §3: a silent degrade is a bug).
-    Check 'gate_never_failed_open_silently' ($bypassed -eq '' -or $deny -match 'deny') `
-        "the gate could not reach the daemon and allowed the write: $bypassed"
+    # A fail-open is not by itself a gate failure -- layer 2, the merge-time diff backstop,
+    # exists for it. But it must never be SILENT, because then the only evidence is a file
+    # nobody reads (CLAUDE.md §3: a silent degrade is a bug).
+    #
+    # THIS CHECK WAS BACKWARDS ON ITS FIRST ATTEMPT and passed during the exact event it was
+    # written to catch: it read `$bypassed -eq ''` as "no fail-open happened", when an empty
+    # bypass log is precisely what a SILENT fail-open leaves behind. It printed PASS in the
+    # same run where the gate allowed a write outside the claim and said nothing at all.
+    # The three outcomes are: denied (good), allowed-and-logged (fail-open, but visible), and
+    # allowed-with-nothing-anywhere (the silent one, which is what this must catch).
+    Check 'gate_never_failed_open_silently' (($deny -match 'deny') -or ($bypassed -ne '')) `
+        "the gate allowed a write outside ticket 1's claim and left NO trace: output=[$($deny.Trim())] bypass-log=[$bypassed]"
 
     # ---- 5. agent work: commit in wt1 (the test IS the agent at the git layer) ----
     Set-Content "$wt1\src\water\sim.cs" "// water sim v2"
