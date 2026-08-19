@@ -395,7 +395,48 @@ Re-verified with the same break: the suite aborts in 2.1 s and writes nothing.
 
 ---
 
-## Phase 2 — a lane opens in a project
+## Phase 2 — a lane opens in a project  *(LANDED 2026-08-19, branch `loc-p2`)*
+
+**What landed, and the four things this section got wrong.** Read these before Phase 3, 4 or 5:
+they are corrections to *this document*, established by experiment rather than by reading.
+
+1. **`m3:186-187` never pinned the cwd rung order** (found by Phase 1, confirmed here). Reversing
+   the rungs left m3 green, because for a normally-spawned ticket lane both rungs name the same
+   folder. This section's claim that a red there "is a correctness incident" was untestable.
+   `LaneCwdPrecedenceTests` on the `unit` loop is what pins the order now.
+2. **`m3` does not cover the ticket-lane SPAWN path at all, only respawn.** So a green m3 is not
+   evidence about any spawn site, and every check for this phase went into
+   `workspace-acceptance`'s two-project fixture (P1.1) instead. 17 acceptance checks + 11 unit
+   tests, all proved.
+3. **T2 was wider than stated.** The section named the plain-lane path; `ticket-agent` read
+   `_config` the same way, so a GATED lane in repo B also ran with the first project's permission
+   mode. Both go through `Config.For` now.
+4. **T4 needed a CLI change, not only a daemon one.** `workspace-detach`/`-move` are registry
+   writes performed in `Program.cs`; the daemon could not observe them at all. It is told
+   (`project-gone`) **only if it is already live** — summoning one would start the four warm-up
+   haiku processes as a side effect of a registry edit, which is CLAUDE.md §3.2's incident again.
+
+**T7 IS NOW REAL, AND IT IS THE COST OF THIS PHASE.** A plain lane is completely ungated
+(`GateHook` returns 0 with no `--ticket`), and `lane-start --project <B>` puts such an agent into
+a second repository — one with its own `main` and its own merge token. That is an **expansion of
+the ungated surface**, not a regression, and it is the reason P2.1 refuses a folder no project
+owns rather than substituting one: "ungated" must at least mean "ungated somewhere this
+workspace knows about". Nothing in this phase narrows it. Gating plain lanes, or giving each one
+a worktree of its own, is unbuilt work (`M5-DELIVERY-PLAN.md` §4).
+
+**What is enforced rather than instructed.** T1 was the most dangerous item and "one parameter,
+used twice" is an instruction, so it became a check: `AttachShimAsync` compares the folder named
+in the `--append-system-prompt` against the `ProcessStartInfo`'s working directory at **every**
+spawn in the product, and refuses the spawn on a mismatch (`shim_spawn_refused`). It can only
+fire on a code defect, so it fires in a suite and never on the operator's machine.
+
+**What did NOT change, deliberately.** Typed input still spawns in the first project
+(`SpawnForAsync`) — choosing a project from a sentence is Phase 3's four rungs, and Phase 3
+changes that one line. `NeutralCwd()` for brains and routers is untouched (T3). A one-project
+workspace is byte-for-byte identical: `TryProject(null)` is the first project, `Config.For` of the
+first project IS `_config`, and the claim-check base list reduces to the two bases it always had.
+
+---
 
 **Half-built already.** Schema v8 (`lanes.cwd`) landed with M5.1;
 `AttachShimAsync` is fully parameterised on `workDir` and records it for every spawn
@@ -424,12 +465,13 @@ because `Registry.Owner` does longest-ancestor matching
 
 | item | what |
 |---|---|
-| P2.1 | A project is resolved at the spawn site and **must be a registered project or inside one** — refuse anything else, loudly. |
-| P2.2 | `SpawnAgentLaneAsync`, `lane-start` and `LaneSystemPrompt` take **one** project value (T1). |
-| P2.3 | Lane config from `Config.For(project)` (T2). |
-| P2.4 | `repo-init` / `repo-status` take a project (T5). |
-| P2.5 | Fix the claim-check bases (T6). |
-| P2.6 | `workspace-detach` / `-move` reconcile lanes in the departing project — stop or re-home them (T4). |
+| P2.1 | A project is resolved at the spawn site and **must be a registered project or inside one** — refuse anything else, loudly. **DONE** — `Daemon.TryProject`: nothing requested is the first project (byte-identical), a requested folder resolves UP to its owning project through `Projects.Of`, and anything else is a refusal naming the projects it does know plus the `workspace-attach` that would add the one it does not. `dodona lane-start --project <path>`. |
+| P2.2 | `SpawnAgentLaneAsync`, `lane-start` and `LaneSystemPrompt` take **one** project value (T1). **DONE, AND ENFORCED RATHER THAN INSTRUCTED** — `SpawnAgentLaneAsync(title, project, …)` has no default and uses `project` three times (config, prompt, working directory), but "one parameter, used twice" is an instruction, and this trap has already survived one. So `Projects.DirSentence` WRITES the prompt's folder sentence and `Projects.Named` READS it back, and `AttachShimAsync` — the single funnel every spawn in the product passes through — compares the named folder against the `ProcessStartInfo`'s working directory and REFUSES on a mismatch (`shim_spawn_refused`). Unreachable by configuration, so it can only fire on a code defect. |
+| P2.3 | Lane config from `Config.For(project)` (T2). **DONE, and wider than written** — `ClaudeArgs` is now `internal static` and takes a `Config`, so it is on the `unit` loop; `ConfigForProject` feeds the plain-lane spawn AND the respawn, and `ticket-agent` (which had the identical defect, unmentioned above) now uses `ConfigFor(t.Repo)`. New `lane_config` event: which project configured a lane and what mode it got — previously unanswerable from outside the process. |
+| P2.4 | `repo-init` / `repo-status` take a project (T5). **DONE** — `--project` is an assertion (validated, refused if unowned, because `git init` in the wrong folder is not undoable), and the client's `cwd` is a hint (an agent in project B means B; an unowned cwd falls back to the first project, which is what these always did, and both commands print the path they acted on). |
+| P2.5 | Fix the claim-check bases (T6). **DONE** — worktree first (with the ticket's recorded claim prefix), then every REPOSITORY longest-first with its own `ClaimPrefix`, then every PROJECT unprefixed. The last rung is only there to keep the one-project message identical; it cannot produce a false *cover* in a multi-project workspace, because the bare relative form it yields can match only an unprefixed claim, and `Repos.Discover` prefixes every repo name the moment a second project is attached. |
+| P2.6 | `workspace-detach` / `-move` reconcile lanes in the departing project — stop or re-home them (T4). **DONE, and it needed a CLI change too** — those are registry writes in `Program.cs`, invisible to the daemon; `TellIfLive` sends `project-gone` **only when a daemon is already up** (summoning one would start the four warm-up haiku processes as a side effect of a registry edit). The daemon stops those agents over their own shim pipes and marks the lanes `unreachable`; rows and transcripts stay (§12). `lane-respawn` then refuses a folder no project owns and names `lane-respawn <lane> --project <project>`, which re-homes it. A TICKET lane cannot be re-homed: its gate is deployed into its worktree. |
+| P2.7 | **OPEN, found while landing P2.6.** `workspace-forget` deletes every `members` row too, and it is **not** wired to `project-gone` — so forgetting a workspace with a live daemon leaves its agents running in folders the registry no longer records, and that daemon's `Members()` silently degrades to `_primary` alone (the documented fallback for an unopenable registry, which is a different situation). Deliberately not done here: `forget` also orphans the DAEMON, not only the lanes, so the honest fix is "stop the daemon and its lanes, keep the store" — a lifecycle decision that belongs with Phase 5's reaping (P5.5 already owns "reap a brain whose project is no longer attached") rather than bolted onto a detach path. |
 
 **Becomes impossible:** a lane in a folder no workspace owns; a lane inheriting another
 project's permission mode; a prompt naming a folder the process is not in; a detached project
@@ -444,6 +486,10 @@ byte-for-byte identical:**
   choosing a project writes a lane row before the project is known, it fires.
 - **`workspace:146-150` `lanes_are_workspace_wide`** — its stated premise is *"lanes are
   workspace-wide"*. This phase contradicts it. The one check whose **name** must change.
+  **RENAMED to `a_lane_needs_no_repository`**, which is what its assertion always actually
+  tested — the name was the wrong half, not the check. `DEBUGGING.md`'s matching bullet is
+  corrected too; `Paths.cs` and `WORKSPACES-CONCIERGE.md` §93 still say "workspace-wide" and are
+  left alone on purpose, because there they mean *the STORE is per workspace*, which is unchanged.
 - `m3:186-187` survives **only if the ticket-worktree branch still wins** over the project
   branch. A red here is a correctness incident, not a test problem. **But do not read its
   green as evidence:** Phase 1 measured that it stays green both with the rung order
@@ -462,6 +508,17 @@ project** (`aliases` maps alias → *workspace* today, [Workspaces.cs:102](../sr
 and **recency** for ordering. No new parallel table — fewer owned things is this project's whole
 failure mode. The concierge stays the registry's sole writer; a daemon that learns a project
 tells it.
+
+**What Phase 2 left you, so you do not rebuild it.** The spawn side is finished and takes a
+project already: `SpawnAgentLaneAsync(title, project, model, effort)`, validated by
+`Daemon.TryProject` (which is also what you must call on whatever a rung decides — do not resolve
+a folder yourself, and do not substitute one when a rung is wrong). **The one line this phase
+changes is in `SpawnForAsync`**, which still passes the first project and says so in a comment:
+that is the whole of "typed input has no project in it yet". Rung 2 reads the distinct projects of
+live lanes — `Projects.Of(ProjectPaths(), l.Cwd)` over `Store.LanesAll()`, with liveness from
+`LaneLiveness` and never one instantaneous pipe read (D-L6). Rung 4 must write **no lane row**
+before the project is known; `brain:220 held_input_invents_no_lane` and
+`workspace:a_refused_lane_leaves_no_row_behind` are the two checks that catch it if it does.
 
 | rung | decided by | cost |
 |---|---|---|

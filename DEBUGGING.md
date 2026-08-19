@@ -154,9 +154,31 @@ was attached to two workspaces. Look for `attach_refused` in the registry's even
   which is why single-repo behaviour is bit-for-bit unchanged.
 - **`dodona.json` is per repository**, falling back to the workspace's — so one repo can
   be on `main` with one set of verify steps while another is on `master` with different
-  ones.
-- **Lanes are workspace-wide** and need no repository at all: an agent can work in a
-  folder that has never seen git. Only tickets need one.
+  ones. **A LANE'S CONFIG IS ITS PROJECT'S** since LOCATIONS-PLAN Phase 2: `permissionMode`
+  and `allowedTools` come from `Config.For(<the lane's project>)`, not from the workspace's
+  first project, so a repo deliberately kept on a leash keeps it. The `lane_config` event
+  records which project configured each lane and what mode it got — that was previously
+  unanswerable from outside the process, because the mode lands in a claude argv nothing reads
+  back. Note `Config.For` picks a WHOLE FILE and does not merge two, so a project config that
+  sets only `permissionMode` gets the built-ins for `agent` and `model`, not the workspace's.
+- **A lane needs no repository at all**: an agent can work in a folder that has never seen
+  git. Only tickets need one.
+- **A lane opens in ONE project, and it is chosen, not inherited.** `dodona lane-start
+  --project <path>` names it; the path must be a registered project or inside one (it resolves
+  UP to the project) and anything else is refused rather than substituted. With no `--project`
+  it is the workspace's first project, which is what every spawn site did before Phase 2 — so a
+  one-project workspace is unchanged. `lanes.cwd` is the record, `dodona status` and `ui dump`
+  report it (Phase 1), and the fake agent's `cwd` directive is how a check sees where the
+  *process* is rather than where the row says it should be.
+  **Typed input still goes to the first project** — choosing a project from a sentence is
+  Phase 3's four rungs, and `Daemon.SpawnForAsync` is the one line that changes.
+- **A detached project does not leave live lanes behind.** `workspace-detach` and
+  `workspace-move` now tell a *running* daemon (`project-gone`, never summoning one — a
+  registry edit must not start four haiku processes), which stops the agents in that project
+  and marks the lanes `unreachable`. The rows and transcripts stay. `lane-respawn` then
+  **refuses** to put a fresh agent back into a folder this workspace no longer owns, and names
+  `lane-respawn <lane> --project <project>` as the way to re-home it. A ticket lane cannot be
+  re-homed: its folder is its worktree and its gate is deployed there.
 
 ## The concierge (WORKSPACES-CONCIERGE.md §2)
 
@@ -338,6 +360,14 @@ are the authority and they must agree.)*
 - **`events`** — the causal chain: `ts, kind, lane_id, detail`. Every daemon action
   writes here. Lane kinds: `daemon_start`, `reconcile_done`, `shim_spawned`,
   `lane_connected`, `lane_unreachable`, `lane_pipe_lost`, `say`, `daemon_stop`.
+  Project kinds (LOCATIONS-PLAN Phase 2): `lane_config` (which project's dodona.json
+  configured this lane, and the permission mode it got — `source=argv` when read back out of
+  the real claude argv, `source=config` when the child takes no claude flags),
+  `lane_project_detached` (its project left the workspace, so the agent was stopped),
+  `lane_respawn_refused` (a respawn into a folder no project owns — trap T4),
+  `shim_spawn_refused` (**the system prompt named a different folder than the process would
+  start in** — trap T1, enforced in `AttachShimAsync`; this can only fire on a code defect,
+  never on configuration, so seeing it means a spawn site diverged from its prompt again).
   Ticket/merge kinds: `ticket_created`, `claim_conflict`, `claim_extended`,
   `ticket_approved`, `token_granted`, `token_queued`, `token_refused_unapproved`,
   `token_released`, `token_expired_reclaimed`, `claim_backstop_refused`, `landed`,

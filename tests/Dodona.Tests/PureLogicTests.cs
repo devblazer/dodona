@@ -895,3 +895,132 @@ public class ProjectResolutionTests
     public void A_work_lane_in_the_neutral_directory_is_named_as_neutral() =>
         Assert.Equal("neutral", Projects.Field("work", Neutral, One, Neutral));
 }
+
+/// <summary>
+/// A LANE MAY ONLY OPEN WHERE A PROJECT OWNS (docs/LOCATIONS-PLAN.md Phase 2, traps T1 and T4).
+///
+/// Three rules live here, and the reason all three are pure functions is that none of them has an
+/// acceptance-testable surface on its own:
+///
+///   * <see cref="Projects.IsOwned"/> is the T4 answer. `workspace-detach` and `workspace-move`
+///     touch no lane row, and respawn's only test was `Directory.Exists` -- which PASSES, because
+///     the folder is still there; it just belongs to another workspace now.
+///   * <see cref="Projects.PromptDirMismatch"/> is T1, ENFORCED. The prompt says "your working
+///     directory is X" and a separate line sets the real one; change one and not the other and the
+///     agent is told a folder it is not in. **It compiles clean**, it has already happened once
+///     (M5.1), and no acceptance suite can see it, because the prompt lives in an argv nothing
+///     reads back. So the detector had better be right, and it is checked in a millisecond.
+///   * <see cref="Daemon.ClaudeArgs"/> is T2's last link. The event a suite reads reports the
+///     CONFIG it resolved; this is what pins that the config's permission mode actually reaches
+///     the process's argv -- and it can only be checked here, because `IsClaude` is false for the
+///     suites' fake agent, so no suite ever builds a claude argv at all.
+/// </summary>
+public class LaneProjectGuardTests
+{
+    const string Alpha = @"C:\ws\alpha";
+    const string Beta = @"C:\ws\beta";
+    const string Neutral = @"C:\home\neutral";
+    static readonly string[] Two = { Alpha, Beta };
+
+    [Fact]
+    public void A_folder_a_project_owns_is_owned()
+    {
+        Assert.True(Projects.IsOwned(Two, Beta, Neutral));
+        Assert.True(Projects.IsOwned(Two, Beta + @"\src\a.cs", Neutral));
+    }
+
+    /// <summary>THE T4 STATE. The folder still exists -- that is exactly why `Directory.Exists`
+    /// could not catch this -- and it is no longer ours.</summary>
+    [Fact]
+    public void A_folder_that_left_the_workspace_is_not_owned() =>
+        Assert.False(Projects.IsOwned(new[] { Alpha }, Beta + @"\src", Neutral));
+
+    /// <summary>Management roles belong in the neutral directory and must not be refused there.
+    /// A brain or router started inside a project loads that project's CLAUDE.md and skills --
+    /// a classifier that can run /ship (T3, P5.8).</summary>
+    [Fact]
+    public void The_neutral_directory_is_always_owned() =>
+        Assert.True(Projects.IsOwned(Two, Neutral + @"\x", Neutral));
+
+    /// <summary>No recorded directory is not a refusal: a dispatcher row is a UI row with no
+    /// process, and a lane older than schema 8 never wrote the column. ResolveLaneCwd falls back
+    /// to the first project for both, so refusing them would strand a row that did nothing.</summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    public void A_lane_with_no_recorded_directory_is_not_refused(string? cwd) =>
+        Assert.True(Projects.IsOwned(Two, cwd, Neutral));
+
+    // ---------------------------------------------------------------- T1
+
+    /// <summary>The prompt a plain lane really gets, parsed back out of the argv it really goes
+    /// into. If <see cref="Projects.DirSentence"/> and <see cref="Projects.Named"/> ever stop
+    /// agreeing, the T1 detector silently detects nothing -- an enforcement that quietly stops
+    /// enforcing, which is the failure this project keeps paying for.</summary>
+    [Fact]
+    public void The_prompt_names_the_directory_it_was_built_with() =>
+        Assert.Equal(Beta, Projects.Named(Daemon.LaneSystemPrompt("BETA", Beta)));
+
+    [Fact]
+    public void A_matching_prompt_and_working_directory_pass()
+    {
+        var args = Daemon.ClaudeArgs(new Config("main", Array.Empty<string>()), "opus", "high",
+                                     Daemon.LaneSystemPrompt("BETA", Beta), acceptEdits: true);
+        Assert.Null(Projects.PromptDirMismatch(args, Beta));
+        // Trailing separator and casing differ between a registry path and a ProcessStartInfo,
+        // and both are binary-collated by `==`. A false refusal here would block every spawn.
+        Assert.Null(Projects.PromptDirMismatch(args, Beta.ToUpperInvariant() + @"\"));
+    }
+
+    /// <summary>THE M5.1 INCIDENT, as one assertion: the prompt says one folder, the process
+    /// starts in another. This is the case that used to compile, run, and mislead an agent.</summary>
+    [Fact]
+    public void A_prompt_naming_a_different_folder_is_caught()
+    {
+        var args = Daemon.ClaudeArgs(new Config("main", Array.Empty<string>()), "opus", "high",
+                                     Daemon.LaneSystemPrompt("BETA", Beta), acceptEdits: true);
+        var m = Projects.PromptDirMismatch(args, Alpha);
+        Assert.NotNull(m);
+        Assert.Contains(Beta, m);
+        Assert.Contains(Alpha, m);
+    }
+
+    /// <summary>A TICKET prompt names no folder ("your worktree is the current working
+    /// directory"), and neither does a fake agent's empty argv. Both must pass rather than be
+    /// refused for having nothing to compare.</summary>
+    [Fact]
+    public void A_prompt_that_names_no_folder_is_not_a_mismatch()
+    {
+        Assert.Null(Projects.PromptDirMismatch(Array.Empty<string>(), Alpha));
+        Assert.Null(Projects.PromptDirMismatch(
+            new[] { "--append-system-prompt", "You are a lane agent working ticket 3. Your worktree is the current working directory." },
+            Alpha));
+    }
+
+    // ---------------------------------------------------------------- T2
+
+    /// <summary>The permission mode in the argv is THIS config's, not the daemon's field. This
+    /// method read `_config` directly until Phase 2 -- the workspace's FIRST project -- so a lane
+    /// in project B ran with project A's leash, and a repo deliberately kept on one lost it
+    /// (CLAUDE.md §7: that leash is the only thing a project gets to ask for).</summary>
+    [Fact]
+    public void A_lanes_argv_carries_its_own_configs_permission_mode()
+    {
+        var leashed = new Config("main", Array.Empty<string>(), PermissionMode: "acceptEdits",
+                                 AllowedTools: new[] { "Bash(dotnet build:*)" });
+        var args = Daemon.ClaudeArgs(leashed, "opus", "high", "sys", acceptEdits: true);
+        Assert.Equal("acceptEdits", Projects.ArgValue(args, "--permission-mode"));
+        Assert.Equal("Bash(dotnet build:*)", Projects.ArgValue(args, "--allowedTools"));
+    }
+
+    /// <summary>A utility role (router, brain, compressor) asks for no edit permission at all, so
+    /// no permission mode reaches its argv however its config is written.</summary>
+    [Fact]
+    public void A_utility_lane_gets_no_permission_mode()
+    {
+        var args = Daemon.ClaudeArgs(new Config("main", Array.Empty<string>(), PermissionMode: "acceptEdits"),
+                                     "haiku", "low", "sys", acceptEdits: false, utility: true);
+        Assert.Null(Projects.ArgValue(args, "--permission-mode"));
+        Assert.Equal("user", Projects.ArgValue(args, "--setting-sources"));
+    }
+}

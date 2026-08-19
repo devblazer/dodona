@@ -12,6 +12,9 @@ using System.Text.RegularExpressions;
 //   env:NAME      — the result event carries the value of environment variable NAME, or
 //                   `(unset)`. This is how a check sees what the SPAWN SITE actually put in
 //                   an agent's environment (Phase 0c, DODONA_WORKSPACE).
+//   cwd           — the result event carries this process's OWN working directory. How a check
+//                   sees WHERE an agent really is, rather than where the store says it was
+//                   meant to be (LOCATIONS-PLAN Phase 2).
 //
 // DODONA_LANE_ROLE=compressor makes it answer in the compressor's fixed JSON schema (§5)
 // instead, deterministically shortening whatever it was given. That keeps selective
@@ -304,13 +307,24 @@ while ((line = Console.ReadLine()) is not null)
     //
     // Checked BEFORE `say`, because `say env:X` matches both patterns.
     var envq = Regex.Match(text, @"env:(\w+)");
+    // cwd — the result IS this process's own working directory.
+    //
+    // The same reasoning as env:NAME, one level deeper, and it is what makes
+    // docs/LOCATIONS-PLAN.md Phase 2 checkable at all. `lanes.cwd` is written BEFORE
+    // Process.Start, so a recorded project proves only that the daemon INTENDED a folder — and
+    // "the lane looks placed while the process is somewhere else" is precisely this phase's
+    // failure mode (trap T1: a prompt naming a folder the process is not in). The daemon sets
+    // the SHIM's WorkingDirectory and the shim hands its own cwd to the child, so this is the
+    // OS's answer about the agent itself, at the far end of that chain.
+    var cwdq = Regex.IsMatch(text.Trim(), @"^cwd$");
     var say = Regex.Match(text, @"say\s+(.+)$");
     Emit(new
     {
         type = "result",
         subtype = "success",
         session_id = sessionId,
-        result = envq.Success ? (Environment.GetEnvironmentVariable(envq.Groups[1].Value) ?? "(unset)")
+        result = cwdq ? Environment.CurrentDirectory
+               : envq.Success ? (Environment.GetEnvironmentVariable(envq.Groups[1].Value) ?? "(unset)")
                : say.Success ? say.Groups[1].Value.Trim()
                : $"done: {text}",
     });

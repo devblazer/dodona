@@ -131,4 +131,87 @@ static class Projects
 
         return value == expected ? null : value;
     }
+
+    /// <summary>
+    /// May a lane legitimately run here? True for a folder a project owns, and true for the
+    /// neutral directory (where management roles BELONG, T3/P5.8). False is the T4 state:
+    /// `workspace-detach` and `workspace-move` touch no lane row, so a recorded `lanes.cwd`
+    /// can outlive its project while the FOLDER still exists — it belongs to another
+    /// workspace now, and respawn's only test was <c>Directory.Exists</c>, which passes.
+    ///
+    /// Pure, like everything else here, so the rule that decides whether an agent may be
+    /// started in a folder is re-checkable in a second rather than eight seconds of daemon
+    /// away. The empty case answers TRUE deliberately: "this lane never recorded a directory"
+    /// is a lane older than schema 8 or a dispatcher row, and <see cref="Daemon.ResolveLaneCwd"/>
+    /// falls back to the first project for exactly those — refusing them would strand a row
+    /// that has done nothing wrong.
+    /// </summary>
+    public static bool IsOwned(IEnumerable<string> projects, string? cwd, string neutralDir) =>
+        string.IsNullOrWhiteSpace(cwd)
+        || Of(new[] { neutralDir }, cwd) is not null
+        || Of(projects, cwd) is not null;
+
+    // ------------------------------------------------------------------ T1: one folder, said once
+
+    /// <summary>The lead-in of the sentence a plain lane's system prompt uses to name its
+    /// folder. Public so <see cref="Daemon.LaneSystemPrompt"/> WRITES the sentence with it and
+    /// <see cref="Named"/> READS it back with it — one definition, so the two cannot drift.</summary>
+    public const string DirLead = "Your working directory is ";
+    /// <summary>The tail. `—` is an em dash written as an escape on purpose: this file is
+    /// BOM-less, and a literal keeps working here but invites the same literal into a `.ps1`,
+    /// where a BOM-less non-ASCII byte is read as ANSI and matches nothing (CLAUDE.md §0.2).</summary>
+    public const string DirTail = " \u2014 work there.";
+
+    /// <summary>The sentence, built once.</summary>
+    public static string DirSentence(string workDir) => DirLead + workDir + DirTail;
+
+    /// <summary>The folder a system prompt NAMES, or null when it names none (a ticket prompt
+    /// says "your worktree is the current working directory" and names nothing, which is the
+    /// honest answer for it).</summary>
+    public static string? Named(string? systemPrompt)
+    {
+        if (systemPrompt is null) return null;
+        var i = systemPrompt.IndexOf(DirLead, StringComparison.Ordinal);
+        if (i < 0) return null;
+        var from = i + DirLead.Length;
+        var j = systemPrompt.IndexOf(DirTail, from, StringComparison.Ordinal);
+        return j < 0 ? null : systemPrompt[from..j];
+    }
+
+    /// <summary>The value of a flag in a spawn's argv, or null. Used to read back what was
+    /// really passed rather than what the code that built it believed it passed.</summary>
+    public static string? ArgValue(IReadOnlyList<string> args, string flag)
+    {
+        for (int i = 0; i + 1 < args.Count; i++)
+            if (string.Equals(args[i], flag, StringComparison.Ordinal)) return args[i + 1];
+        return null;
+    }
+
+    /// <summary>
+    /// TRAP T1, ENFORCED (docs/LOCATIONS-PLAN.md Phase 2): the prompt must name the folder the
+    /// process is actually started in. Returns null when they agree, or the refusal to print.
+    ///
+    /// This is the most dangerous item in the phase and it is not hypothetical — it has already
+    /// happened once (M5.1: `lane-respawn` set the worktree as the working directory and rebuilt
+    /// the PLAIN-lane prompt, so a resumed ticket agent was told the live tree and ran in the
+    /// worktree). Two literals eleven hundred lines apart, and **it compiles clean**: an agent
+    /// told a folder it is not in will `cd` there, or reason about the wrong `CLAUDE.md`, or
+    /// write a report naming a tree it never touched. Nothing in a type system catches that,
+    /// and no acceptance suite could see it either — the prompt goes into an argv nobody reads
+    /// back.
+    ///
+    /// So the check happens where BOTH facts are finally in one place: at the spawn, over the
+    /// real argv and the real working directory. Paths are compared with trailing separators
+    /// and case folded, because one side comes from the registry and the other from a
+    /// `ProcessStartInfo` (CLAUDE.md §0.2 — SQLite `=` and string `==` are both binary-collated
+    /// while live disk casing is not).
+    /// </summary>
+    public static string? PromptDirMismatch(IReadOnlyList<string> args, string workDir)
+    {
+        var named = Named(ArgValue(args, "--append-system-prompt"));
+        if (named is null) return null;
+        static string Fold(string p) => p.TrimEnd('\\', '/').ToLowerInvariant();
+        return Fold(named) == Fold(workDir) ? null
+            : $"the system prompt names '{named}' but the process would start in '{workDir}'";
+    }
 }
