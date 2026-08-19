@@ -279,6 +279,22 @@ function Get-StatusProject([string]$statusText, [string]$lane) {
     return ''
 }
 
+# The `scope=` field `dodona status` prints for one lane, or '' when it printed none
+# (LOCATIONS-PLAN P5.6). `project=` says where a lane RUNS; `scope=` says which project a
+# MANAGEMENT lane is for -- a brain runs in the neutral directory on purpose (P5.8), so
+# `project=` is silent about it by design and the two fields answer different questions.
+#
+# IT IS PRINTED BEFORE `project=`, WHICH IS LOAD-BEARING. Get-StatusProject above anchors on
+# `project=(.+?)\s*$`, so a `scope=` appended AFTER it would be captured as part of the project
+# path and five checks in two suites would start comparing a path against a path-plus-a-field.
+# Both regexes only work while scope stays on the left.
+function Get-StatusScope([string]$statusText, [string]$lane) {
+    $line = @($statusText -split "`r?`n" | Where-Object { $_ -match "^lane $lane\b" })
+    if ($line.Count -ne 1) { return "<$($line.Count) lines matched 'lane $lane'>" }
+    if ($line[0] -match 'scope=(.+?)(\s\s|\s*$)') { return $Matches[1] }
+    return ''
+}
+
 # ---------------------------------------------------------------- did this suite leak?
 
 # One assertion, called from every suite's finally: nothing may still be running out of

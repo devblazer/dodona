@@ -288,6 +288,85 @@ sealed class Store : IDisposable, ILaneSink
                 PRAGMA user_version = 9;
                 """);
         }
+        if (v < 10)
+        {
+            // WHICH PROJECT A LANE IS FOR (P5.1, decision D-L8: "track brains, do not count
+            // them"). `cwd` (schema 8) says where a lane's process RUNS. This says which
+            // project it is FOR, and the two are deliberately different for a management lane:
+            // a brain runs in the neutral directory on purpose (P5.8 -- a brain inside a
+            // project loads that project's CLAUDE.md and skills, i.e. a manager that can end
+            // up running `/ship`), so its cwd can never say which project it serves.
+            //
+            // WITHOUT THIS COLUMN THERE IS NOTHING TO ASK BUT A COUNT, and the count was
+            // wrong. Reconcile kept ONE `keep` lane id per utility role and shut every other
+            // alive lane of that role down as "a duplicate left by a fixed leak" -- so two
+            // projects meant a healthy brain killed on every daemon start (including every
+            // auto-publish swap), ANNOUNCED AS A REPAIR. A count cannot tell "two brains
+            // because two projects" from "two brains because of a bug".
+            //
+            // So validity becomes a REGISTRATION: a brain is valid iff a row says it should
+            // exist for (role, project), and "surplus" becomes an unmatched registration
+            // rather than an arithmetic result. Nothing healthy is ever killed again.
+            //
+            // Empty means "not resolved yet", which is what every pre-v10 row is.
+            // StampLaneProjects fills them in at daemon start, where the registry lives --
+            // the store deliberately knows nothing about workspace membership, exactly as with
+            // schema 9's `#unresolved:` repo paths.
+            //
+            // COLLATE NOCASE for schema 9's reason, restated because it bit twice: paths come
+            // from live disk casing while SQLite `=` is binary-collated, so `C:\Proj` and
+            // `c:\proj` would be two registrations over one project -- i.e. two brains where
+            // there should be one, reached by nothing more than a folder rename.
+            Exec("""
+                ALTER TABLE lanes ADD COLUMN project TEXT NOT NULL DEFAULT '' COLLATE NOCASE;
+                PRAGMA user_version = 10;
+                """);
+        }
+    }
+
+    // ------------------------------------------------- lane registration (P5.1)
+
+    /// <summary>What <see cref="StampLaneProjects"/> did. Every list is a line a person may
+    /// need to read: a lane whose project could not be resolved is ANNOUNCED, and an
+    /// ASSUMED one is announced too, because an assumption that decides whether an agent is
+    /// reaped must not be invisible (CLAUDE.md §0.1 — a silent degrade is a bug).</summary>
+    public sealed record LaneStampReport(List<string> Stamped, List<string> Assumed, List<string> Unresolved);
+
+    /// <summary>
+    /// Fill in <c>project</c> for lanes written before schema 10, using a resolver that knows
+    /// the workspace's projects (the daemon owns membership; the store must not).
+    ///
+    /// Idempotent and safe on every start: it touches only rows that are still unstamped and
+    /// not dead, so on an already-migrated store it costs one scan.
+    ///
+    /// WHY THIS IS NOT OPTIONAL. Reaping is keyed on this column, so a pre-v10 brain left
+    /// blank would look like a registration for no project — and the first daemon on the new
+    /// schema would reap the operator's live brain as unregistered. Which is the exact bug
+    /// Phase 5 exists to remove, reintroduced by the migration that removes it. The resolver
+    /// therefore always returns SOMETHING for a management lane, and says whether it knew or
+    /// assumed.
+    ///
+    /// Dead rows are left blank on purpose: nothing keys on them, they can be numerous, and
+    /// rewriting a workspace's whole history to stamp lanes that ended months ago is a
+    /// migration cost paid for no reader.
+    /// </summary>
+    public LaneStampReport StampLaneProjects(Func<LaneRow, (string? Project, bool Assumed)> resolve)
+    {
+        var report = new LaneStampReport(new List<string>(), new List<string>(), new List<string>());
+        var pending = LanesAll().Where(l => l.Project.Length == 0 && l.State != "dead").ToList();
+        if (pending.Count == 0) return report;
+        foreach (var l in pending)
+        {
+            var (project, assumed) = resolve(l);
+            if (project is null or "")
+            {
+                report.Unresolved.Add($"lane {l.Id} ({l.Title}, role={l.Role}): no project owns cwd '{(l.Cwd.Length > 0 ? l.Cwd : "-")}'");
+                continue;
+            }
+            LaneProject(l.Id, project);
+            (assumed ? report.Assumed : report.Stamped).Add($"lane {l.Id} ({l.Title}, role={l.Role}) -> {project}");
+        }
+        return report;
     }
 
     // ------------------------------------------------------- repo identity (P0.3)
@@ -478,6 +557,10 @@ sealed class Store : IDisposable, ILaneSink
     /// same place the original did — a ticket lane must come back in its worktree, not in
     /// the operator's live tree (M5.1).</summary>
     public void LaneCwd(long id, string cwd) => Set("UPDATE lanes SET cwd = $v WHERE id = $id;", id, cwd);
+    /// <summary>Which project this lane is FOR — the registration a brain's validity is
+    /// decided by (P5.1, D-L8). Not the same as <see cref="LaneCwd"/>: a brain is scoped to a
+    /// project while running in the neutral directory (P5.8).</summary>
+    public void LaneProject(long id, string project) => Set("UPDATE lanes SET project = $v WHERE id = $id;", id, project);
     public void LaneTitle(long id, string title) => Set("UPDATE lanes SET title = $v WHERE id = $id;", id, title);
 
     public void KvSet(string key, string value)
@@ -576,7 +659,7 @@ sealed class Store : IDisposable, ILaneSink
     }
 
     public record LaneRow(long Id, string Title, string State, string Pipe, string? Session, string Presence, string Role,
-                          string Cwd);
+                          string Cwd, string Project);
 
     public List<LaneRow> LanesAll()
     {
@@ -584,12 +667,12 @@ sealed class Store : IDisposable, ILaneSink
         {
             var list = new List<LaneRow>();
             using var c = _db.CreateCommand();
-            c.CommandText = "SELECT id, title, state, pipe_name, session_id, presence, role, cwd FROM lanes ORDER BY id;";
+            c.CommandText = "SELECT id, title, state, pipe_name, session_id, presence, role, cwd, project FROM lanes ORDER BY id;";
             using var r = c.ExecuteReader();
             while (r.Read())
                 list.Add(new LaneRow(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3),
                                      r.IsDBNull(4) ? null : r.GetString(4), r.GetString(5), r.GetString(6),
-                                     r.GetString(7)));
+                                     r.GetString(7), r.GetString(8)));
             return list;
         }
     }

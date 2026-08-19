@@ -654,6 +654,19 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
     # v9 (that is what `dev prove` does): there the store is already v8 and DROP COLUMN repo_path
     # would fail, killing the suite instead of failing the checks.
     StopDaemonFor $drift
+    # v10's column has to go too, and finding out why cost a debugging round worth recording.
+    # Migrate() runs one `if (v < N)` block per version and each is a single statement batch, so a
+    # `PRAGMA user_version = 8` that leaves a LATER version's column in place makes that version's
+    # `ALTER TABLE ... ADD COLUMN` fail with "duplicate column" -- inside the Store CONSTRUCTOR.
+    # The daemon then dies before it opens its control pipe, StartDaemonFor times out, and all
+    # FOUR checks below go red pointing at repo identity, which is not what broke. A fixture that
+    # claims to build a v8 store must actually build one.
+    #
+    # Keyed on the COLUMN, not on the version number, so this survives v11: `dev prove` runs this
+    # same suite against a build that has no v10 at all, where the column is legitimately absent.
+    if ([int]((Invoke-StoreSql $driftStore "SELECT COUNT(*) FROM pragma_table_info('lanes') WHERE name='project'").Trim()) -ge 1) {
+        Invoke-StoreExec $driftStore "ALTER TABLE lanes DROP COLUMN project;"
+    }
     if ([int]((Invoke-StoreSql $driftStore "PRAGMA user_version").Trim()) -ge 9) {
         Invoke-StoreExec $driftStore @"
 ALTER TABLE tickets DROP COLUMN repo_path;
@@ -1003,6 +1016,53 @@ PRAGMA user_version = 8;
     Check 'forget_removes_the_registry_row' `
         ($forgotten -match 'forgotten' -and -not (@(DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.id -eq $twin })) $forgotten
     Check 'forget_keeps_the_store_directory' (Test-Path (Join-Path $dodonaHome "workspaces\$twin")) ''
+
+    # ---- P2.7: FORGETTING A LIVE WORKSPACE MUST NOT LEAVE AGENTS BEHIND ------------------
+    # Phase 2 wired `workspace-detach` and `workspace-move` to `project-gone` and DEFERRED this
+    # one deliberately (LOCATIONS-PLAN P2.7, handed to Phase 5): `Registry.Forget` deletes every
+    # `members` row in one transaction, so forgetting a live workspace stranded an agent in a
+    # folder the registry no longer records -- and it orphans the DAEMON too, which is why it
+    # belongs with Phase 5's reaping rather than bolted onto detach.
+    #
+    # An orphaned daemon is not merely untidy. `publish --all` resolves swap targets by id from
+    # the registry, so a daemon whose workspace is forgotten can never be hot-swapped again: it
+    # is an un-updatable process holding agents nothing lists. Stopping it is reversible -- the
+    # store directory is kept (the check above), so re-creating the workspace over the same
+    # folder wakes it with every transcript intact.
+    $fgProj = Join-Path (Use-SuiteTemp) ("dodona-forget-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force "$fgProj\src" | Out-Null
+    Set-Content "$fgProj\src\main.cs" "// forget me"
+    # agent=$fake, or a lane in this workspace would be a real `claude -p` (CLAUDE.md 2.6).
+    Set-Content "$fgProj\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0 } | ConvertTo-Json)
+    DodonaBare @("workspace-create", "--name", "forgetme", "--member", $fgProj) | Out-Null
+    $fgAll = (DodonaBare @("workspaces", "--json")) | ConvertFrom-Json
+    $fgId = (@($fgAll) | Where-Object { $_.name -eq 'forgetme' } | Select-Object -First 1).id
+    $fgW = (& $dodona where --workspace $fgId --json) | Out-String | ConvertFrom-Json
+    $fgDaemon = StartDaemonFor $fgId
+    $fgLs = DodonaBare @("lane-start", "--title", "DOOMED", "--child", $fake, "--workspace", $fgId)
+    if ($fgLs -notmatch 'lane (\d+)') { throw "lane-start in the workspace about to be forgotten failed: $fgLs" }
+    $fgLane = $Matches[1]
+    DodonaBare @("say", "$fgLane", "say doomed up", "--workspace", $fgId) | Out-Null
+    Wait-Until { (DodonaBare @("tail", "$fgLane", "10", "--workspace", $fgId)) -match 'doomed up' } 20000 'the doomed lane answers' | Out-Null
+    $fgShimPid = [int]((Get-Content "$($fgW.dir)\shim-lane$fgLane.json" -Raw | ConvertFrom-Json).shimPid)
+    $fgForget = DodonaBare @("workspace-forget", "--workspace", $fgId)
+    # PROCESSES, NOT PIPES (.claude/skills/check-authoring 2). A lane pipe blinks out of the
+    # namespace for milliseconds while its shim swaps server instances, so a pipe's absence
+    # means "gone OR mid-reconnect" and a Wait-Until would eventually catch the gap and call a
+    # live agent stopped. A pid does not blink.
+    Wait-Until { -not (Get-Process -Id $fgShimPid -ErrorAction SilentlyContinue) } 25000 "the forgotten workspace's shim exits" | Out-Null
+    Check 'forgetting_a_workspace_stops_its_agents' `
+        (-not (Get-Process -Id $fgShimPid -ErrorAction SilentlyContinue)) `
+        "shim pid $fgShimPid for lane $fgLane is still alive; forget said: $($fgForget -replace '\s+', ' ')"
+    Wait-Until { $fgDaemon.HasExited } 25000 "the forgotten workspace's daemon exits" | Out-Null
+    Check 'forgetting_a_workspace_stops_its_orphaned_daemon' `
+        ($fgDaemon.HasExited) "daemon pid $($fgDaemon.Id) is still running for a workspace the registry no longer knows"
+    # ...and nothing was deleted. Forget is an undo for a workspace made by accident and must
+    # never be able to mean "delete six lanes of history" (§12).
+    Check 'a_forgotten_workspaces_transcripts_survive' `
+        ((Test-Path (Join-Path $dodonaHome "workspaces\$fgId")) -and
+         (Invoke-StoreSql $fgW.store "SELECT COUNT(*) FROM lanes WHERE id=$fgLane").Trim() -eq '1') `
+        "store=$(Test-Path (Join-Path $dodonaHome "workspaces\$fgId")) lane rows=$(Invoke-StoreSql $fgW.store "SELECT COUNT(*) FROM lanes WHERE id=$fgLane")"
 
     Dodona @("stop-daemon") | Out-Null
 }

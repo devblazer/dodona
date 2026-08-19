@@ -41,6 +41,13 @@ function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$nam
 # (tests/_workspace.ps1 Invoke-StoreSql has the incident -- a check in THIS suite queried `lane`
 # instead of `lane_id` and passed against every build because of it).
 function Rows([string]$sql) { Invoke-StoreSql $storeDb $sql }
+# The same query, but a sqlite error becomes the ANSWER instead of an exception. For the checks
+# that read `lanes.project`, which does not exist before schema 10: `Invoke-StoreSql` throws
+# (correctly -- a query naming a missing column used to return empty, parse as 0, and pass), and a
+# throw here would abort the suite inside its own try, so `dev prove` would report every later
+# check as MISSING rather than as a verdict. A red saying `no such column: project` is the honest
+# answer against an older build; a suite that never printed a tally is not an answer at all.
+function RowsTry([string]$sql) { try { Rows $sql } catch { "<sql error: $($_.Exception.Message)>" } }
 
 $daemon = $null
 $uiProc = $null
@@ -55,8 +62,16 @@ try {
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Wait-Daemon $ws.CtlPipe | Out-Null
     Dodona @("brain-start") | Out-Null
-    Wait-Until { (Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1' } 25000 'the brain lane is alive' | Out-Null
-    Check 'brain_is_warm_and_off_grid' ((Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1') ''
+    # PER PROJECT, NOT PER WORKSPACE (LOCATIONS-PLAN P5.6). This asserted COUNT(*) = 1 over the
+    # whole store, which is a workspace-wide statement about a thing that is now per project: with
+    # two projects it would go red for entirely correct behaviour, or -- worse -- be "fixed" by
+    # relaxing it to >= 1, at which point it asserts nothing about duplication at all. This
+    # workspace has ONE project, so the value it checks is unchanged; what changed is the QUESTION,
+    # which is now "one brain for THIS project" and stays meaningful with N.
+    $oneBrain = "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive' AND project='$root'"
+    Wait-Until { (RowsTry $oneBrain).Trim() -eq '1' } 25000 'the brain lane for this project is alive' | Out-Null
+    Check 'brain_is_warm_and_off_grid' ((RowsTry $oneBrain).Trim() -eq '1') `
+        (RowsTry "SELECT id, role, state, project FROM lanes WHERE role LIKE 'brain%'")
 
     # ---- silent when it agrees: no announcement beyond the standard creation receipt ----
     Dodona @("input", "make the water foam softer") | Out-Null
@@ -239,23 +254,32 @@ try {
     Wait-Daemon $ws.CtlPipe | Out-Null
     # Being up is not being RECONCILED. The checks below are about adoption, so wait for the
     # reconcile_done row that records it -- the very thing the last check reads.
-    Wait-Until { (Rows "SELECT detail FROM events WHERE kind='reconcile_done' ORDER BY id DESC LIMIT 1") -match 'brain=\d+' } 25000 'the restarted daemon has reconciled' | Out-Null
+    #
+    # `brains=`, NOT `brain=` (P5.6). This pattern was `brain=\d+`, and with a brain per project
+    # the detail would have become `brain=3,7` -- which that pattern STILL MATCHES, while asserting
+    # nothing about either brain. A check that degrades into a green proving nothing is the exact
+    # failure this plan keeps hitting, so the event key was renamed to make the old pattern
+    # impossible to match: it goes red and must be rewritten rather than quietly passing.
+    $reconcileDetail = "SELECT detail FROM events WHERE kind='reconcile_done' ORDER BY id DESC LIMIT 1"
+    $thisLeaf = [regex]::Escape((Split-Path -Leaf $root))
+    Wait-Until { (Rows $reconcileDetail) -match "brains=\[$thisLeaf=\d+" } 25000 'the restarted daemon has reconciled' | Out-Null
 
     $brainAfter = (Rows "SELECT id FROM lanes WHERE role='brain' AND state='alive' ORDER BY id").Trim()
     Check 'restart_adopts_the_brain_it_already_had' ($brainAfter -eq $brainBefore) "before=[$brainBefore] after=[$brainAfter]"
     Check 'restart_does_not_leak_a_second_brain' `
-        ((Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1') `
-        (Rows "SELECT id, title, role, state FROM lanes WHERE role LIKE 'brain%'")
+        ((RowsTry $oneBrain).Trim() -eq '1') `
+        (RowsTry "SELECT id, title, role, state, project FROM lanes WHERE role LIKE 'brain%'")
     # ...and asking for one again reuses it rather than making another.
     Dodona @("brain-start") | Out-Null
-    Wait-Until { (Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1' } 25000 'brain-start after a restart reuses the brain' | Out-Null
+    Wait-Until { (RowsTry $oneBrain).Trim() -eq '1' } 25000 'brain-start after a restart reuses the brain' | Out-Null
     Check 'brain_start_after_restart_reuses_it' `
-        ((Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1') `
-        (Rows "SELECT id, role, state FROM lanes WHERE role LIKE 'brain%'")
-    # The adoption is in the causal chain, not just in memory.
+        ((RowsTry $oneBrain).Trim() -eq '1') `
+        (RowsTry "SELECT id, role, state, project FROM lanes WHERE role LIKE 'brain%'")
+    # The adoption is in the causal chain, not just in memory -- and it names WHICH PROJECT'S brain
+    # it adopted, which is the fact `brain=\d+` could not carry and `brain=3,7` would have hidden.
     Check 'reconcile_records_which_brain_it_adopted' `
-        ((Rows "SELECT detail FROM events WHERE kind='reconcile_done' ORDER BY id DESC LIMIT 1") -match 'brain=\d+') `
-        (Rows "SELECT detail FROM events WHERE kind='reconcile_done' ORDER BY id DESC LIMIT 1")
+        ((Rows $reconcileDetail) -match "brains=\[$thisLeaf=$brainAfter\b") `
+        (Rows $reconcileDetail)
 
     # ---- THE WIRING: the role the daemon CREATES must be the role routing USES -----------
     # This is the check that was missing, and its absence cost two days of silently broken
@@ -330,16 +354,35 @@ try {
     # HOW THE FAILURE IS FORCED: a shim serves ONE client at a time, so a test holding the
     # brain's pipe makes the next daemon's connect fail while the process is provably alive.
     # That is the exact shape of the incident, and it needs no timing luck to reproduce.
-    $brainLane = (Rows "SELECT id FROM lanes WHERE role='brain' AND state='alive' LIMIT 1").Trim()
+    # NAMED, NOT `LIMIT 1` (P5.6). With one brain per workspace `LIMIT 1` WAS the only brain; with
+    # one per project it picks an ARBITRARY row, and every check in this section -- the wedge, the
+    # refusal, the never-called-gone -- would then be about whichever one sqlite happened to return
+    # first. The whole block would become a green proving nothing, which costs more than a red. So
+    # the brain is selected by the project it is FOR.
+    $brainLane = (RowsTry "SELECT id FROM lanes WHERE role='brain' AND state='alive' AND project='$root' ORDER BY id LIMIT 1").Trim()
+    # A lane id or nothing usable -- never an error string spliced into the SQL below, which
+    # would throw and take the tally down with it.
+    if ($brainLane -notmatch '^\d+$') { $brainLane = '-1' }
     $brainPipe = "dodona-$($ws.Id)-lane$brainLane"
     Dodona @("stop-daemon") | Out-Null
     Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down' | Out-Null
     $hold = New-Object System.IO.Pipes.NamedPipeClientStream('.', $brainPipe,
         [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
     try {
-        $hold.Connect(10000)
-        $holdReader = New-Object System.IO.StreamReader($hold)
-        $holdHello = $holdReader.ReadLine()      # drain the greeting; now the shim is ours
+        # A FAILED CONNECT IS A FAILED CHECK, NOT A DEAD SUITE. `$hold.Connect` throws, and the
+        # `finally` below disposes but does not swallow -- so a probe that could not reach the pipe
+        # aborted the whole suite inside its own try, no tally was printed, and `dev prove`
+        # reported every check in the file as MISSING rather than as a verdict. Found 2026-08-19
+        # proving Phase 5: against a build with no `lanes.project` the query above cannot name a
+        # brain, `$brainLane` is `-1`, and the pipe name is nonsense. The honest answer is a red
+        # precondition; twenty MISSING verdicts is not an answer at all.
+        $holdHello = $null
+        try {
+            $hold.Connect(10000)
+            $holdReader = New-Object System.IO.StreamReader($hold)
+            $holdHello = $holdReader.ReadLine()  # drain the greeting; now the shim is ours
+        }
+        catch { $holdHello = "<could not hold pipe '$brainPipe': $($_.Exception.Message)>" }
         # A PRECONDITION, not a claim about the fix -- `dev prove` reports it VACUOUS and that is
         # correct, because HEAD has a live predecessor here too. It is kept deliberately: it is
         # what stops the next check passing for the wrong reason. If the hold ever fails to
@@ -382,7 +425,306 @@ try {
     }
     finally { try { $hold.Dispose() } catch { } }
 
+    # ---- THE ONE-PROJECT CASE MUST NOT START REPORTING A NEW FIELD ---------------------
+    # Every phase of docs/LOCATIONS-PLAN.md leaves the one-project case byte-for-byte
+    # identical -- the property the whole workspace migration rested on, and the one the plan
+    # says it is most likely to break. The operator's own machine is a one-project workspace,
+    # so `scope=` (which names the project a management lane is scoped to) must be absent
+    # here: with one project there is exactly one answer and the field would be noise.
+    #
+    # VACUOUS BY CONSTRUCTION, and kept anyway (the shape Phase 0c's
+    # `an_explicit_root_beats_the_inherited_env` established): HEAD prints no `scope=` either,
+    # so no code state makes this go red. It exists so a later change cannot start printing
+    # one here quietly.
+    Check 'a_one_project_workspace_says_nothing_about_scope' `
+        ((Dodona @("status")) -notmatch 'scope=') `
+        (((Dodona @("status")) -split "`r?`n" | Where-Object { $_ -match '^lane ' }) -join ' | ')
+
     Dodona @("stop-daemon") | Out-Null
+
+    # =====================================================================================
+    # A BRAIN PER PROJECT (docs/LOCATIONS-PLAN.md Phase 5, decision D-L8)
+    #
+    # THE BUG THIS SECTION EXISTS FOR. Reconcile kept ONE `keep` lane id per utility role and
+    # shut every other alive lane of that role down as "a duplicate left by a fixed leak" --
+    # so with two projects it killed a healthy brain on every daemon start, including every
+    # auto-publish swap, and ANNOUNCED IT AS A REPAIR. A count cannot tell "two brains because
+    # two projects" from "two brains because of a bug".
+    #
+    # The operator's correction (2026-08-19): *"You just use a global system to keep track of
+    # that stuff. If it's not tracked, it's not valid. Why must you do some weird kill to
+    # count?"* So validity is a REGISTRATION -- `lanes.project` (schema v10) keyed by
+    # (role, project) -- and "surplus" stops being a count.
+    #
+    # WHY THIS FIXTURE IS THE ONLY ONE THAT CAN SEE ANY OF IT: one project has exactly one
+    # brain per role, so every check above this line passes with the defect fully present.
+    # Two projects in one workspace is the whole test.
+    #
+    # MODEL-FREE, and it takes a deliberate step to stay that way: `brain-start` has no
+    # `--child`, it uses the agent from its project's dodona.json. New-TwoProjectWorkspace
+    # writes no config at all, so without the two files below both brains would be a real
+    # `claude -p` -- i.e. quota, from a suite (CLAUDE.md 2.6).
+    # =====================================================================================
+    $p5Daemon = $null
+    $p5Dirs = New-Object System.Collections.ArrayList
+    $tp = New-TwoProjectWorkspace $dodona 'p5brains'
+    [void]$p5Dirs.Add($tp.Dir)
+    foreach ($p in @($tp.A, $tp.B)) {
+        Set-Content "$p\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0 } | ConvertTo-Json)
+    }
+    function Tp([string[]]$a) {
+        $ErrorActionPreference = 'Continue'
+        $ef = Join-Path $out 'p5.stderr.tmp'
+        Remove-Item $ef -ErrorAction SilentlyContinue
+        $o = (& $dodona ($a + @('--workspace', $tp.Id)) 2> $ef) | Out-String
+        $global:DODONA_EXIT = $LASTEXITCODE
+        $e = if (Test-Path $ef) { (Get-Content $ef -Raw) } else { '' }
+        ("$o`n$e").Trim()
+    }
+    function TpRows([string]$sql) { Invoke-StoreSql $tp.Store $sql }
+    # `lanes.project` DOES NOT EXIST BEFORE v10, and Invoke-StoreSql throws on a sqlite error
+    # (correctly -- a query naming a missing column used to return empty, parse as 0 and pass).
+    # A throw here would abort the suite inside its own try and report every later check as
+    # MISSING rather than as a verdict, so the error is turned into the check's DETAIL string
+    # instead of being swallowed: a red that says `no such column: project` is exactly the red
+    # this section wants against HEAD.
+    function TpTry([string]$sql) { try { TpRows $sql } catch { "<sql error: $($_.Exception.Message)>" } }
+    # A count that may have come back as an error string, WITHOUT the two traps around it.
+    # `[int]'<sql error: ...>'` throws (and would abort the suite, reporting every later check as
+    # MISSING); `[int]''` is 0, and `-eq 0` is a passing assertion, which is how a check written
+    # against a column that does not exist passed against every build ever made
+    # (.claude/skills/check-authoring 3). -1 can never equal a real count, so an unreadable
+    # answer FAILS and the error text still reaches the check's detail string.
+    function AsInt([string]$s) { $n = 0; if ([int]::TryParse((("$s") -replace '\s', ''), [ref]$n)) { $n } else { -1 } }
+    function Flat([string]$s) { (("$s") -replace '\s+', ' ') }
+    # A lane id out of a list that may be shorter than expected. '-1' keeps the SQL that follows
+    # syntactically valid, so a missing brain fails a check instead of throwing inside it.
+    function Nth($a, [int]$i) { if ($a -and @($a).Count -gt $i) { @($a)[$i] } else { '-1' } }
+    function StartP5Daemon([string]$tag) {
+        $p = Start-Process $dodona -ArgumentList "daemon", "--workspace", $tp.Id -PassThru -NoNewWindow `
+            -RedirectStandardOutput "$out\$tag.out" -RedirectStandardError "$out\$tag.err"
+        Wait-Daemon $tp.CtlPipe | Out-Null
+        $p
+    }
+
+    try {
+        $p5Daemon = StartP5Daemon 'p5daemon1'
+
+        # ---- two projects, two brains, and each knows which project it is for -------------
+        $bA = Tp @("brain-start", "--project", $tp.A)
+        $bB = Tp @("brain-start", "--project", $tp.B)
+        Wait-Until { (AsInt (TpRows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'")) -ge 2 } `
+            25000 'a brain exists for each of the two projects' | Out-Null
+        $brainIds = @((TpRows "SELECT id FROM lanes WHERE role='brain' AND state='alive' ORDER BY id").Trim() -split "`r?`n" | Where-Object { $_ })
+        Check 'two_projects_get_two_distinct_brains' `
+            ($brainIds.Count -eq 2 -and $brainIds[0] -ne $brainIds[1]) `
+            "brain lanes=[$($brainIds -join ',')] A=$(Flat $bA) B=$(Flat $bB)"
+        # THE REGISTRATION ITSELF. Without a row saying which (role, project) a brain is for,
+        # "surplus" can only ever be a count -- which is the thing being deleted.
+        $scoped = (TpTry "SELECT group_concat(project) FROM (SELECT project FROM lanes WHERE role='brain' AND state='alive' ORDER BY id)").Trim()
+        Check 'a_brains_project_is_recorded_on_its_lane_row' `
+            ($scoped -match [regex]::Escape($tp.A) -and $scoped -match [regex]::Escape($tp.B)) `
+            "project column=[$scoped] A='$($tp.A)' B='$($tp.B)'"
+        # ...and a PERSON can read it. A brain lane's cwd is neutral (P5.8 -- a brain inside a
+        # project loads that project's CLAUDE.md and skills, i.e. a manager that can run
+        # /ship), so `project=` says nothing about it by design and `scope=` is the new fact.
+        $p5St = Tp @("status")
+        $scopeA = Get-StatusScope $p5St (Nth $brainIds 0)
+        $scopeB = Get-StatusScope $p5St (Nth $brainIds 1)
+        Check 'status_names_the_project_a_brain_is_scoped_to' `
+            (($scopeA -eq $tp.A -or $scopeA -eq $tp.B) -and ($scopeB -eq $tp.A -or $scopeB -eq $tp.B) -and $scopeA -ne $scopeB) `
+            "lane $(Nth $brainIds 0) scope='$scopeA'  lane $(Nth $brainIds 1) scope='$scopeB'"
+
+        # ---- A RESTART ADOPTS BOTH AND RETIRES NEITHER -----------------------------------
+        # The exact failure: `_brainLo` is one scalar, so the adoption loop overwrote it and
+        # the surplus loop shut the other one down. Two projects, one daemon restart, one
+        # healthy session killed and reported as healing.
+        $beforeRestart = @($brainIds)
+        Tp @("stop-daemon") | Out-Null
+        Wait-Until { -not (Test-DodonaPipe $tp.CtlPipe) } 20000 'the two-project daemon is down' | Out-Null
+        $p5Daemon = StartP5Daemon 'p5daemon2'
+        # Being up is not being RECONCILED, and the reap runs inside reconcile -- so wait for the
+        # second `reconcile_done` row before reading what survived, or this measures the moment
+        # before the decision it is about.
+        Wait-Until { (AsInt (TpRows "SELECT COUNT(*) FROM events WHERE kind='reconcile_done'")) -ge 2 } 25000 'the second reconcile is recorded' | Out-Null
+        $afterRestart = @((TpRows "SELECT id FROM lanes WHERE role='brain' AND state='alive' ORDER BY id").Trim() -split "`r?`n" | Where-Object { $_ })
+        # `-eq 2` IS PART OF THE ASSERTION, not a tidy-up. `before -eq after` alone was VACUOUS:
+        # against a build with one brain per WORKSPACE both lists are `[1]`, they match, and the
+        # check passes while asserting nothing about adoption at all. `dev prove` said so, which is
+        # the whole reason it exists (2026-08-19).
+        Check 'restart_adopts_a_brain_for_every_project' `
+            ($afterRestart.Count -eq 2 -and ($afterRestart -join ',') -eq ($beforeRestart -join ',')) `
+            "before=[$($beforeRestart -join ',')] after=[$($afterRestart -join ',')] rows=$(Flat (TpTry "SELECT id, state, project FROM lanes WHERE role LIKE 'brain%'"))"
+        # The harm signature, because it is what the operator would have SEEN: an announcement
+        # claiming a repair while a healthy session was shut down. Paired with "both are still
+        # alive" for the same VACUOUS reason as above -- a build that never makes two brains never
+        # makes a surplus either, so zero surplus rows on its own is true for the wrong reason.
+        Check 'no_healthy_brain_is_retired_as_a_surplus' `
+            ((TpRows "SELECT COUNT(*) FROM events WHERE kind='brain_surplus_retired'").Trim() -eq '0' -and
+             (TpRows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '2') `
+            "surplus rows=$(Flat (TpRows "SELECT lane_id, detail FROM events WHERE kind='brain_surplus_retired'")) alive=$((TpRows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim())"
+        # P5.6: `reconcile_done` regexed `brain=\d+`, so `brain=3,7` would keep matching while
+        # asserting nothing at all. The key is `brains=` now, plural, so the old pattern cannot
+        # match by accident -- a degraded check is forced to be rewritten instead of going quiet.
+        $rd = (TpRows "SELECT detail FROM events WHERE kind='reconcile_done' ORDER BY id DESC LIMIT 1").Trim()
+        Check 'reconcile_lists_a_brain_per_project' `
+            ($rd -match "brains=\[[^\]]*$([regex]::Escape($tp.ALeaf))=$(Nth $beforeRestart 0)" -and
+             $rd -match "brains=\[[^\]]*$([regex]::Escape($tp.BLeaf))=$(Nth $beforeRestart 1)") `
+            "reconcile_done=$rd"
+
+        # ---- P5.5: A BRAIN WHOSE PROJECT LEFT IS REAPED, AND ONLY THAT ONE ---------------
+        # A lifecycle event that did not exist: `workspace-detach` reaches lanes whose CWD is
+        # in the departing project (Phase 2's project-gone), and a brain's cwd is NEUTRAL -- so
+        # a brain for a project that is gone was invisible to every existing path and is the
+        # obvious source of the next leak.
+        $bBrain = @((TpTry "SELECT id FROM lanes WHERE role='brain' AND state='alive' AND project='$($tp.B)'").Trim() -split "`r?`n" | Where-Object { $_ -match '^\d+$' })
+        $bBrainLane = if ($bBrain.Count -eq 1) { $bBrain[0] } else { Nth $afterRestart 1 }
+        $bShimFile = "$($tp.Dir)\shim-lane$bBrainLane.json"
+        $bShimPid = if (Test-Path $bShimFile) { [int]((Get-Content $bShimFile -Raw | ConvertFrom-Json).shimPid) } else { -1 }
+        $aBrainLane = Nth $afterRestart 0
+        & $dodona workspace-detach --member $tp.B --workspace $tp.Id | Out-Null
+        Wait-Until { (TpTry "SELECT state FROM lanes WHERE id=$bBrainLane").Trim() -eq 'dead' } 25000 "the detached project's brain is reaped" | Out-Null
+        Check 'a_detached_projects_brain_is_reaped' `
+            ((TpTry "SELECT state FROM lanes WHERE id=$bBrainLane").Trim() -eq 'dead') `
+            "lane $bBrainLane state='$((TpTry "SELECT state FROM lanes WHERE id=$bBrainLane").Trim())' rows=$(Flat (TpTry "SELECT id, state, project FROM lanes WHERE role='brain'"))"
+        # THE ROW IS NOT THE POINT: the two OS processes have to be gone. PROCESSES, NOT PIPES
+        # -- a lane pipe blinks out of the namespace while its shim swaps server instances
+        # (8 of 192 reads over 1.5 s), so polling for a pipe's absence eventually catches the
+        # gap and calls a live agent stopped, which is a false green.
+        Wait-Until { $bShimPid -le 0 -or -not (Get-Process -Id $bShimPid -ErrorAction SilentlyContinue) } `
+            20000 "the reaped brain's shim exits" | Out-Null
+        Check 'a_detached_projects_brain_shim_really_exits' `
+            ($bShimPid -gt 0 -and -not (Get-Process -Id $bShimPid -ErrorAction SilentlyContinue)) `
+            "shim pid $bShimPid for lane $bBrainLane"
+        Check 'the_reaping_says_which_registration_went_stale' `
+            ((TpRows "SELECT detail FROM events WHERE kind='brain_unregistered' AND lane_id=$bBrainLane").Trim() -match [regex]::Escape($tp.B)) `
+            (TpRows "SELECT kind, lane_id, detail FROM events WHERE lane_id=$bBrainLane ORDER BY id DESC LIMIT 4")
+        # THE OTHER HALF, and the one this whole phase is about: the brain of a project that
+        # STAYED is untouched. A reaper that widened until everything resolved would pass the
+        # check above and be the very bug being removed. VACUOUS by construction -- HEAD reaps
+        # nothing here, so no code state makes it red -- and kept because it is the only line
+        # that would catch a reaper going too wide.
+        Check 'a_brain_in_a_project_that_stayed_is_untouched' `
+            ((TpRows "SELECT state FROM lanes WHERE id=$aBrainLane").Trim() -eq 'alive') `
+            "lane $aBrainLane state='$((TpRows "SELECT state FROM lanes WHERE id=$aBrainLane").Trim())'"
+
+        # ---- P5.4: A WEDGED BRAIN IN ONE PROJECT MUST NOT BLOCK ANOTHER ------------------
+        # `ClearOfLivePredecessorsAsync` filtered by ROLE only, and `_shutdownAsked` is a
+        # HashSet that is never cleared -- so one brain that will not let go of its pipe
+        # refused to let a brain be created for EVERY project, for the life of the daemon.
+        #
+        # HOW THE WEDGE IS FORCED, with no timing luck: a shim serves ONE client at a time, so
+        # a test holding project A's brain pipe makes the next daemon's connect fail while the
+        # process is provably alive. That is the exact shape of the leak incident.
+        $projC = Join-Path (Use-SuiteTemp) ("dodona-p5c-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Force "$projC\src" | Out-Null
+        Set-Content "$projC\src\c.cs" "// project c"
+        Set-Content "$projC\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0 } | ConvertTo-Json)
+        & $dodona workspace-attach --member $projC --workspace $tp.Id | Out-Null
+        $aPipe = "dodona-$($tp.Id)-lane$aBrainLane"
+        Tp @("stop-daemon") | Out-Null
+        Wait-Until { -not (Test-DodonaPipe $tp.CtlPipe) } 20000 'the two-project daemon is down again' | Out-Null
+        $wedge = New-Object System.IO.Pipes.NamedPipeClientStream('.', $aPipe,
+            [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+        try {
+            # Non-fatal for the reason recorded above: a probe that cannot connect must fail its
+            # own precondition check, never abort the suite and turn every verdict into MISSING.
+            $wedgeHello = $null
+            try {
+                $wedge.Connect(10000)
+                $wedgeReader = New-Object System.IO.StreamReader($wedge)
+                $wedgeHello = $wedgeReader.ReadLine()   # drain the greeting; the shim is ours now
+            }
+            catch { $wedgeHello = "<could not hold pipe '$aPipe': $($_.Exception.Message)>" }
+            # A PRECONDITION, not a claim about the fix. HEAD wedges here too, so `dev prove`
+            # calls it VACUOUS and that is correct -- it is kept because without it the check
+            # below could go green against no wedge at all and nothing would notice.
+            Check 'the_wedged_brain_is_provably_alive' ($wedgeHello -match '^!hello') $wedgeHello
+            $p5Daemon = StartP5Daemon 'p5daemon3'
+            $spawnsBefore = AsInt (TpRows "SELECT COUNT(*) FROM events WHERE kind='shim_spawned'")
+            $cOut = Tp @("brain-start", "--project", $projC)
+            $cBrains = "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive' AND project='$projC'"
+            Wait-Until { (AsInt (TpTry $cBrains)) -ge 1 } 25000 "project C gets a brain despite project A's wedged one" | Out-Null
+            Check 'a_wedged_brain_in_one_project_does_not_block_another' `
+                ((AsInt (TpTry $cBrains)) -ge 1 -and
+                 (AsInt (TpRows "SELECT COUNT(*) FROM events WHERE kind='shim_spawned'")) -gt $spawnsBefore) `
+                "out=$(Flat $cOut) rows=$(Flat (TpTry "SELECT id, state, project FROM lanes WHERE role='brain'"))"
+            # ...and the wedged one was NOT called gone. Writing "shim gone" over a live pipe is
+            # what dropped the only reference capable of stopping 14 leaked brains.
+            Check 'the_wedged_brain_was_never_called_gone' `
+                ((AsInt (TpRows "SELECT COUNT(*) FROM events WHERE kind='utility_lane_reaped' AND lane_id=$aBrainLane")) -eq 0 -and
+                 (AsInt (TpRows "SELECT COUNT(*) FROM events WHERE kind='brain_unregistered' AND lane_id=$aBrainLane")) -eq 0) `
+                (Flat (TpRows "SELECT kind, lane_id, detail FROM events WHERE lane_id=$aBrainLane ORDER BY id DESC LIMIT 5"))
+        }
+        finally { try { $wedge.Dispose() } catch { } }
+    }
+    finally {
+        if ($p5Daemon -and -not $p5Daemon.HasExited) { try { Stop-Process -Id $p5Daemon.Id -Force } catch { } }
+    }
+
+    # =====================================================================================
+    # P5.7 -- A CAP ON CONCURRENT BRAINS, WHICH REFUSES RATHER THAN EVICTING
+    #
+    # Measured before this phase: each lane is two OS processes, and today's steady state is
+    # 4 lanes / 8 processes. Ten projects would be 13 / 26, peaking at 23 / 46 with every
+    # `brain-hi` warm -- TEN OF THEM OPUS. Quota is the scarce resource (CLAUDE.md 2.6), so a
+    # brain per project needs a ceiling.
+    #
+    # IT MUST REFUSE, NEVER EVICT. Making room by shutting an existing brain down is the
+    # count-and-kill loop growing back in a new place, and a cap that evicts is worse than no
+    # cap: it would kill a session that is mid-question to serve one that is not.
+    # =====================================================================================
+    $capDaemon = $null
+    $cap = New-TwoProjectWorkspace $dodona 'p5cap'
+    [void]$p5Dirs.Add($cap.Dir)
+    Set-Content "$($cap.A)\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0; maxBrains = 1 } | ConvertTo-Json)
+    Set-Content "$($cap.B)\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0 } | ConvertTo-Json)
+    function Cap([string[]]$a) {
+        $ErrorActionPreference = 'Continue'
+        $o = (& $dodona ($a + @('--workspace', $cap.Id))) | Out-String
+        $o.Trim()
+    }
+    function CapRows([string]$sql) { Invoke-StoreSql $cap.Store $sql }
+    function CapTry([string]$sql) { try { CapRows $sql } catch { "<sql error: $($_.Exception.Message)>" } }
+    try {
+        $capDaemon = Start-Process $dodona -ArgumentList "daemon", "--workspace", $cap.Id -PassThru -NoNewWindow `
+            -RedirectStandardOutput "$out\p5cap.out" -RedirectStandardError "$out\p5cap.err"
+        Wait-Daemon $cap.CtlPipe | Out-Null
+        Cap @("brain-start", "--project", $cap.A) | Out-Null
+        Wait-Until { (AsInt (CapRows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'")) -eq 1 } `
+            25000 "the capped workspace's first brain is alive" | Out-Null
+        $capFirst = (CapRows "SELECT id FROM lanes WHERE role='brain' AND state='alive'").Trim()
+        $capSpawns = AsInt (CapRows "SELECT COUNT(*) FROM events WHERE kind='shim_spawned'")
+        $capOut = Cap @("brain-start", "--project", $cap.B)
+        # THE ANSWER HAS TO SAY THE CAP DID IT. Counting brains alone is not enough and the
+        # reason is worth keeping: HEAD has exactly one brain per WORKSPACE, so "one brain, no
+        # new shim" is true there for a completely different reason and the check would pass
+        # against the defect (VACUOUS -- the 2026-08-18 trap). The refusal naming `maxBrains` is
+        # the only part of this that cannot be true by accident.
+        Check 'the_brain_cap_refuses_a_new_project' `
+            ((AsInt (CapRows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'")) -eq 1 -and
+             (AsInt (CapRows "SELECT COUNT(*) FROM events WHERE kind='shim_spawned'")) -eq $capSpawns -and
+             $capOut -match 'maxBrains') `
+            "out=$(Flat $capOut) rows=$(Flat (CapTry "SELECT id, state, project FROM lanes WHERE role='brain'"))"
+        # A NEGATIVE GUARD, and VACUOUS by construction: HEAD evicts nothing here either,
+        # because it never gets as far as having two brains to choose between. It is kept for
+        # the reason Phase 0c kept `an_explicit_root_beats_the_inherited_env` -- a later cap
+        # that made room by shutting a brain down would be the count-and-kill loop growing back,
+        # and this is the only line in the tree that would notice.
+        Check 'the_brain_cap_never_evicts_an_existing_brain' `
+            ((CapRows "SELECT state FROM lanes WHERE id=$capFirst").Trim() -eq 'alive') `
+            "lane $capFirst state='$((CapRows "SELECT state FROM lanes WHERE id=$capFirst").Trim())'"
+        # A silent degrade is a bug (CLAUDE.md 0.1 and 3's dead routing ladder): a project with
+        # no judgement must say so, and name the setting that lifts it.
+        Check 'the_brain_cap_refusal_names_the_setting_that_lifts_it' `
+            ((CapRows "SELECT detail FROM events WHERE kind='brain_cap_reached' ORDER BY id DESC LIMIT 1") -match 'maxBrains') `
+            (CapRows "SELECT kind, detail FROM events WHERE kind='brain_cap_reached' ORDER BY id DESC LIMIT 2")
+        Cap @("stop-daemon") | Out-Null
+    }
+    finally {
+        if ($capDaemon -and -not $capDaemon.HasExited) { try { Stop-Process -Id $capDaemon.Id -Force } catch { } }
+        foreach ($d in @($p5Dirs)) { Stop-WorkspaceShims $d }
+    }
 }
 finally {
     if ($uiProc -and -not $uiProc.HasExited) { try { Stop-Process -Id $uiProc.Id -Force } catch { } }
