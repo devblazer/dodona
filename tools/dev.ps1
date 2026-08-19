@@ -1549,6 +1549,28 @@ function Do-Gate {
     # which alone is 67.9 s of that 115.9 s and is four suites wearing one name (CLAUDE.md 3 calls
     # splitting it unfinished business, and it is what would buy the budget back).
     #
+    #
+    # RAISED 180 -> 260 s ON 2026-08-19, after wave 3 (Phases 3, 4 and 5). Measured 195.1 s
+    # with all twelve suites GREEN, 720 checks against 594 -- and the growth is traceable to
+    # two suites rather than spread thin: workspace 107 -> 136 checks (Phase 3's project
+    # ladder) took it 37.1 -> 67.4 s, and brain 45 -> 62 (Phase 5's per-project managers) took
+    # it 38.6 -> 66.3 s.
+    #
+    # WHY THIS RAISE IS NOT THE ONE REFUSED EARLIER IN THE SAME WAVE. Two hours before this,
+    # the same gate failed I7 at 244.3 s and the budget was deliberately LEFT ALONE, because
+    # four ui-use checks were red and every suite had inflated by half: the overrun was a
+    # SYMPTOM, and raising the line would have recorded a 50% slowdown as normal. Isolating
+    # ui-use fixed both and the run came back to 160.3 s inside the old budget. Here nothing
+    # is red and no suite is inflated -- the run is slower because there is more of it. That
+    # is the whole test for whether this number may move: FIX A RED, RAISE FOR GROWTH, and
+    # never the other way round.
+    #
+    # 260 s is 1.33x the 195.1 s measurement -- tighter than the 1.55x that set 180, because
+    # ui-use no longer runs beside anything (it is in SoloSuites now) and that was what made
+    # the spread wide. The long pole is now THREE monoliths, not one: ui-use 73.1, workspace
+    # 67.4, brain 66.3 -- 207 of the 195 s wall clock between them, which is only possible
+    # because two of them overlap. Splitting any of the three is what buys the budget back,
+    # and it is still the standing unfinished business CLAUDE.md 3 names.
     # It still goes red the moment a fixed sleep creeps back in, and it is still 1.8x better than
     # the 320 s this took sequentially.
     #
@@ -1562,11 +1584,11 @@ function Do-Gate {
     if ($partial) {
         Say "  n/a   I7  only $(@($suites).Count) of $((AllSuites).Count) suites ran in $([math]::Round($suiteWall, 1))s, so the budget was NOT tested"
     }
-    elseif ($suiteWall -lt 180) {
-        Say ("  PASS  I7  the full suite run finished in {0:N1}s, inside the 180s budget (was 320s sequential)" -f $suiteWall)
+    elseif ($suiteWall -lt 260) {
+        Say ("  PASS  I7  the full suite run finished in {0:N1}s, inside the 260s budget (was 320s sequential)" -f $suiteWall)
     }
     else {
-        Say ("  FAIL  I7  the full suite run took {0:N1}s, over the 180s budget" -f $suiteWall)
+        Say ("  FAIL  I7  the full suite run took {0:N1}s, over the 260s budget" -f $suiteWall)
         Say ("            slowest: " + ((($results | Sort-Object Seconds -Descending | Select-Object -First 3 |
                     ForEach-Object { "$($_.Name) $($_.Seconds)s" }) -join ', ')))
         # TWO causes, and the machine one is listed FIRST because it is the one that actually
