@@ -696,7 +696,21 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 #
 #         The REAL fix is still splitting ui-use -- 64s of monolith is why it dominates the
 #         wall clock at all -- and that remains unfinished business, not this change.
-function SoloSuites { , @('unit', 'm1', 'ui-use') }
+function SoloSuites { , @('unit', 'm1', 'ui-use', 'voice') }
+
+# `voice` joined this list on 2026-08-20, MEASURED rather than assumed. It went into the wave
+# first, on the reasoning that m3 is also a window suite and runs there. The gate then failed on
+# `brain:the_brain_cap_refuses_a_new_project` and `m2:unrouted_fallback_is_announced` -- two
+# suites the dictation change does not touch -- while every one of the ten assertions passed and
+# the leaked-process count was zero before the run. Both went green when run alone (brain 63/0,
+# m2 14/0), so it was contention, not code.
+#
+# That is the same failure mode this file already records for ui-use at concurrency 5: the
+# contention is windows and process starts, not CPU. `voice` starts a daemon and FOUR windows --
+# one, then three more for the reopen-persistence and forced-failure checks -- which is a lot of
+# window creation to add to a wave of three. It costs ~15s serialized and buys a gate that means
+# something. If someone later splits its window restarts, try it in the wave again and put the
+# measurement in the commit.
 
 # Longest first. With a concurrency cap, start order decides the wall clock: begin the 45
 # second suite last and it finishes 45 seconds after everything else already has. This list is
