@@ -599,7 +599,7 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
     Complete-Suite (Start-Suite $name) $timeoutSec
 }
 
-# What must NOT share the machine, named with the reason and checked against the code — never
+# What must NOT share the machine, named with the reason and checked against the code -- never
 # "to be safe", because every second of caution here is paid on every gate forever.
 #
 # THE RULE IS: only one thing may COMPILE at a time. A compile writes src\<proj>\obj\ and
@@ -629,7 +629,7 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 # wrong is the half that matters: publish passes -p:BaseOutputPath=<temp>\ per project
 # (src/Dodona/Program.cs, the `publish` branch, with the comment "Only bin is redirected: obj
 # must stay put"), so the BIN output goes to a scratch directory and never to src\...\bin.
-# Only obj\ stays in the tree — and obj\ is contended by another COMPILE, which is `unit` and
+# Only obj\ stays in the tree -- and obj\ is contended by another COMPILE, which is `unit` and
 # nothing else. Measured 2026-08-19: m4 inside the parallel wave is green, and it takes 28 s
 # off the wall clock, which is the difference between a 77 s gate and a 49 s one.
 #
@@ -697,6 +697,123 @@ function SuiteConcurrency {
     3
 }
 
+# A SHORT, STABLE KEY FOR ONE WORKING TREE. Six hex of SHA-256 over the canonical lowercased
+# path: stable across runs (so a cache keyed on it is reused), distinct per worktree (so two lanes
+# cannot collide), and SHORT because the things keyed on it live under %TEMP% and a Windows
+# MAX_PATH margin is not theoretical in this repo (CLAUDE.md 5.2).
+function TreeKey([string]$path) {
+    $full = ([System.IO.Path]::GetFullPath($path)).TrimEnd('\').ToLowerInvariant()
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($full)) }
+    finally { $sha.Dispose() }
+    -join @($bytes[0..2] | ForEach-Object { $_.ToString('x2') })
+}
+
+# ---------------------------------------------------------------- is the build the code?
+
+# THE SUITES RUN src\*\bin\Release, NOT YOUR EDIT -- and until 2026-08-19 nothing checked.
+# Every suite copies the four binaries out of the build output into its own DODONA_HOME
+# (Use-TestBinaries, tests\_workspace.ps1) and NONE of `test`, `suites` or `gate` ever compiled
+# anything. So an edited-but-unbuilt tree was verified by running the PREVIOUS binary, and
+# reported green. That is a false-green GENERATOR: it does not fail once, it lies every time.
+#
+# Measured (P1.5, found while proving Phase 0c): the one `psi.Environment` line that tells a lane
+# agent its workspace was deleted from Daemon.cs and `dev test m0` reported "26 checks, 0 failed"
+# -- a clean green against a defect that was present in the source. `dev build` then the same
+# command reported 1 failed. `dev suites` had the identical hole. And `dev gate` was the WORST of
+# the three, because this project treats it as the merge authority: its two builds (I2) run in
+# detached worktrees of HEAD under %TEMP%, which is not a build of the tree being gated at all,
+# and its suite phase read the same stale bin\Release as everything else.
+#
+# IT REFUSES; IT DOES NOT BUILD. `dev test unit` is one second by the operator's explicit
+# requirement (CLAUDE.md 1: "ban any test that takes longer than a second or two") and a ~6 s
+# incremental build in front of every invocation would end the one verification loop that is fast
+# enough to use while editing -- and a loop nobody uses is how verifying became a thing to skip.
+# The refusal costs ~30 ms and names the one command that clears it.
+#
+# PER PROJECT, and that is the load-bearing part of the design. "Is any source newer than the
+# output?" asked across the whole tree is EXACTLY the question auto-publish asked for 64
+# consecutive rebuilds in one afternoon (CLAUDE.md 2): the newest source spanned all four
+# projects while the image was ONE of them, so editing src\DodonaUi\MainWindow.xaml.cs left a
+# condition that could never be satisfied. Here each project is compared against its OWN
+# assembly, which MSBuild rewrites whenever that project's own sources change -- so a DodonaUi
+# edit can never accuse Dodona of being stale, and the refusal cannot get stuck on.
+#
+# WHAT COUNTS AS A SOURCE: what the compiler reads. .cs, .csproj, .xaml, .resx, plus the two
+# shared root files whose mtime is folded into every project because a change to either rebuilds
+# all four. Deliberately NOT tests\*.ps1 -- a suite script is not compiled into anything, and a
+# refusal that fired every time somebody edited a check would be worked around within the hour,
+# which leaves you worse off than having no refusal at all (CLAUDE.md 0.3).
+function StaleProjects {
+    $projects = @(
+        @{ Name = 'Dodona'; Out = 'src\Dodona\bin\Release\net8.0\Dodona.dll' }
+        @{ Name = 'DodonaShim'; Out = 'src\DodonaShim\bin\Release\net8.0\DodonaShim.dll' }
+        @{ Name = 'DodonaFakeAgent'; Out = 'src\DodonaFakeAgent\bin\Release\net8.0\DodonaFakeAgent.dll' }
+        @{ Name = 'DodonaUi'; Out = 'src\DodonaUi\bin\Release\net8.0-windows\DodonaUi.dll' }
+    )
+    # The two files all four projects compile against. Compared as part of every project's source
+    # set rather than once on their own, because either one changing rebuilds everything.
+    $shared = [datetime]::MinValue
+    foreach ($f in @('Dodona.sln', 'Directory.Build.props')) {
+        $sp = Join-Path $repo $f
+        if (Test-Path $sp) {
+            $st = [System.IO.File]::GetLastWriteTimeUtc($sp)
+            if ($st -gt $shared) { $shared = $st }
+        }
+    }
+
+    # .NET enumeration, not Get-ChildItem -Recurse: measured 25 ms warm for all four projects,
+    # against a one-second budget it must not eat.
+    $stale = @()
+    foreach ($proj in $projects) {
+        $srcRoot = Join-Path $repo "src\$($proj.Name)"
+        if (-not (Test-Path $srcRoot)) { continue }
+        $newest = $shared
+        $newestFile = ''
+        foreach ($pat in @('*.cs', '*.csproj', '*.xaml', '*.resx')) {
+            foreach ($f in [System.IO.Directory]::EnumerateFiles($srcRoot, $pat, 'AllDirectories')) {
+                # obj\ holds generated .cs the build itself writes (the XAML .g.cs, AssemblyInfo),
+                # and bin\ IS the output. Comparing either against the output compares a build to
+                # itself, and would go stale-forever or never, depending on write order.
+                if ($f -match '\\(bin|obj)\\') { continue }
+                $t = [System.IO.File]::GetLastWriteTimeUtc($f)
+                if ($t -gt $newest) { $newest = $t; $newestFile = $f }
+            }
+        }
+        $outFile = Join-Path $repo $proj.Out
+        if (-not (Test-Path $outFile)) {
+            $stale += [pscustomobject]@{ Name = $proj.Name; Why = 'has never been built'; Source = '' }
+            continue
+        }
+        if ([System.IO.File]::GetLastWriteTimeUtc($outFile) -lt $newest) {
+            $rel = if ($newestFile) { $newestFile.Substring($repo.Length + 1) } else { 'Dodona.sln or Directory.Build.props' }
+            $stale += [pscustomobject]@{ Name = $proj.Name; Why = 'its output is older than its source'; Source = $rel }
+        }
+    }
+    # Plain return plus @() at the call site -- the Blockers/LiveApp idiom in this file. `, $stale`
+    # would make @(StaleProjects).Count report 1 for an EMPTY result (CLAUDE.md 0.2), i.e. a
+    # permanent refusal on a freshly built tree, which is the failure mode this must not have.
+    return $stale
+}
+
+# Called from Run-Suites, so `test`, `suites` and `gate` cannot disagree about it -- one place,
+# one verdict, the same rule Report-Suites follows. NOT called from `prove`: prove builds its own
+# baseline in its own worktree, and it is the one verb that was already honest about this.
+function Assert-FreshBuild {
+    $stale = @(StaleProjects)
+    if ($stale.Count -eq 0) { return }
+    Say ""
+    Say "STALE BUILD -- the suites would test the PREVIOUS binary, not your edit:"
+    foreach ($sp in $stale) {
+        if ($sp.Source) { Say "  $($sp.Name)  $($sp.Why)   newest source: $($sp.Source)" }
+        else { Say "  $($sp.Name)  $($sp.Why)" }
+    }
+    Say "An edit that has not been built is a claim, not a change (CLAUDE.md 1). This refuses"
+    Say "rather than building for you, because dev test unit is a one-second loop and a build in"
+    Say "front of it would end that."
+    Abort "the build output is older than the sources it would be tested against" "dev build -- powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 build   (then run this again)"
+}
+
 # Run a set of suites: the solo ones alone and first, the rest up to SuiteConcurrency at once.
 #
 # PS 5.1 has no ForEach-Object -Parallel and no Start-ThreadJob, so this is Start-Process per
@@ -707,6 +824,10 @@ function SuiteConcurrency {
 # NOT Start-Process -Environment: that parameter is PowerShell 7.4+ and this repo is 5.1.
 # Nothing here needs it -- each suite sets its own DODONA_HOME as its first act.
 function Run-Suites([string[]]$names, [switch]$Sequential) {
+    # BEFORE ANYTHING STARTS. P1.5: no verb below this line ever compiled, so a stale bin\Release
+    # was tested and reported green. Here rather than in each of test/suites/gate so there is one
+    # answer to "would this run test my edit?".
+    Assert-FreshBuild
     $results = @()
     if ($Sequential) {
         foreach ($n in $names) { $results += Run-Suite $n }
@@ -913,7 +1034,8 @@ function Do-Prove {
     $dirty = @(git -C $repo status --porcelain -- 'src' 'tests')
     if ($dirty.Count -eq 0) { Abort "src and tests are identical to HEAD, so there is no change to prove" "make the fix first, leave it uncommitted, then run prove" }
 
-    # ONE WORKTREE PER COMMIT, KEPT (P7.4). This used to make a GUID-named worktree, cold-build
+    # ONE WORKTREE PER COMMIT PER LANE, KEPT (P7.4, per-lane by P1.7). This used to make a
+    # GUID-named worktree, cold-build
     # the whole solution into it, and delete it again -- every single invocation. Measured on the
     # session that shipped Phase 3: nineteen proofs, all against the SAME commit, ~19 minutes
     # spent rebuilding an identical tree, and 45 % of that session sat inside `dev prove`.
@@ -928,19 +1050,50 @@ function Do-Prove {
     # and MSBuild decides what to redo. A build stamp we maintained ourselves would be a second
     # source of truth about what is built, which is exactly the mistake auto-publish made with
     # `.built-from` (CLAUDE.md 2). Incremental is ~6 s against ~60 s cold.
+    # PER LANE AS WELL AS PER COMMIT (P1.7, 2026-08-19). This was keyed on the commit ALONE, so
+    # three lanes of one wave sitting at one HEAD shared one worktree, one tests\ directory that
+    # each of them cleared and re-copied, and one stderr.tmp. Observed: workspace-acceptance died
+    # on its FIRST command with "the process cannot access the file ... stderr.tmp" and prove
+    # reported ELEVEN perfectly good checks as MISSING. That is f9aaf25's two-lanes-one-tree
+    # failure reappearing inside the tool whose entire job is to verify -- and it presents as a
+    # crashed suite rather than as a collision, which is why it cost a lane real time to diagnose.
+    #
+    # The commit still names the tree's CONTENT (nothing else could); the caller's own path now
+    # names the tree's OWNER. Both properties of P7.4 survive: the tree is still reused across
+    # proofs at the same commit, and it is still pruned so `git worktree list` says something true.
     $head = (git -C $repo rev-parse HEAD).Trim()
     $proveRoot = Join-Path $env:TEMP 'dodona-prove'
     New-Item -ItemType Directory -Force $proveRoot | Out-Null
-    $wt = Join-Path $proveRoot $head.Substring(0, 12)
+    $mine = TreeKey $repo
+    $keep = $mine + '-' + $head.Substring(0, 12)
+    $wt = Join-Path $proveRoot $keep
 
-    # Every OTHER commit's tree goes, so this never becomes an unbounded pile of worktrees and
-    # `git worktree list` keeps saying something true. Registered ones need `worktree remove`;
-    # a directory git has forgotten (a killed run) is just deleted.
-    foreach ($old in @(Get-ChildItem $proveRoot -Directory -ErrorAction SilentlyContinue |
-                       Where-Object { $_.Name -ne $head.Substring(0, 12) })) {
+    # PRUNE ALL OF MINE, AND ONLY WHAT IS ORPHANED OF ANYBODY ELSE'S.
+    #
+    # Deleting another lane's tree WHILE IT IS PROVING is the collision this change exists to
+    # remove, so a live lane's cache is left alone even though it is not ours. A tree whose owning
+    # worktree git no longer lists cannot be in use by anyone, so it goes -- which is what stops
+    # this becoming one leaked directory per lane forever, the obvious failure of keying on the
+    # caller. Legacy bare-<commit12> directories have no owner prefix at all and are pruned by the
+    # same rule, so the old naming cleans itself up on first run.
+    #
+    # Prove trees are themselves registered worktrees and so appear in `worktree list`; they are
+    # excluded, or a prove tree's own key could read as a live owner.
+    $liveKeys = @(@(git -C $repo worktree list --porcelain) |
+        Where-Object { $_ -like 'worktree *' } |
+        ForEach-Object { $_.Substring(9) } |
+        Where-Object { -not $_.ToLowerInvariant().StartsWith($proveRoot.ToLowerInvariant()) } |
+        ForEach-Object { TreeKey $_ })
+    foreach ($old in @(Get-ChildItem $proveRoot -Directory -ErrorAction SilentlyContinue)) {
+        if ($old.Name -eq $keep) { continue }
+        $owner = if ($old.Name -match '^([0-9a-f]{6})-') { $Matches[1] } else { '' }
+        if ($owner -and $owner -ne $mine -and $liveKeys -contains $owner) {
+            Say "  left another lane's prove tree alone: $($old.Name)"
+            continue
+        }
         git -C $repo worktree remove --force $old.FullName 2>&1 | ForEach-Object { Add-Content -Path $log -Value $_ -Encoding utf8 }
         Remove-Item $old.FullName -Recurse -Force -ErrorAction SilentlyContinue
-        Say "  pruned an older prove tree: $($old.Name)"
+        Say "  pruned a prove tree with no live owner: $($old.Name)"
     }
 
     $reused = Test-Path (Join-Path $wt 'Dodona.sln')
@@ -1046,7 +1199,7 @@ function Do-Prove {
         # pruned at the top of the next run, and `dev prove` is the only thing that reads it.
         # Nothing runs out of it after the suite ends: I1 is asserted over src\...\bin in THIS
         # repo, and a suite copies its binaries into its own DODONA_HOME anyway (P1.1).
-        Say "kept for the next proof at this commit: $wt"
+        Say "kept for the next proof at this commit, by this tree: $wt"
     }
     Say "log: $log"
 }
@@ -1075,6 +1228,14 @@ function Do-Gate {
     $suites = if ($Rest -and $Rest.Count -gt 0) { $Rest } else { AllSuites }
     $partial = @($suites).Count -ne (AllSuites).Count
     Say $(if ($partial) { "== gate: PARTIAL ($($suites -join ', ')) -- a SELF-TEST of the gate, NOT a gate ==" } else { "== gate ==" })
+
+    # FIRST, BEFORE THE SNAPSHOTS. Run-Suites asserts this too (one verdict, see Assert-FreshBuild)
+    # but the gate is what this project treats as the merge authority, so it refuses a stale tree
+    # in the first second rather than after its preamble. gate's own two builds (I2) are of HEAD in
+    # detached worktrees under %TEMP% and have never been a build of the tree being gated -- which
+    # is precisely how a stale bin\Release got gated green.
+    Assert-FreshBuild
+
     $bad = 0
 
     # I5 is measured as a DIFFERENCE, and RECOVERY-PHASES' wording ("git status --porcelain
@@ -1342,7 +1503,7 @@ function Do-Gate {
     # It asserts WALL CLOCK for the whole suite set, which is the number a person waits through
     # -- not the sum of the parts, because the parts now run at the same time.
     #
-    # THE BUDGET IS 120 s AND RECOVERY-PHASES P4.3 PROJECTED 35-45 s. That projection was not
+    # THE BUDGET IS 180 s AND RECOVERY-PHASES P4.3 PROJECTED 35-45 s. That projection was not
     # met, and the number here is not quietly rounded to hide it. Measured on this machine, all
     # twelve suites green on a CLEAN machine: 54.6, 69.7, 74.4, 76.9, 87.0 s. The spread is
     # real -- ui-use alone ranges 42.5 s to 72 s, because it makes about a hundred sequential
@@ -1352,9 +1513,21 @@ function Do-Gate {
     # 87.0 s was then observed on a green run, three seconds inside the line. A threshold set
     # just above the worst observation is not a budget, it is a coin flip -- and a gate that
     # goes red for reasons unrelated to the change is one people learn to re-run instead of
-    # read, which is the same disease as a gate that is always green. 120 s sits clear of the
-    # spread, is still 2.7x better than the 320 s this took sequentially, and goes red the
-    # moment a fixed sleep creeps back in.
+    # read, which is the same disease as a gate that is always green.
+    #
+    # RAISED 120 -> 180 s ON 2026-08-19, and this is a DECISION, not a slipped number. The
+    # Locations wave-1 tree (Phases 0, 0c and 1 merged) measured 115.9 s green -- 4.1 s inside the
+    # old line -- because those three phases added about NINETY checks: unit 54 -> 88, workspace
+    # 56 -> 84, m3 28 -> 32, concierge 39 -> 42. That growth is earned coverage, not a regression,
+    # and leaving the budget at 120 would have made the next wave present as A GATE FAILURE rather
+    # than as "the suites grew", which is the misleading red this repo treats as costing exactly
+    # what a false green costs. 180 s is 1.55x the 115.9 s measurement -- a shade more headroom
+    # than the 1.38x that set 120 against 87 -- because the spread is still driven by ui-use,
+    # which alone is 67.9 s of that 115.9 s and is four suites wearing one name (CLAUDE.md 3 calls
+    # splitting it unfinished business, and it is what would buy the budget back).
+    #
+    # It still goes red the moment a fixed sleep creeps back in, and it is still 1.8x better than
+    # the 320 s this took sequentially.
     #
     # A DIRTY MACHINE BREAKS IT ANYWAY, which is why the leak count is printed above: with 78
     # shims left by earlier runs the same code took 300 s, m3 crashed and brain went red on
@@ -1366,11 +1539,11 @@ function Do-Gate {
     if ($partial) {
         Say "  n/a   I7  only $(@($suites).Count) of $((AllSuites).Count) suites ran in $([math]::Round($suiteWall, 1))s, so the budget was NOT tested"
     }
-    elseif ($suiteWall -lt 120) {
-        Say ("  PASS  I7  the full suite run finished in {0:N1}s, inside the 120s budget (was 320s sequential)" -f $suiteWall)
+    elseif ($suiteWall -lt 180) {
+        Say ("  PASS  I7  the full suite run finished in {0:N1}s, inside the 180s budget (was 320s sequential)" -f $suiteWall)
     }
     else {
-        Say ("  FAIL  I7  the full suite run took {0:N1}s, over the 120s budget" -f $suiteWall)
+        Say ("  FAIL  I7  the full suite run took {0:N1}s, over the 180s budget" -f $suiteWall)
         Say ("            slowest: " + ((($results | Sort-Object Seconds -Descending | Select-Object -First 3 |
                     ForEach-Object { "$($_.Name) $($_.Seconds)s" }) -join ', ')))
         # TWO causes, and the machine one is listed FIRST because it is the one that actually

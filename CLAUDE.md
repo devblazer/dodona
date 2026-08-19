@@ -232,7 +232,7 @@ Where it stands now, all measured on this machine:
 
 | | before | after |
 |---|---|---|
-| full run, all suites | 5 min 20 s (and it could **hang forever**, see below) | **54–72 s** at the time, **100 s** today — concurrency dropped 5→3 (69e8003) and Phase 3 added fifteen checks; the gate's budget is 120 s |
+| full run, all suites | 5 min 20 s (and it could **hang forever**, see below) | **54–72 s** at the time, **115.9 s** today — concurrency dropped 5→3 (69e8003), Phase 3 added fifteen checks, and the Locations wave-1 phases added ~90 more; the gate's budget was raised **120 s → 180 s** against that 115.9 s measurement, because earned coverage growth must not present as a gate failure |
 | the same run, sequential | ~320 s | ~200 s |
 | fixed `Start-Sleep` across the suites | 214 s | ~4 s |
 | the narrowest useful check | ~7 s (a daemon must start) | **~1 s** (`dev test unit`) |
@@ -254,8 +254,18 @@ Three changes did it, and all three are in `tools/dev.ps1` and `tests/_workspace
   `DODONA_TEST_CONCURRENCY` overrides; `dev suites --sequential` is the debugging escape hatch.
 - **`dev test unit`** runs the pure logic — the claim algebra, the policy table, repo
   resolution, path canonicalization, the two routing decisions made in code — with no daemon,
-  no store and no window. 54 checks in about a second. That is the "one or two seconds" the
-  operator asked for; it does not and cannot replace an acceptance suite.
+  no store and no window. **88 checks** (54 before the Locations wave) in **1.8–2.3 s warm**,
+  and ~4.9 s on the first run after a build — corrected 2026-08-19, because this row said
+  "54 checks in about a second" and a measured number stated as fact is exactly what §1 has a
+  whole section about. Still the "one or two seconds" the operator asked for; it does not and
+  cannot replace an acceptance suite.
+- **`dev test`, `dev suites` and `dev gate` REFUSE a stale build output** rather than testing the
+  previous binary (P1.5). None of them ever compiled, and every suite copies its binaries out of
+  `src\*\bin\Release`, so an edited-but-unbuilt tree was verified green — measured: a deleted
+  line in `Daemon.cs`, `dev test m0` reporting *26 checks, 0 failed*. The refusal costs ~30 ms,
+  compares **each project against its own assembly** (tree-wide is the question auto-publish
+  looped 64 times on, §2), and names `dev build`. `dev prove` is exempt: it builds its own
+  baseline.
 
 ### RUN THE SUITES YOUR CHANGE TOUCHES. THE FULL SET IS FOR MERGING.
 

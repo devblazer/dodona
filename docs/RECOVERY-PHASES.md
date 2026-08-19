@@ -373,9 +373,16 @@ suite's questions and failed 21 checks; roots are GUID temp dirs; all four UI la
   names them first in the I7 failure. Stopping them is P3's; not misdiagnosing them is not.
   Clean with `Get-Process | Where-Object { $_.Path -like "$env:TEMP\dodona-*" } | Stop-Process -Force`.
 
-- **The I7 budget is 120 s, and it was 90 s for one commit, which was too tight.** Clean-machine
-  green runs measured 54.6, 69.7, 74.4, 76.9 and **87.0 s** -- three seconds inside a 90 s line.
-  A threshold just above the worst observation is a coin flip, not a budget.
+- **The I7 budget is 180 s. It was 90 s for one commit, which was too tight, then 120 s.**
+  Clean-machine green runs measured 54.6, 69.7, 74.4, 76.9 and **87.0 s** -- three seconds inside
+  a 90 s line. A threshold just above the worst observation is a coin flip, not a budget.
+  **Raised 120 -> 180 s on 2026-08-19**, when the Locations wave-1 tree measured **115.9 s** green
+  (4.1 s inside the old line) after Phases 0/0c/1 added ~90 checks -- `unit` 54 -> 88, `workspace`
+  56 -> 84, `m3` 28 -> 32, `concierge` 39 -> 42. That is earned coverage, and leaving the budget
+  where it was would have made the next wave present as a GATE FAILURE rather than as "the suites
+  grew" -- a misleading red, which this project costs the same as a false green. 180 s is 1.55x
+  the measurement, against the 1.38x that set 120 s over 87 s; the extra headroom is because
+  `ui-use` alone is **67.9 s of the 115.9 s** and is still four suites wearing one name.
 
 - **Still red, and out of this phase's scope:** nothing. All twelve suites are green -- 416
   checks, 0 failed, 87 s on a clean machine. What remains open is not a red check: the suites
@@ -565,8 +572,8 @@ is believed — a check that has not been seen red is worth nothing, and that is
 | no wrapper or agent process survives a suite run | I3 | **earned 3** — asserted off the process table, scoped by path, with a 3 s settle for a `finally` still killing pids. NOT "lane pipes == `ps` lanes" as this row used to read: both sides of that comparison come from a read that blinks (Phase 3, "what this plan got wrong" #1), so it was a flaky assertion about a real invariant |
 | two agents `dev build` concurrently, both succeed | I2 | **earned 2a** — but weaker than it reads: two concurrent builds of one *shared* tree were measured and both succeeded, so this row is regression protection for worktree builds, not proof of the fix |
 | `dev suites` green while the live app runs, app untouched | I1, I2 | **earned 2a** — asserts the live app's pids survive the suites; prints `n/a` rather than a green line when no app is running |
-| `dev suites` wall clock inside its budget | I7 | **earned 4** — the runner measures and prints its own wall clock and the gate asserts it. Budget is **90 s**, not the 35–45 s P4.3 projected: measured across six full runs the same code gave 53.7 s and 71.7 s, and a 60 s line would be red on half of green runs. `ui-use` is the long pole (42.5 s alone, up to 69 s in a parallel wave) and is really four suites wearing one name |
-| repo lint clean | I8 | **earned 5** — `dev lint`, asserted by the gate as its tenth row. Three rules: control bytes, dangling `tests\*.ps1` references in docs (`(planned)` exempts), and mixed line endings in a working copy. Found two live BEL bytes in a green suite and one mixed file that no other check could see |
+| `dev suites` wall clock inside its budget | I7 | **earned 4** — the runner measures and prints its own wall clock and the gate asserts it. Budget is **180 s** (90 s at first, then 120 s, raised 2026-08-19 against a 115.9 s measurement of the Locations wave-1 tree — see the I7 note above), not the 35–45 s P4.3 projected: measured across six full runs the same code gave 53.7 s and 71.7 s, and a 60 s line would be red on half of green runs. `ui-use` is the long pole (42.5 s alone, 67.9 s in the 115.9 s run) and is really four suites wearing one name |
+| repo lint clean | I8 | **earned 5** — `dev lint`, asserted by the gate as its tenth row. Three rules: control bytes, dangling `tests\*.ps1` references in docs (`(planned)` exempts), and mixed line endings in a working copy. Found two live BEL bytes in a green suite and one mixed file that no other check could see. **It does NOT yet catch non-ASCII in a BOM-less `.ps1`** — CLAUDE.md §0.2's first trap, where the byte is read as ANSI and the pattern matches nothing. Filed as `LOCATIONS-PLAN.md` P1.8; seven tracked files carry it |
 | `dodona status` build SHA is a commit `git log` knows | I2 | **earned 2b** — asks the INSTALLED build and demands `git cat-file -t` resolves it to a commit; prints `n/a` when nothing is installed, or when the installed image carries no provenance (a `dev build` or `--exe` publish, which is a real state and not a failure) |
 
 ---
