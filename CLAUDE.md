@@ -180,7 +180,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | `suites` | All twelve, **three at a time** (69e8003 lowered it from five; `ui-use` went intermittently red at five). Measured on this machine 2026-08-19: **93 s** at 69e8003 and **100 s** with Phase 3's fifteen extra checks, not the 54–72 s this row claimed — the range predates both the concurrency change and Phase 3's eleven extra m0 checks. Still a gate before committing rather than the twenty-minute event the table claimed before that. |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. Three verdicts: PROVEN, VACUOUS (it passes against HEAD — rewrite it), MISSING (it never ran). |
 | `prove <suite>:<check> ...` | The same, for MANY checks: grouped by suite and **one run per suite**, because a suite run prints every check it ran. Phase 3 ran m0 eleven times to read eleven lines of one run's output — 46 minutes for what is 40 seconds. Reach for this form by default. |
-| `gate` | The pre-commit gate: runs the suites, then **asserts** nine invariants — nothing left running in the build output, a suite run that dirtied nothing, **no wrapper or agent process that outlived the run** (I3), the commit guard deployed and unoverridden, the live build’s commit resolvable in `git log`, the full run inside its time budget (I7), and **no changed file quietly altering its BOM or line endings** (P7.5 — that has happened three times and twice went unnoticed until someone read a diff). Prints the one row of `RECOVERY-PHASES` §2 it does not cover yet, so it can never be mistaken for a full pass. `dev gate <suite>` runs the same machinery over less, in ~20 s, and says PARTIAL on every line. |
+| `lint` | The repo lint (I8): control bytes, dangling `tests\*.ps1` references in docs, mixed line endings. Sub-second, tracked files only. Asserted by `gate`; run it directly after any scripted edit. |
+| `gate` | The pre-commit gate: runs the suites, then **asserts** ten invariants — nothing left running in the build output, a suite run that dirtied nothing, **no wrapper or agent process that outlived the run** (I3), the commit guard deployed and unoverridden, the live build’s commit resolvable in `git log`, the full run inside its time budget (I7), and **no changed file quietly altering its BOM or line endings** (P7.5 — that has happened three times and twice went unnoticed until someone read a diff). Every row of `RECOVERY-PHASES` §2 is asserted now — which is NOT the same as proving the system works, and the verdict line says "on the 10 assertions above, and only those" on purpose. `dev gate <suite>` runs the same machinery over less, in ~20 s, and says PARTIAL on every line. |
 | `ship` | build + suites + publish. |
 | `worktree <name>` | a tree of your own under `.claude\worktrees\`. All work goes in one (§0.0). |
 
@@ -434,20 +435,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test m3 brain
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit      # ~1s, no daemon
 ```
 
-| suite | what it covers | alone |
-|---|---|---|
-| `unit` | the pure logic: claim algebra, policy table, repo resolution, canonical paths, the code-only routing decisions | ~1 s |
-| `m0` | daemon death mid-turn, and Phase 3's whole invariant: a wrapper that outlives its agent, a lane with no shim record, the lease, reconcile asking the OS | ~16 s |
-| `m1` | claims, the gate, the merge token | ~8 s |
-| `m2` | routing, the backstop, presence | ~8 s |
-| `m3` | the UI as a view over the store | ~17 s |
-| `m4` | hot swap (runs a REAL build — the slow one) | ~28 s |
-| `workspace` | identity, repo-exclusivity, multi-repo | ~14 s |
-| `ui-use` | the UI driven like a person | ~43 s |
-| `compression` | selective compression (§5) | ~12 s |
-| `brain` | the dispatcher brain, its routing ladder, and the no-second-brain-beside-a-live-one guard | ~35 s |
-| `concierge` | the group-scope ladder, the fence, the review-behind | ~11 s |
-| `publish` | publish targeting: `--all` spares foreign instances | ~30 s |
+| suite | what it covers |
+|---|---|
+| `unit` | the pure logic: claim algebra, policy table, repo resolution, canonical paths, the code-only routing decisions |
+| `m0` | daemon death mid-turn, and Phase 3's whole invariant: a wrapper that outlives its agent, a lane with no shim record, the lease, reconcile asking the OS |
+| `m1` | claims, the gate, the merge token |
+| `m2` | routing, the backstop, presence |
+| `m3` | the UI as a view over the store |
+| `m4` | hot swap (runs a REAL build — the slow one) |
+| `workspace` | identity, repo-exclusivity, multi-repo |
+| `ui-use` | the UI driven like a person |
+| `compression` | selective compression (§5) |
+| `brain` | the dispatcher brain, its routing ladder, and the no-second-brain-beside-a-live-one guard |
+| `concierge` | the group-scope ladder, the fence, the review-behind |
+| `publish` | publish targeting: `--all` spares foreign instances |
+
+**The per-suite durations that were a column here are gone (P5.2).** They drifted: two were
+wrong by more than double before Phase 7 corrected them, and a table nobody can trust is worse
+than no table, because it still gets quoted. `dev suites` and `dev test` print the real ones on
+every run, measured on the machine you are actually using. What stays is the mapping from a
+suite to what it covers, which is judgement no command can print.
 
 **Two suites run ALONE, and taking either out of that list will look like it works.**
 `SoloSuites` in `tools/dev.ps1` is the list, and each entry carries its reason in a comment:

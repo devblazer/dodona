@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('check', 'build', 'test', 'suites', 'prove', 'gate', 'ship', 'worktree', 'help')]
+    [ValidateSet('check', 'build', 'test', 'suites', 'prove', 'gate', 'lint', 'ship', 'worktree', 'help')]
     [string]$Verb,
 
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
@@ -135,6 +135,79 @@ function LeakedTestProcesses {
 # acceptance starts no lanes at all, so it has never leaked a wrapper.
 function LeakedAgentProcesses {
     @(LeakedTestProcesses | Where-Object { $_.ProcessName -in @('DodonaShim', 'DodonaFakeAgent', 'claude') })
+}
+
+# ---------------------------------------------------------------- the repo lint (I8, P5.1)
+
+# Two questions about the PROSE, both sub-second, both asked of TRACKED files only -- `git
+# ls-files` is the scope, so bin\, obj\, .dodona\ and other sessions' worktrees are excluded by
+# construction rather than by a pattern somebody has to maintain.
+#
+# (i) NO CONTROL BYTES outside tab/CR/LF. This is not tidiness. The rule was written because a
+#     literal 0x08 in CLAUDE.md and in SKILL.md made the `tests\brain-acceptance.ps1` path in
+#     both of them unrunnable -- copy the line, and it does not work. Those two are long gone,
+#     and the lint immediately found a LIVE one they did not know about: two 0x07 (BEL) bytes
+#     inside string literals at tests\publish-acceptance.ps1:207, where `$out\ap-noprov.out` had
+#     its `\a` eaten as an escape by whatever wrote it. The suite is green, so for who knows how
+#     long it has been writing its diagnostics to a filename containing a control character --
+#     which is to say, somewhere nobody would ever look for them.
+#
+# (ii) EVERY tests\*.ps1 NAMED IN A .md MUST EXIST. A command in the docs that cannot run is the
+#      thing this whole phase is named after. `(planned)` on the same line exempts it, because a
+#      PLAN describing a suite nobody has written yet is correct prose, and a lint that fires on
+#      correct prose is a lint somebody switches off.
+function Repo-Lint {
+    $problems = @()
+    $files = @(git -C $repo ls-files '*.md' '*.ps1' 2>$null)
+    foreach ($rel in $files) {
+        $full = Join-Path $repo $rel
+        if (-not (Test-Path $full)) { continue }          # staged-deleted, still listed
+        $bytes = [System.IO.File]::ReadAllBytes($full)
+        for ($i = 0; $i -lt $bytes.Length; $i++) {
+            $b = $bytes[$i]
+            if ($b -lt 0x20 -and $b -ne 0x09 -and $b -ne 0x0A -and $b -ne 0x0D) {
+                # the LINE, so the report is actionable rather than an offset nobody can find
+                $line = 1
+                for ($k = 0; $k -lt $i; $k++) { if ($bytes[$k] -eq 0x0A) { $line++ } }
+                $problems += ("{0}:{1} control byte 0x{2:x2} -- only tab, CR and LF are allowed" -f $rel, $line, $b)
+                break                                     # one per file is enough to send someone
+            }
+        }
+
+        # ...and NO MIXED LINE ENDINGS in the working copy. This one is not about git: with
+        # core.autocrlf on, git normalises whatever it is handed, so a half-CRLF file commits
+        # clean and the gate's P7.5 row passes -- correctly, because nothing wrong was stored.
+        # It still matters, because a MIXED file is precisely what makes the next patch script
+        # misbehave: `if CRLF in bytes` is true for a file that is mostly LF, so the script picks
+        # the wrong newline and double-converts. That is how Phase 7 turned a 105-line insert into
+        # a 1214-line phantom rewrite, and this lint found CLAUDE.md sitting at 758 CRLF against 20
+        # bare LF -- twenty lines Phase 7 had inserted, invisible to every check that existed.
+        $crlf = 0; $bare = 0
+        for ($i = 0; $i -lt $bytes.Length; $i++) {
+            if ($bytes[$i] -eq 0x0A) {
+                if ($i -gt 0 -and $bytes[$i - 1] -eq 0x0D) { $crlf++ } else { $bare++ }
+            }
+        }
+        if ($crlf -gt 0 -and $bare -gt 0) {
+            $problems += ("{0} has MIXED line endings ({1} CRLF, {2} bare LF) -- pick one; a patch script that sniffs this file will pick the wrong newline" -f $rel, $crlf, $bare)
+        }
+    }
+    foreach ($rel in @($files | Where-Object { $_ -like '*.md' })) {
+        $full = Join-Path $repo $rel
+        if (-not (Test-Path $full)) { continue }
+        $n = 0
+        foreach ($text in @(Get-Content $full -ErrorAction SilentlyContinue)) {
+            $n++
+            if ($text -match '\(planned\)') { continue }
+            foreach ($m in [regex]::Matches($text, 'tests[\\/]([A-Za-z0-9_.\-]+\.ps1)')) {
+                $namedFile = $m.Groups[1].Value
+                if (-not (Test-Path (Join-Path $repo (Join-Path 'tests' $namedFile)))) {
+                    $problems += ("{0}:{1} names tests\{2}, which does not exist -- write it, fix the name, or mark the line (planned)" -f $rel, $n, $namedFile)
+                }
+            }
+        }
+    }
+    return $problems
 }
 
 function ReportBlockers {
@@ -465,6 +538,14 @@ function Complete-Suite($h, [int]$timeoutSec = 420) {
     # "everything under %TEMP%": a concurrent session's suites live in their own sandboxes and
     # must survive untouched, which is the same reason `stop-all` was deleted out of `dev build`
     # (P0.2). Nothing outside this one directory can be reached from here.
+    # NO SETTLE WAIT HERE, and that is a correction. A previous version of this paused up to 2 s
+    # before counting, on the theory that `stop-daemon` returns before the process is gone and the
+    # reaper was catching daemons mid-exit. That theory was never observed: every process this
+    # reaper has ever NAMED was a DodonaShim, and the one publish-acceptance leaves is a real
+    # orphan -- its `apnoprov` section runs a daemon with autostart CLEARED on purpose, whose
+    # warm-up spawns utility lanes, and those shims correctly outlive the daemon (that is the
+    # design) with a 30-minute lease that has not expired. The suite cleans them up itself now.
+    # A wait would have hidden nothing and cost 2 s x every suite for a guess.
     $leaked = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
             $pp = $null
             try { $pp = $_.Path } catch { }
@@ -472,11 +553,13 @@ function Complete-Suite($h, [int]$timeoutSec = 420) {
         })
     foreach ($lp in $leaked) { try { Stop-Process -Id $lp.Id -Force -ErrorAction Stop } catch { } }
     if ($leaked.Count -gt 0) {
-        # NAMED, not just counted. A bare integer sent this phase's session hunting for leaked
-        # DodonaShim wrappers in publish-acceptance -- a suite that starts no lanes at all, so it
-        # has never leaked one. What it actually leaves is a `dodona` DAEMON still winding down
-        # from `stop-daemon` when the reaper looks: a race, not an orphan. Two unrelated bugs
-        # behind one number, and the number was the only evidence anybody had.
+        # NAMED, not just counted -- and naming it is what corrected the record. A bare integer let
+        # two contradictory stories stand: the plan said publish-acceptance leaks four DodonaShim
+        # every run, and a later session "corrected" that to a `dodona` daemon caught mid-exit,
+        # having grepped for `lane-start`, found none, and concluded the suite starts no lanes.
+        # It does: its `apnoprov` section clears DODONA_NO_AUTOSTART deliberately, and that
+        # daemon's warm-up spawns the utility lanes. The plan was right and the correction was
+        # wrong. The name in the log is the only reason anyone can tell.
         Add-Content -Path $log -Value "$($h.Name): reaped $($leaked.Count) leaked process(es) from its sandbox" -Encoding utf8
         foreach ($lp in $leaked) {
             $lpath = '?'
@@ -1352,17 +1435,28 @@ function Do-Gate {
         $bad++
     }
 
-    Say ""
-    Say "-- not covered yet (RECOVERY-PHASES section 2), so this gate does NOT mean these hold --"
-    Say "  not yet -- phase 5   repo lint clean: no control bytes, every named test path real (I8)"
+    # I8: the prose does not lie about itself. Last of RECOVERY-PHASES section 2's rows.
+    $lint = @(Repo-Lint)
+    if ($lint.Count -eq 0) {
+        Say "  PASS  I8  repo lint clean: no control bytes, every named test path real"
+    }
+    else {
+        Say "  FAIL  I8  repo lint found $($lint.Count) problem(s):"
+        foreach ($l in $lint) { Say "          $l" }
+        $bad++
+    }
 
     Say ""
+    # No "not covered yet" list any more: RECOVERY-PHASES section 2's rows are all asserted above.
+    # That is NOT the same as "the gate proves the system works" -- it proves these ten things, and
+    # the verdict below says so on purpose. A gate whose scope drifts out of its own description is
+    # the lie it exists to prevent (the I2 provenance row was silently deleted once).
     if ($partial) {
         Say $(if ($bad -eq 0) { "GATE SELF-TEST PASSED -- machinery works. THIS IS NOT A GATE: only $($suites -join ', ') ran." }
               else { "GATE SELF-TEST FAILED -- $bad problem(s)" })
     }
     else {
-        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 9 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
+        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 10 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
     }
     Say "log: $log"
     if ($bad -gt 0) { exit 1 }
@@ -1413,6 +1507,12 @@ switch ($Verb) {
     'test' { Do-Test }
     'suites' { Do-Suites }
     'prove' { Do-Prove }
+    'lint' {
+        Say "== lint =="
+        $l = @(Repo-Lint)
+        if ($l.Count -eq 0) { Say "clean: no control bytes, every named test path real" }
+        else { foreach ($x in $l) { Say "  $x" }; Say ""; Say "$($l.Count) problem(s)"; exit 1 }
+    }
     'gate' { Do-Gate }
     'ship' { Do-Ship }
     'worktree' { Do-Worktree }

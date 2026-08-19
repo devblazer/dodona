@@ -348,7 +348,7 @@ expected cost when it starts. Suites stay model-free regardless (§17).
 - **A two-repo fixture** (a stub "core" and a stub "game" whose `package.json` depends on it)
   plus stub skills, driven by the fake agent, asserting that the sibling scan resolves inside
   the group worktree and that step 2 is skipped.
-- New suite `tests/delivery-acceptance.ps1`. `ui-use` gains checks for the ask badge and for
+- New suite `tests/delivery-acceptance.ps1` (planned). `ui-use` gains checks for the ask badge and for
   answering from the window, because a new interactive affordance needs a use test, not only a
   dump assertion.
 

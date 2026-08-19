@@ -25,13 +25,17 @@
 # took 300 s instead of 87 s, m3 crashed outright and brain went red on nine timing checks. So
 # the runner has to be able to clean up after itself.
 #
-# This comment used to say publish-acceptance leaves four DodonaShim behind every run. IT DOES
-# NOT, and never did: that suite starts no lanes at all, so it cannot leak a wrapper. Measured
-# at 69e8003 -- 0 reaped alone, 1 in a parallel wave, and the 1 is a `dodona` DAEMON still
-# winding down from `stop-daemon` when the reaper looks. A race, not an orphan. The claim was
-# repeated in three places and sent Phase 3's session hunting for the wrong bug; the runner
-# names what it reaped now, so the two can never be confused again (RECOVERY-PHASES Phase 3,
-# "what this plan got wrong").
+# THE HISTORY OF THIS COMMENT IS THE LESSON. It first said publish-acceptance leaves four
+# DodonaShim behind every run -- true. A later session "corrected" that to "it starts no lanes at
+# all, so it cannot leak a wrapper", having grepped the suite for `lane-start` and found none, and
+# propagated the correction into four files. Wrong: that suite clears DODONA_NO_AUTOSTART for its
+# `apnoprov` section on purpose, and an autostarting daemon's WARM-UP spawns the router, brain and
+# compressor pool without any command naming a lane. Those shims then outlive the daemon by design,
+# on a 30-minute lease. Real orphans, correctly reported.
+#
+# A grep for one spawn verb is not a survey of what a suite starts. The suite now stops the lanes
+# its own daemon spawned, and publish reaps 0 (RECOVERY-PHASES Phase 3, "what this plan got wrong"
+# item 2, which is struck through rather than deleted for this reason).
 #
 # A shim can no longer outlive its agent (Phase 3), so this is no longer the only thing
 # standing between a suite and an immortal process -- but it stays: a .ps1 that fails to PARSE

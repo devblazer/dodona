@@ -199,6 +199,21 @@ print('|' if r is None else str(r[0]) + '|' + r[1])
     Check 'land_succeeds' ($land -match 'landed ticket 1') $land
     Wait-Until { -not (Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue) } 25000 'landing retires the agent' | Out-Null
     Check 'land_retires_the_agent' (-not (Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue)) "agent pid $($shimInfo.childPid) still alive"
+
+    # WAIT FOR THE PREDICATE THE CHECK USES, not for a proxy. The wait above is about a PROCESS
+    # dying; the check below is about a STORE ROW the daemon writes afterwards, and those are two
+    # different events. Landing retired the agent and the daemon then marks the lane dormant, so a
+    # dump taken the instant the pid disappeared can legitimately still read `alive`.
+    #
+    # It went red once in a full gate and once in five solo runs -- intermittent, and newly so:
+    # P3.2 made the shim exit when its child exits, which moved the process death slightly earlier
+    # relative to the state write and widened a window that had always been there. A test that is
+    # green four runs out of five is the thing that teaches people to re-run instead of read, which
+    # is the same disease as a check that is always green (CLAUDE.md 3, on m1 and SoloSuites).
+    #
+    # This is the m4 lesson exactly, already recorded in m0: "The wait has to be the predicate the
+    # checks use."
+    Wait-Until { (@((DumpOrNull).slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' })[0]).state -eq 'dormant' } 25000 'the landed lane goes dormant' | Out-Null
     $d = Dump
     $water = $d.slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }
     Check 'lane_survives_as_dormant' ($water.state -eq 'dormant') ($water | ConvertTo-Json -Compress)

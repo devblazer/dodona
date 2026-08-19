@@ -9,21 +9,32 @@ The full delivery path. Every step exists because skipping it once cost the oper
 time — the incident is named where that matters. Do the steps in order; do not report
 "done" from any earlier point.
 
-## 1. Build
+## 1. Build — through the wrapper, never `dotnet build`
 
 ```powershell
-dotnet build Dodona.sln -c Release
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 build
 ```
 
-If it fails, that is the **headline** of your report, not a footnote. An edit that has
-not compiled is a claim, not a change.
+This step said `dotnet build Dodona.sln -c Release` until 2026-08-19, which CLAUDE.md §1
+explicitly forbids — a contradiction `cd53389` created by changing the delivery path without
+touching this skill, breaking §5.1's own rule that the two move together (P5.3). Whichever of
+the two you followed, you were violating the other.
 
-If a running process locks a binary, find the holder before killing anything, and kill by
-**pid / exe path / instance id — never by process name** (a name-based kill once murdered
-the operator's live session mid-trial):
+**Why the wrapper is mandatory rather than tidier:** a locked output file makes `dotnet build`
+report `Build FAILED` with ten screens of MSB3026 retries, which reads as "your code is broken"
+when it means "a daemon you cannot see is holding a file". `dev build` names the pid and the one
+command that frees it, on line one. It stops nothing on your behalf — clearing a holder is
+always your explicit call.
+
+If it fails, that is the **headline** of your report, not a footnote. An edit that has not
+compiled is a claim, not a change.
+
+If you do need to find a holder yourself, resolve it by **pid / exe path / instance id — never
+by process name** (a name-based kill once murdered the operator's live session mid-trial):
 
 ```powershell
-Get-CimInstance Win32_Process -Filter "Name='dodona.exe'" | Select ProcessId, CommandLine
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 check   # names any holder
+dodona ps                                                                  # what is running, machine-wide
 ```
 
 ## 2. Run the acceptance suites

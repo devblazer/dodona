@@ -204,7 +204,7 @@ try {
     # this repo is 5.1 (section 0.2's family of traps).
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
     $apDaemon = Start-Process -FilePath $dodona -ArgumentList @('daemon', '--workspace', 'apnoprov') `
-        -PassThru -NoNewWindow -RedirectStandardOutput "$outp-noprov.out" -RedirectStandardError "$outp-noprov.err"
+        -PassThru -NoNewWindow -RedirectStandardOutput "$out\ap-noprov.out" -RedirectStandardError "$out\ap-noprov.err"
     try {
         # ASKED OF THE STORE, and asserting what the code ACTUALLY DOES. This check was stale
         # twice over and so had never once run: it invoked `dodona feed`, which is not a command
@@ -242,6 +242,14 @@ print(r[0] if r else '')
         $env:DODONA_NO_AUTOSTART = "1"          # the rest of the suite owns daemon lifetime again
         Dx @('stop-daemon', '--workspace', 'apnoprov') | Out-Null
         if ($apDaemon -and -not $apDaemon.HasExited) { try { Stop-Process -Id $apDaemon.Id -Force } catch { } }
+        # AND THE LANES THAT DAEMON SPAWNED. This is the only place in the suite where autostart is
+        # on, so it is the only place a warm-up creates utility lanes -- and a lane outlives its
+        # daemon BY DESIGN, with a 30-minute lease. Stopping the daemon therefore left real orphans
+        # behind, which the runner then reaped and reported: "publish-acceptance leaks four
+        # DodonaShim on every successful run" was TRUE, and a later session wrongly explained it
+        # away as a daemon caught mid-exit after grepping for `lane-start` and finding none.
+        # Cleaning up after the one daemon we deliberately let warm up is the suite's job.
+        Stop-WorkspaceShims $apWs.dir
         Remove-Item $apRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 

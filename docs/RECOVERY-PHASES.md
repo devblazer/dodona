@@ -204,14 +204,25 @@ which carries the measurement — and `stop-all` captures its lane targets BEFOR
 daemon, because that is the one moment every pipe is steady. **Do not narrow this back to one
 answer.**
 
-**2. `publish-acceptance` does not leak four `DodonaShim` processes, and never has.** Phase 4 and
-Phase 6 both state it as measured fact, and `tests/_workspace.ps1` repeats it in a comment. The
-suite starts **no lanes at all** — so it cannot leak a wrapper. Measured at 69e8003: 0 reaped
-running alone, 1 in a parallel wave, and the one is a `dodona` DAEMON still winding down from
-`stop-daemon` when the reaper looks. That is a race, not an orphan, and P3.2/P3.3 do not touch
-it. `reaped 0` was therefore the wrong acceptance signal for this phase; the runner now NAMES
-what it reaped, so the two can never be confused again, and `dev gate` asserts the invariant
-that actually belongs to Phase 3: no wrapper or agent process survives the suites.
+**2. ~~`publish-acceptance` does not leak four `DodonaShim` processes, and never has.~~ THIS
+CORRECTION WAS ITSELF WRONG, and it is left here struck through rather than deleted, because the
+way it was wrong is the more useful lesson.** The plan said that suite leaks four wrappers on every
+successful run. This session grepped it for `lane-start`, found none, and concluded it "starts no
+lanes at all, so it cannot leak a wrapper" — then wrote that into the plan, into
+`tests/_workspace.ps1`, into `tools/dev.ps1` and into two commit messages, and used it to argue
+that `reaped 0` was the wrong acceptance signal for Phase 3.
+
+It does start lanes. Its `apnoprov` section clears `DODONA_NO_AUTOSTART` **deliberately** — so that
+one daemon runs the way the operator runs it — and an autostarting daemon's warm-up creates the
+router, brain and compressor pool. Those are shims. They then outlive the daemon exactly as designed,
+with a 30-minute lease that has not expired by the time the runner looks. **So the plan's original
+claim was substantially right, and `reaped 4` was a true report about a real orphan.**
+
+Caught only because Phase 5 made the reaper NAME what it reaps: the log said `DodonaShim`, not
+`dodona`, and the daemon-mid-exit story died on the spot. A grep for one spawn verb is not a survey
+of what a suite starts — autostart spawns without ever naming a command. The fix is in the suite,
+where it belongs: it now stops the lanes its own daemon spawned (P6.2), and `publish` reaps 0 across
+three consecutive runs.
 
 **3. `dev gate`'s own leak counter could not see the leak.** `LeakedTestProcesses` matched
 `$env:TEMP\dodona-*`, which was every suite temp directory until the per-suite sandbox landed
@@ -380,7 +391,7 @@ stays for the same reason it was built: a silent leak is how this went unnoticed
 | item | what | why it is not Phase 3 |
 |---|---|---|
 | P6.1 | Stop the lane pipe blinking: keep a listening server instance across the swap, so the pipe namespace alone is a sound liveness test and `LaneLiveness`' second answer can retire. **Prerequisite:** `LaneRuntime.ConnectAndPumpAsync` awaits `!hello` with no timeout, so a client that connects to a not-yet-pumped instance would hang the daemon's reconcile — that must be bounded first. | Phase 3 shipped the union instead, because a hang is worse than a race and the standing directive forbids adding one (CLAUDE.md §0.1). |
-| P6.2 | The suites' own daemon shutdowns are fire-and-forget: `stop-daemon` returns before the process has exited, so the runner's reaper intermittently catches a `dodona` mid-exit and reports it as a leak. Wait for the pid, or stop reporting a race as a leak. | It is a suite-hygiene race, not an orphan. It is the ONLY thing `reaped N` has ever reported for `publish-acceptance` — see Phase 3's "what this plan got wrong" #2. |
+| P6.2 | **DONE, and the diagnosis in this row was wrong before it was fixed.** It said the suites' `stop-daemon` is fire-and-forget so the reaper catches daemons mid-exit — a race, not an orphan. That was inference, never observed: every process the reaper has ever named was a `DodonaShim`. The real cause is that `publish-acceptance`'s `apnoprov` section clears `DODONA_NO_AUTOSTART` on purpose, and that daemon's warm-up spawns utility lanes whose shims then outlive it **by design**, with a lease of 30 minutes. Genuine orphans, correctly reported. Fixed where it belongs — the suite stops the lanes its own daemon spawned. Verified: `publish` reaps 0 on three consecutive runs. A settle-wait was written first, against the wrong theory, and **reverted** rather than left in: it would have hidden nothing and cost 2 s x every suite for a guess. | **DONE** |
 | P6.3 | An ad-hoc script spawning real Claude lanes outside `DODONA_HOME` (§6). The lease now bounds the damage to 30 minutes instead of forever, which is what produced the `mlroot` and `freeze-repro` orphans; preventing the spawn needs a hook refusing `lane-start` outside a test home. Design it, do not bolt it on. | Carried from §6 unchanged. Phase 3 bounded it; it did not prevent it. |
 
 ---
@@ -486,17 +497,26 @@ in a later phase's retrospective.
 
 ---
 
-## Phase 5 — Prose shrinks to what code cannot hold  *(I8)*
+## Phase 5 — Prose shrinks to what code cannot hold  *(I8)* — **DONE 2026-08-19**
 
-**Effort: ~half a day. Depends on P0.2, Phase 4, P5.1.**
+**Shipped, and `dev lint` earns the last unasserted row in section 2.** Two of the five items were
+already done by earlier phases without anyone noticing they were on this list, and one is
+deliberately NOT done — see P5.5.
+
+The lint was worth writing for a reason the row did not anticipate: **it found live defects, not
+cosmetics.** Its stated targets (a `0x08` in CLAUDE.md and SKILL.md) were long gone; what it
+actually caught, on its first run, was two `0x07` BEL bytes inside string literals in
+`tests/publish-acceptance.ps1` — `"$out\ap-noprov.out"` with its `\a` eaten as an escape by
+whatever wrote the line. The suite has been green throughout, writing its daemon diagnostics to a
+filename containing a control character: present, correct-looking, and impossible to find.
 
 | item | what |
 |---|---|
-| P5.1 | Repo lint (sub-second; belongs in P4.5's project): **(i)** no `.md` or `.ps1` may contain a control byte outside tab/CR/LF; **(ii)** every `tests\*.ps1` path named in any `.md` must exist on disk. (i) catches the literal `0x08` in `CLAUDE.md:253` and `SKILL.md:43` that makes `tests\brain-acceptance.ps1` unrunnable in both. |
-| P5.2 | Delete the duplicated suite lists from CLAUDE.md §3 and SKILL.md §2; point both at `dev help` / `dev suites`. The list exists in three places and only the executed one is correct. |
-| P5.3 | `/ship` becomes a thin wrapper over `dev ship` plus the commit step. CLAUDE.md §1 forbids `dotnet build`; `/ship` step 1 still mandates it — a contradiction created by `cd53389`, which changed the delivery path without touching the skill, breaking CLAUDE.md §5.1's own rule. |
-| P5.4 | Correct CLAUDE.md §1's timing figure, and delete §5.2's lane-cwd claim — written by `ba555b5` at 18:11:55 and falsified by `f9aaf25` at 19:13:39, still asserted today. |
-| P5.5 | Delete this document. Its content now lives in code, deletions and checks. |
+| P5.1 | **DONE.** `dev lint` — sub-second, tracked files only (`git ls-files` is the scope, so `bin\`, `obj\` and other sessions' worktrees are excluded by construction rather than by a pattern somebody maintains). THREE rules, and the third was not in the plan: **(i)** no control byte outside tab/CR/LF — found the two BEL bytes above; **(ii)** every `tests\*.ps1` named in a `.md` must exist, with `(planned)` on the line as the exemption, because a plan describing an unwritten suite is correct prose and a lint that fires on correct prose gets switched off (one hit: `docs/M5-DELIVERY-PLAN.md`, now marked); **(iii)** **no MIXED line endings in a working copy.** That third rule exists because writing the first two exposed CLAUDE.md sitting at 758 CRLF against 20 bare LF — twenty lines Phase 7 had inserted with a forced `\n`. Git normalises that away on commit, so nothing wrong was ever stored and P7.5 passed *correctly*; but a mixed working file is exactly what makes the next patch script sniff the wrong newline, which is how Phase 7 produced a 1214-line phantom diff. It was invisible to every check that existed. | **DONE**, earns I8 |
+| P5.2 | **DONE, and the duplication was smaller than claimed.** The row said the suite list lives in three places; measured, `ship/SKILL.md` had none, so it was two — CLAUDE.md and the code. What was actually rotting was the **timings column**: two of its twelve entries were wrong by more than double before Phase 7 corrected them. The column is deleted and points at `dev suites`, which measures on the machine you are using. The suite-to-coverage mapping stays, because that is judgement no command can print. | **DONE** |
+| P5.3 | **DONE.** `/ship` step 1 mandated `dotnet build Dodona.sln -c Release`, which CLAUDE.md §1 forbids — so whichever of the two you followed, you were violating the other. Now `dev build`, with the reason inline: a locked output makes `dotnet build` report `Build FAILED` under ten screens of MSB3026, which reads as "your code is broken" when it means "an invisible daemon holds a file". | **DONE** |
+| P5.4 | **Already done, by other phases.** CLAUDE.md §1's timing figure was corrected in Phase 7 (93 s at 69e8003, 100 s with Phase 3's checks, against the 54–72 s the table claimed); §5.2's lane-cwd denial was corrected on 2026-08-18 and now carries the correction. Verified both, rather than assumed. | **stale row** |
+| P5.5 | **NOT DONE — deliberately, and this is the operator's call to overrule.** The row says to delete this document. It cannot be deleted as it stands, because it is now the only place holding things nothing else does: the pipe-blink measurement, why P7.6 was **rejected** and must not be re-proposed, why proof deadlines must not be shortened, and the four wrong claims Phase 3's plan made about itself. Deleting it destroys exactly the rejected-ideas record that §5 exists to preserve — the same argument D-6 makes about warnings. **What would have to happen first:** the decisions and rejections move to a `docs/DECISIONS.md` (or into CLAUDE.md §0), the schema and event-kind facts move to `DEBUGGING.md`, and only the completed how-to rows are deleted. That is a prose migration with no verification value, so it is proposed rather than performed. | **deferred, with a reason** |
 
 **Becomes impossible:** a command in CLAUDE.md that does not run; two suite lists that disagree.
 
@@ -517,7 +537,7 @@ is believed — a check that has not been seen red is worth nothing, and that is
 | two agents `dev build` concurrently, both succeed | I2 | **earned 2a** — but weaker than it reads: two concurrent builds of one *shared* tree were measured and both succeeded, so this row is regression protection for worktree builds, not proof of the fix |
 | `dev suites` green while the live app runs, app untouched | I1, I2 | **earned 2a** — asserts the live app's pids survive the suites; prints `n/a` rather than a green line when no app is running |
 | `dev suites` wall clock inside its budget | I7 | **earned 4** — the runner measures and prints its own wall clock and the gate asserts it. Budget is **90 s**, not the 35–45 s P4.3 projected: measured across six full runs the same code gave 53.7 s and 71.7 s, and a 60 s line would be red on half of green runs. `ui-use` is the long pole (42.5 s alone, up to 69 s in a parallel wave) and is really four suites wearing one name |
-| repo lint clean | I8 | 2 corrupt lines |
+| repo lint clean | I8 | **earned 5** — `dev lint`, asserted by the gate as its tenth row. Three rules: control bytes, dangling `tests\*.ps1` references in docs (`(planned)` exempts), and mixed line endings in a working copy. Found two live BEL bytes in a green suite and one mixed file that no other check could see |
 | `dodona status` build SHA is a commit `git log` knows | I2 | **earned 2b** — asks the INSTALLED build and demands `git cat-file -t` resolves it to a commit; prints `n/a` when nothing is installed, or when the installed image carries no provenance (a `dev build` or `--exe` publish, which is a real state and not a failure) |
 
 ---
