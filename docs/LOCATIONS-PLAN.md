@@ -1254,3 +1254,25 @@ grouped form `dev prove <suite>:<check> ...` — one run per suite, not one per 
   and P4.1 (*one component, one source*) owns it. Rejected: writing project questions into the
   concierge store from the daemon, and rejected: a second answer path in `Answer` that Phase 4
   would have to undo.
+
+- **D-L12. A plain lane stays UNGATED, and Phase 2's widening of that surface is accepted.**
+  *(operator, 2026-08-19, asked and answered explicitly)* T7 disclosed that `GateHook` returns 0
+  with no `--ticket`, so a plain lane has never been bounded at all — and Phase 2 lets one open in
+  a **second repo with its own `main` and its own merge token**, which enlarges the room rather
+  than opening a new hole. The operator was given the trade in plain terms — declaring up front
+  what every agent may touch is friction paid on every job, usually before you know the answer —
+  and chose **unrestricted, for now**.
+
+  **So there is no code change, and that is the point of recording it.** A later session reading
+  T7 would find a disclosed-but-unfixed hole and reasonably decide to fence it. Do not. This was
+  asked and declined. Reopen it only if the operator raises it, or on the day a second project is
+  attached and real work runs in one — which is when a hypothetical becomes an opinion.
+
+  What DOES bound it, and must keep working: **P2.1 refuses a lane in any folder no workspace
+  owns**, loudly, naming `workspace-attach`, *before a lane row exists* — so an ungated agent can
+  be careless only inside folders the operator registered on purpose. Rejected: gating plain lanes
+  by default; rejected: requiring a ticket for a non-first project. **Still genuinely open and NOT
+  settled by this**: whether enforcement layer 1 should fail **closed** rather than silently open
+  when a gate cannot resolve its exe. That is named as the operator's call too, in `SoloSuites`'
+  comment in `tools/dev.ps1`, and it is a different question from this one.
+
