@@ -559,6 +559,7 @@ each lands in the method the mouse or keyboard lands in:
 dodona ui compose "<text>"          # type WITHOUT sending — `type` always submits
 dodona ui key shift+enter | enter   # the keystroke, through the real PreviewKeyDown path
 dodona ui input-resize <dy|reset>   # the grip: +px taller, reset = fit the text
+dodona ui lane <focus|stop|respawn|collapse|expand> <n>   # a tile's five actions
 ```
 
 `ui dump` gained an `input` key (`text`, `lines`, `height`, `fit`, `sized`, `remembered`,
@@ -619,6 +620,22 @@ union with a workspace chip per row. Address that window with `--shell` on any `
 and give a band the grid with `dodona ui workspace <name>` — the same code path a click
 takes, without stealing focus. `DodonaUi.exe --shell` with nothing awake is **boot-to-zero**,
 a real state: just feed and input, and typing is how you leave it.
+
+**And the WINDOW outlives its daemon — which is the half that was broken.** After a `stop-all`,
+a crash, or a reboot with the shortcut relaunched, the window is up and nothing is running. The
+store reader is read-only, so every lane still renders as `alive` and the app looks healthy. It
+was not: `MainWindow.Send` — every lane click, plus the one-workspace branch of the input box —
+did not start a sleeping daemon, so the first thing a person did was answered with the literal
+words *"daemon not running"*. Two of the three write paths already ensured first; the third,
+carrying the most traffic, did not. **Start-on-demand now lives inside `DaemonClient.Send`**, so
+it is not a rule a call site can forget — the same correction the routing ladder needed (§3:
+*ensure at the point of use, never look up*).
+
+It survived because none of the five lane actions had a `ui` verb at all: **unreachable, not
+merely untested.** They have one now (`ui lane`, above), landing in the same `LaneAction` a click
+lands in. The general rule this is the second instance of: **an affordance no verb can reach is
+where the next defect will live**, because it is the one place a suite is physically unable to
+look. If you add something a person can click, add the verb in the same commit.
 
 **A daemon outlives its window.** Closing the app does not stop anything — that is the design
 (the window is disposable, agents survive behind their shims). `dodona ps` is how you find out

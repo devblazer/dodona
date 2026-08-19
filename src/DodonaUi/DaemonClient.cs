@@ -110,11 +110,67 @@ static class DaemonClient
         finally { try { pipe.Dispose(); } catch { } }
     }
 
+    /// <summary>Which start-on-demand applies to this id — the concierge has its own process and
+    /// its own pipe, a workspace daemon is addressed by id and wants its primary folder as a cwd.
+    /// Returns null when something is now listening, or a reason to show the user.
+    ///
+    /// The SHELL id owns no daemon (Instance.ShellId is a window identity, not a workspace), so it
+    /// is refused rather than summoned — starting "the shell daemon" would create a process nothing
+    /// could ever talk to.</summary>
+    static string? EnsureOwner(string instanceId)
+    {
+        if (instanceId == Instance.ConciergeId) return EnsureConcierge();
+        if (instanceId.Length == 0 || instanceId == Instance.ShellId)
+            return "no workspace has the grid — type to start one";
+
+        var primary = "";
+        try
+        {
+            using var reg = new Registry();
+            primary = WorkspaceResolve.ByNameOrId(reg, instanceId)?.Primary ?? "";
+        }
+        catch { /* registry unreadable: Ensure falls back to a temp cwd and still starts one */ }
+        return Ensure(primary, instanceId);
+    }
+
+    /// <summary>
+    /// START-ON-DEMAND IS PART OF SENDING (§13), and that is enforcement replacing a rule every
+    /// call site had to remember — the same correction the routing ladder needed (CLAUDE.md §3:
+    /// "ensure at the point of use, never look up").
+    ///
+    /// THE INCIDENT (2026-08-19). Two of the three write paths ensured first — <see cref="AnswerAsk"/>
+    /// through <see cref="Ensure"/>, the input box's concierge branch through <see cref="EnsureConcierge"/>
+    /// — and <see cref="MainWindow.Send"/>, which carries EVERY lane click and the one-workspace
+    /// branch of the input box, did not. So against a workspace whose daemon had exited, the window
+    /// still rendered every lane as `alive` (the store reader is read-only and needs no daemon) and
+    /// answered the first thing a person did with the literal words **"daemon not running"**.
+    /// Measured: `ui type` into a shell window with one workspace and no daemon returned
+    /// `status: daemon not running`, tiles intact. Closing the app is DESIGNED to leave nothing
+    /// running (CLAUDE.md §3.1), so this was the state the operator's machine sat in every morning.
+    ///
+    /// It survived because no check ever ran the UI against a dead daemon, and because none of the
+    /// five lane actions had a `ui` verb at all — they were unreachable, not merely untested.
+    /// Both are fixed alongside this (`ui lane`, and ui-use's revives_* checks).
+    ///
+    /// Consequence: this method can no longer report "daemon not running" as an outcome. Every
+    /// failure it returns now names something a person can act on.
+    /// </summary>
     public static string Send(string instanceId, object request)
     {
         var pipe = new NamedPipeClientStream(".", Instance.CtlPipe(instanceId), PipeDirection.InOut);
         try { pipe.Connect(2000); }
-        catch { return "daemon not running"; }
+        catch
+        {
+            pipe.Dispose();
+            // Asleep, not broken. Summon whoever owns this id and try once more; Ensure/
+            // EnsureConcierge each probe first, so a daemon that came up in the meantime costs
+            // one extra connect and nothing else.
+            var reason = EnsureOwner(instanceId);
+            if (reason is not null) return reason;
+            pipe = new NamedPipeClientStream(".", Instance.CtlPipe(instanceId), PipeDirection.InOut);
+            try { pipe.Connect(2000); }
+            catch { pipe.Dispose(); return "started a daemon but it never answered its control pipe"; }
+        }
         try
         {
             var w = new StreamWriter(pipe) { AutoFlush = true };

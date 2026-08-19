@@ -940,6 +940,113 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     (& $dodona ui close --workspace $tp4.Id) | Out-Null
     Wait-Until { $null -eq (RtDumpOrNull) } 20000 'the routing window is gone' | Out-Null
     (& $dodona stop-daemon --workspace $tp4.Id) | Out-Null
+
+    # ---- THE WINDOW OVER A SLEEPING WORKSPACE (2026-08-19) -------------------------------
+    # THE STATE THE OPERATOR'S MACHINE IS IN EVERY MORNING, and no check had ever visited it.
+    # A daemon outlives its window and closing the app stops nothing (CLAUDE.md 3.1) -- so the
+    # mirror of that is equally normal: the WINDOW outlives the daemon, after a `stop-all`, a
+    # crash, or a reboot with the shortcut relaunched. The store reader is read-only, so the
+    # window goes on rendering every lane as `alive` and looks perfectly healthy.
+    #
+    # It was not healthy. Two of the three write paths started the daemon first (AnswerAsk, and
+    # the input box's concierge branch); MainWindow.Send -- which carries EVERY lane click and
+    # the one-workspace branch of the input box -- did not. Measured before the fix: typing into
+    # a window with one sleeping workspace returned `status: daemon not running`, tiles intact.
+    # The first thing a person does, answered with a sentence about our internals.
+    #
+    # It is in THIS suite because it is a use failure, not a reporting one: every dump was
+    # correct throughout (CLAUDE.md 3, "dumps prove the UI reports correctly while the first
+    # thing a person tries is a dead end").
+    #
+    # ITS OWN WINDOW, deliberately. The first draft reused the primary window from 900 lines
+    # earlier and asserted it had survived; that made a check about THIS defect fail for
+    # unrelated reasons and turned two others VACUOUS, because a window that is already gone
+    # reports an empty status and an empty status matches nothing.
+    Dodona @('ui', 'close') | Out-Null
+    Wait-Until { $null -eq (DumpOrNull) } 20000 'any primary window is gone' | Out-Null
+    Reset-UiWindow
+    # Launching the UI is itself start-on-demand (App.OnStartup calls Ensure), so this is also
+    # how the daemon comes back for the section.
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
+    Wait-Until { $null -ne (DumpOrNull) } 30000 'the sleeping-workspace window answers' | Out-Null
+    Wait-Daemon $ws.CtlPipe | Out-Null
+
+    # A lane that is NOT already collapsed -- an earlier section collapsed one and left it that
+    # way, so `collapse` on that one would assert nothing. Two traps paid for in these lines:
+    # collapsedLanes carries OBJECTS with a .lane, not bare ints (`-contains` against the object
+    # silently never matches), and Invoke-StoreSql returns EVERY row as ONE newline-joined
+    # string, so `| ForEach-Object { [int]$_ }` casts "8`n7`n6" and throws.
+    # THIS SECTION MAKES ITS OWN LANE, and that is the fourth draft. The tile check needs a lane
+    # that is ALIVE and not already collapsed, and every attempt to find one among the suite's
+    # existing lanes failed differently -- each time in a way that said nothing:
+    #   - collapsedLanes carries OBJECTS with a .lane, not bare ints, so `-contains` against the
+    #     object silently never matches;
+    #   - a DEAD lane is not rendered at all -- `ui lane collapse 8` worked, the daemon replied
+    #     "collapsed lane 8", and the grid showed nothing, because GAMMA had already exited;
+    #   - the chip an earlier section makes is EXPANDED again at its own tidy-up (line ~505), so
+    #     looking for one here found nothing, the verb was then called with no lane, and a
+    #     missing argument fails on STDERR -- which `Dodona` does not capture, so the check's
+    #     detail was an empty string. A blank detail is the worst possible diagnosis;
+    #   - and picking the newest still-alive lane passed alone and went RED inside `dev gate`,
+    #     because under a full concurrent wave the older lanes had already gone. A check whose
+    #     subject depends on what nine hundred lines above it left behind is a check that will
+    #     eventually fail for a reason that has nothing to do with what it tests.
+    Dodona @('lane-start', '--title', 'SLEEPER', '--child', $fake) | Out-Null
+    $sleepLane = [int](@((Invoke-StoreSql $storeDb "SELECT id FROM lanes WHERE title='SLEEPER' ORDER BY id DESC LIMIT 1") `
+        -split "`r?`n" | Where-Object { $_.Trim() })[0])
+    Wait-Until { @((DumpOrNull).slots | Where-Object { $_.lane -eq $sleepLane }).Count -eq 1 } `
+        20000 'the sleeper lane has a tile' | Out-Null
+    Check 'the_sleeping_section_has_its_own_live_lane' ($sleepLane -gt 0) "sleepLane=$sleepLane"
+
+    # Graceful, because that is what `stop-all` does to the operator's machine -- not a kill.
+    # Through the suite's own helper, NEVER `& $dodona ... 2>$null`: under $ErrorActionPreference
+    # 'Stop' a native command's stderr line becomes NativeCommandError and throws OUT of the try
+    # (CLAUDE.md 0.2), and a redirect does not save you. The first draft did exactly that and
+    # every check below it read MISSING instead of red.
+    Dodona @('stop-daemon') | Out-Null
+    Wait-Until { Test-DodonaPipeGone $ws.CtlPipe } 20000 'the daemon is down' | Out-Null
+    # VACUOUS against HEAD, and knowingly kept -- `dev prove` says PASS because this behaviour was
+    # already correct. It is the precondition every check below depends on (a window that died
+    # would report an empty status, and an empty status matches nothing, which is how two of them
+    # were VACUOUS in an earlier draft), and it is the untested half of CLAUDE.md 3.1: the daemon
+    # outliving its window is written down and covered, the window outliving its daemon was
+    # neither. Stated here rather than quietly left in, per check-authoring 1.
+    Check 'the_window_outlives_its_daemon' ($null -ne (DumpOrNull)) 'the window went with it'
+
+    # Typing. The whole test.
+    Dodona @('ui', 'type', 'the daemon is asleep and I typed anyway') | Out-Null
+    # WAKING is the claim, so waking is what is waited for and asserted. Delivery of the sentence
+    # to an agent is NOT asserted here, and that is deliberate: LaneRuntime.Say throws unless the
+    # lane's shim has finished reconnecting to the newly started daemon, so a delivery assertion
+    # would be a race dressed as a check -- measured, it timed out at 40 s while the status line
+    # already read "-> ALPHA (focus, no classifier warm)", i.e. the daemon was up and had routed
+    # the sentence. The reconnect window is real and worth its own work; it is not this defect.
+    $woke = Wait-Daemon $ws.CtlPipe 40000
+    $sd = DumpOrNull
+    Check 'typing_at_a_sleeping_workspace_never_says_daemon_not_running' `
+        ($null -ne $sd -and "$($sd.status)" -notmatch 'daemon not running') "status=[$($sd.status)]"
+    Check 'typing_wakes_a_sleeping_workspace' ([bool]$woke -and "$($sd.status)" -notmatch '^error') `
+        "woke=$woke status=[$($sd.status)]"
+
+    # ---- AND THE TILE. The five lane actions had NO `ui` verb until this commit, so nothing
+    # could reach the click handlers at all -- unreachable, not merely untested, which is
+    # exactly where the defect above lived. `ui lane` lands in MainWindow.LaneAction, the same
+    # method a click lands in (D-L4: only pixels may diverge).
+    Dodona @('stop-daemon') | Out-Null
+    Wait-Until { Test-DodonaPipeGone $ws.CtlPipe } 20000 'the woken daemon is down again' | Out-Null
+    $la = (Dodona @('ui', 'lane', 'collapse', "$sleepLane")) | Out-String
+    Check 'the_lane_verb_reaches_the_window_at_all' `
+        ($la -notmatch 'unknown ui verb' -and $la -match "collapse $sleepLane") "lane=$sleepLane reply=[$($la.Trim())]"
+    Wait-Until { @((DumpOrNull).collapsedLanes | ForEach-Object { [int]$_.lane }) -contains $sleepLane } `
+        40000 'the collapse lands in the store and reaches the grid' | Out-Null
+    $sd2 = DumpOrNull
+    Check 'a_lane_click_at_a_sleeping_workspace_wakes_it_and_acts' `
+        ($null -ne $sd2 -and @($sd2.collapsedLanes | ForEach-Object { [int]$_.lane }) -contains $sleepLane) `
+        "lane=$sleepLane collapsed=[$(@($sd2.collapsedLanes | ForEach-Object { $_.lane }) -join ',')] status=$($sd2.status)"
+    Check 'a_lane_click_never_says_daemon_not_running' `
+        ($null -ne $sd2 -and "$($sd2.status)" -notmatch 'daemon not running') "status=[$($sd2.status)]"
+    # The daemon these checks woke is a pid no variable holds; the finally stops by pid only.
+    Dodona @('stop-daemon') | Out-Null
 }
 finally {
     # 'Continue' FOR THE WHOLE CLEANUP, and this is not a style choice -- it is the fix for a

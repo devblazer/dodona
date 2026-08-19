@@ -580,6 +580,41 @@ function Complete-Suite($h, [int]$timeoutSec = 420) {
     if (-not $tally) { $problems += "NO TALLY: the suite never reported '<N> checks, <M> failed' (exit $code) -- it crashed, or it does not print one" }
     elseif ($code -ne 0 -and $fails.Count -eq 0) { $problems += "reported clean but exited $code -- something failed after the tally" }
 
+    # A SUITE THAT THREW AND THEN REPORTED CLEAN. Measured 2026-08-19, and it is the worst shape
+    # a false green comes in:
+    #
+    #   ForEach-Object : Cannot convert value "8`n7`n6" to type "System.Int32"
+    #   ...
+    #   ui-use: 115 checks, 0 failed
+    #
+    # An unhandled error tore out of ui-use's try block, SIX checks after it never ran, the
+    # `finally` still wrote the tally over whatever had been computed so far, and exit was 0.
+    # Every existing structural fault missed it: there WAS a tally, the exit code WAS 0, and no
+    # line said FAIL. The suite reported a clean run of 115 checks and it was a clean run of 115
+    # checks -- out of 121. Nothing anywhere knows how many a suite should have run, so the count
+    # cannot be the guard.
+    #
+    # The error record itself is the guard. `FullyQualifiedErrorId` appears in PowerShell's error
+    # format and nowhere else; a suite that emits one has hit something it did not handle,
+    # whether that is a bad cast or the NativeCommandError trap of CLAUDE.md 0.2 -- and both of
+    # those have now produced a believed green in this repo. The suites are expected to be silent
+    # of them: a diagnostic a suite MEANS to print goes through Check with a detail string.
+    #
+    # This is deliberately about the RUNNER rather than the twelve suites: a rule each suite must
+    # remember is a rule eleven of them will eventually not (D-6, and 0.3's "documenting instead
+    # of fixing").
+    #
+    # FALSE-RED RISK, measured rather than assumed: across a full `dev gate` the eleven GREEN
+    # suites emitted none of these, so a suite that is behaving does not trip it. The only suite
+    # that did was m1, which was already red on both HEAD and this branch for its own reason.
+    # If a suite ever needs to capture a native command's stderr deliberately, it must do so
+    # under $ErrorActionPreference='Continue' (CLAUDE.md 0.2) -- which produces no error record,
+    # so the rule and the correct technique agree.
+    $threw = @($o | Select-String -Pattern 'FullyQualifiedErrorId' | ForEach-Object { $_.Line.Trim() })
+    if ($threw.Count -gt 0) {
+        $problems += "UNHANDLED ERROR: the suite emitted $($threw.Count) PowerShell error record(s). If one tore out of its try block, the checks after it never ran and the tally counts only what did. First: $($threw[0])"
+    }
+
     [pscustomobject]@{
         Name     = $h.Name
         Fails    = $fails

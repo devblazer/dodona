@@ -173,6 +173,12 @@ public partial class MainWindow : Window
             // (LOCATIONS-PLAN P4.3). The whole point of Phase 4 is that the live overlay and the
             // headless dump are two renderings of one component with ONE answer path; a verb that
             // talked to the daemon by itself would have built the second system.
+            // The five lane actions, without a mouse and without focus — each lands in the method
+            // the click lands in (LaneAction). They had no verb until 2026-08-19, which is why the
+            // defect LaneAction's note describes went two builds unseen.
+            case "lane":
+                return LaneAction(e.GetProperty("action").GetString() ?? "",
+                                  e.GetProperty("lane").GetInt64());
             case "answer":
                 return AnswerAsk(e.GetProperty("answer").GetString() ?? "");
             case "input-resize":
@@ -453,11 +459,38 @@ public partial class MainWindow : Window
     // The view is dumb: every click is just a daemon pipe message (§17) — which is why
     // tests can inject the message instead of driving the UI.
 
+    /// <summary>
+    /// THE LANE ACTION PATH — the one a click and `dodona ui lane <action> <n>` share, for the same
+    /// reason <see cref="AnswerAsk"/> is one method (D-L4: only pixels may diverge).
+    ///
+    /// It exists because these five actions had NO verb at all, so no acceptance check could reach
+    /// them — and that is where a real defect lived undetected: every one of them went through
+    /// <see cref="Send"/>, which did not start a sleeping daemon, so against the state the operator's
+    /// machine is in every morning (window open, nothing running — CLAUDE.md §3.1) each click
+    /// answered "daemon not running". Untestable and broken are not a coincidence here; the first
+    /// caused the second.
+    /// </summary>
+    public string LaneAction(string action, long lane)
+    {
+        object req = action switch
+        {
+            "focus"    => new { cmd = "focus", lane },
+            "stop"     => new { cmd = "lane-stop", lane },
+            "respawn"  => new { cmd = "lane-respawn", lane },
+            "collapse" => new { cmd = "lane-collapse", lane, collapsed = true },
+            "expand"   => new { cmd = "lane-collapse", lane, collapsed = false },
+            _ => null!,
+        };
+        if (req is null) return $"error: '{action}' is not one of: focus / stop / respawn / collapse / expand";
+        Send(req);
+        return $"{action} {lane}";
+    }
+
     void Pane_Click(object sender, MouseButtonEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PaneView p) return;
         if (p.IsEmpty) { StartLane(); e.Handled = true; return; }   // an empty slot is an invitation
-        Send(new { cmd = "focus", lane = p.LaneId });
+        LaneAction("focus", p.LaneId);
         e.Handled = true;
     }
 
@@ -481,7 +514,7 @@ public partial class MainWindow : Window
     void Pane_Close(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PaneView p || p.IsEmpty) return;
-        Send(new { cmd = "lane-stop", lane = p.LaneId });
+        LaneAction("stop", p.LaneId);
         e.Handled = true;                       // not a pane click; do not also focus it
     }
 
@@ -491,7 +524,7 @@ public partial class MainWindow : Window
     void Pane_Collapse(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PaneView p || p.IsEmpty) return;
-        Send(new { cmd = "lane-collapse", lane = p.LaneId, collapsed = !p.Collapsed });
+        LaneAction(p.Collapsed ? "expand" : "collapse", p.LaneId);
         e.Handled = true;                       // not a pane click; do not also focus it
     }
 
@@ -499,14 +532,14 @@ public partial class MainWindow : Window
     void Collapsed_Click(object sender, MouseButtonEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PaneView p) return;
-        Send(new { cmd = "lane-collapse", lane = p.LaneId, collapsed = false });
+        LaneAction("expand", p.LaneId);
         e.Handled = true;
     }
 
     void Pane_Wake(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PaneView p || p.IsEmpty) return;
-        Send(new { cmd = "lane-respawn", lane = p.LaneId });
+        LaneAction("respawn", p.LaneId);
         e.Handled = true;
     }
 

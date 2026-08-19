@@ -1205,7 +1205,7 @@ int Ui()
 {
     if (pos.Count == 0) return Fail("ui verb required: dump | screenshot | pose <name> | overlay <PANE|off> | " +
                                     "type <text> | compose <text> | key <enter|shift+enter|escape> | input-resize <dy|reset> | " +
-                                    "answer <choice> | workspace <name> | update <exe> | close");
+                                    "answer <choice> | lane <action> <n> | workspace <name> | update <exe> | close");
     return pos[0] switch
     {
         "dump" => Client(new { verb = "dump" }, UiPipeName()),
@@ -1223,6 +1223,13 @@ int Ui()
         // lands in (MainWindow.AnswerAsk), so the check drives the affordance a person
         // touches rather than a parallel test-only path (LOCATIONS-PLAN P4.3).
         "answer" => pos.Count > 1 ? Client(new { verb = "answer", answer = string.Join(" ", pos.Skip(1)) }, UiPipeName()) : Fail("ui answer <choice>"),
+        // A lane tile's five actions, focus-free, landing in the method a click lands in
+        // (MainWindow.LaneAction). Added 2026-08-19: without them the whole tile was
+        // unreachable from a check, and a defect that broke every one of those clicks against a
+        // sleeping daemon shipped twice.
+        "lane" => pos.Count > 2 && long.TryParse(pos[2], out var laneN)
+            ? Client(new { verb = "lane", action = pos[1], lane = laneN }, UiPipeName())
+            : Fail("ui lane <focus|stop|respawn|collapse|expand> <lane>"),
         "input-resize" => pos.Count > 1 ? UiResize(pos[1]) : Fail("ui input-resize <dy|reset>"),
         // Give a band the grid — the same code path a click takes, without needing focus.
         "workspace" => pos.Count > 1 ? Client(new { verb = "workspace", workspace = pos[1] }, UiPipeName()) : Fail("ui workspace <name|id>"),
