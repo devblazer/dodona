@@ -112,7 +112,7 @@ repos; `--repo tools --claim path:engine/...` is refused.
 
 ---
 
-## Phase 0b — claim scoping  *(after 0, never before)*
+## Phase 0b — claim scoping  *(BUILT, 2026-08-19, branch `loc-p0b`)*
 
 Scoping `FindConflicts` per repo was proposed as a free win. **It is not**, and this records why
 so the naive form is not re-proposed:
@@ -135,6 +135,98 @@ overlaps nothing and covers nothing — a claim reading "the whole tree" that bl
 
 **Ship with the check this exists for:** two open tickets in *different* repos holding the
 *same* claim string. That check cannot be written today.
+
+### What was built, and the one judgement call in it
+
+**The false NEGATIVE turned out to be the real defect, and the plan text above understates it.**
+It reads as though the drift were a reason to be careful about deleting the symbol detector. It
+is worse than that: the drift is *itself* a live hole, and the symbol claim was never a detector
+of it in any useful sense — `symbol:` is optional, almost nothing uses it, and two tickets over
+one folder with only path claims were **already invisible to each other**. `workspace-acceptance`
+carried a comment saying exactly this and treating it as acceptable ("after the rename it CANNOT
+be seen to \[overlap\] … that half is Phase 0b's problem"). So the fix is not a narrowing with a
+compensation; it is a *widening* that happens to make the narrowing safe.
+
+| item | what |
+|---|---|
+| P0b.1 | `Claims.Held(RepoKey, RepoName, Kind, Value)` + `Claims.Overlap(Held, Held)`: reduce both claims to **repo-relative** terms and compare only within one `repo_path`. `Store.FindConflicts` takes a `RepoId` and selects `t.repo_path, t.repo` alongside each stored claim. |
+| P0b.2 | `Store.ClaimExtend` reads the ticket's repo **inside its own transaction** (`TxRepoId`) rather than being handed one — a caller that can pass the wrong repository can scope a conflict search to the wrong place. |
+| P0b.3 | `Claims.Prefix(repoName)` is the single definition of the claim prefix; `RepoRef.ClaimPrefix` calls it. `Claims.cs` is now linked into `DodonaUi.csproj` beside `Repos.cs`, which needs it. |
+| P0b.4 | `subtree:/` (and `.`, `./`) is **the whole tree**; `Claims.Under` gives an empty subtree value its meaning in both `Overlap` and `Covers`. `Normalize` folds a leading `./`. An empty value is **refused** for `path`/`new`/`symbol`. |
+
+**Symbol claims narrow by repo path. The reasoning, since this is the judgement someone will
+want to revisit:** the brief said to bias toward the false positive, and this decision looks like
+the opposite — so the argument has to be that it is not a false-negative risk at all, and it is.
+A symbol claim can only be held by a ticket, a ticket lands in exactly one repository, and
+`Repos.CheckClaims`/`ForClaims` refuse any path claim outside it — so an agent holding
+`symbol:Config` in `engine` **cannot reach** `tools`, and `tools`'s `Config` is a different file.
+There is no shared resource, so scoping removes a refusal that protected nothing. What made the
+old behaviour *look* protective was that it was the only rung still firing after a rename; P0b.1
+fixes the rung that should have been firing, and the check
+`the_same_claim_string_in_the_SAME_repo_is_still_refused` exists so that a future "tidy-up"
+cannot delete the symbol rule and read as green.
+
+**Every uncertainty falls through to the unscoped comparison** — that is where the bias lives,
+and there are three of them: a ticket with no `repo_path` (pre-schema-9, unresolvable name); a
+claim that is not inside its own ticket's repository (only reachable for a row written while P0.6
+was open, e.g. `--repo tools --claim path:engine/sim.cs`); and an empty subtree value in a
+prefixed repository, which is wider than any one repo. In a **one-repository workspace** every
+ticket shares one key and the prefix is empty, so the scoped comparison *is* the old one —
+asserted eight ways by `unit:In_a_single_repository_workspace_scoping_changes_nothing`.
+
+**`subtree:/` is the whole tree rather than a parse error**, and the choice is not arbitrary.
+The empty value is needed internally regardless: reducing `subtree:proj` to repo-relative terms
+inside repo `proj` yields exactly `""`, so `Overlap` and `Covers` have to answer it correctly
+whatever the parser does. And in a one-repo workspace, where the prefix is empty, `subtree:/` is
+the *only* spelling of "I am refactoring the whole repository, claim all of it" — refusing it
+would leave a legitimate and maximally-blocking claim inexpressible. A bare `subtree:` with
+nothing after the colon stays refused: `/` and `.` are deliberate, an empty tail is a typo.
+`path:/` and `symbol:   ` are refused by name, because HEAD created a ticket holding a claim over
+nothing and reported success — P0.5's silently-dropped spec from the other side.
+
+Demonstrated, `dev prove`-d against HEAD (verdicts in the commit message):
+
+| check | suite | what HEAD did instead |
+|---|---|---|
+| `one_folder_under_two_names_is_one_claim` | workspace | created ticket 3 in a folder ticket 1 held |
+| `claim_extend_cannot_widen_across_a_rename` | workspace | `extended ticket 2` |
+| `the_same_claim_string_is_free_in_a_different_repo` | workspace | `conflict: symbol:Config … held by ticket 5` |
+| `the_whole_tree_claim_conflicts_with_an_open_claim` | m1 | created the ticket — the claim blocked nobody |
+| `the_whole_tree_covers_a_file_no_other_claim_names` | m1 | `denied: src/sky/box.cs not covered` — the gate refused the whole tree's own holder |
+| `the_whole_tree_is_claimable_when_nothing_else_holds_anything` | m1 | `conflict: subtree: overlaps subtree:` — HEAD's phantom WHOLE ticket blocked it |
+| `an_empty_path_claim_is_refused_rather_than_created` | m1 | created a ticket claiming nothing |
+
+Three more are **VACUOUS by construction** and kept deliberately, in the style of Phase 0c's
+`an_explicit_root_beats_the_inherited_env`: `the_same_claim_string_in_the_SAME_repo_is_still_refused`,
+`a_symbol_claim_can_be_held_in_one_repo` and `a_disjoint_directory_in_the_renamed_repository_is_still_free`.
+Each asserts that a verdict HEAD *already* reaches is still reached, so no code state makes them
+red — they are regression guards against the deletion this phase could plausibly be "simplified"
+into, not evidence of the fix. **A refusal that HEAD already makes cannot be proven red. Say so
+rather than reporting the verdict as proof.**
+
+**A trap in proving any of this, worth one paragraph because it produced a false VACUOUS.**
+Every check here is *"HEAD permits something it should refuse"* — so against HEAD the earlier
+ones SUCCEED, and each success leaves a claim behind that refuses the next. The first attempt put
+the `claim-extend` case third; HEAD's own defect had already created ticket 3 over that folder, so
+the extend was refused, the check passed, and `dev prove` reported VACUOUS for a check that
+demonstrably works. **The order of the three drift checks is load-bearing**, the claim-extend case
+goes first, and no two of them name paths that contain one another (`a.cs`/`b.cs` are siblings,
+`src/three` is elsewhere). The suite says so in a comment; re-prove all three if they are
+reordered.
+
+**Becomes impossible:** two tickets holding one folder under two spellings of its repository's
+name; a claim that reads "the whole tree" and blocks nobody; a gate that denies the holder of a
+whole-tree claim every file in it; a `path:`/`symbol:` claim stored with an empty value.
+
+**Not done, deliberately:** in a MULTI-repo workspace `--claim subtree:/` is refused by
+`ForClaims` as "in no repository", which is correct (a ticket lands in one repo, and the whole
+workspace is not one) but the refusal does not name the alternative spelling `subtree:<repo>`.
+`Claims.Spec` at least makes it read as `subtree:/ (the whole tree)` rather than a truncated
+line. Improving the message is a Phase 3-or-later nicety on a path that already refuses.
+
+**Must not break:** `m1:77-82` (`overlap_refused_at_plan_time`, `disjoint_parallel`),
+`m1:194-195`, all of `ClaimsTests` and `ReposIdentityTests`, `workspace`'s per-repo token block
+and Phase 0's repo-identity block. All green: `unit` 123/0 (was 88), `m1` 43/0 (was 39), `workspace` 90/0 (was 86).
 
 ---
 

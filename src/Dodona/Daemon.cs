@@ -173,7 +173,10 @@ sealed class Daemon
     /// the live one, because <see cref="RepoRef.ClaimPrefix"/> is derived from it and the
     /// ticket's claims are stored workspace-relative to the name in force when they were
     /// written. An open ticket's claim namespace must not move underneath it; where it IS is a
-    /// lookup, what it is CALLED is history. (Reconciling names across tickets is Phase 0b.)
+    /// lookup, what it is CALLED is history. Reconciling those names ACROSS tickets — so two
+    /// spellings of one folder are still one claim — is <see cref="Claims.Overlap(Claims.Held,
+    /// Claims.Held)"/>, which reduces both to repo-relative terms rather than moving either
+    /// ticket's namespace (Phase 0b).
     ///
     /// Null means "this workspace no longer contains that repository" — a real answer, and
     /// every caller must say so out loud rather than substitute a folder of its own choosing.

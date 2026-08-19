@@ -127,6 +127,232 @@ public class ClaimsTests
     [Fact]
     public void Covers_never_grants_a_write_on_a_symbol_claim() =>
         Assert.False(Claims.Covers("symbol", "WaterController", "src/water/sim.cs"));
+
+    // ---- the whole tree: `subtree:/` was a claim that blocked nobody (Phase 0b) ---------
+    //
+    // MEASURED against HEAD before it was changed, by writing these tests first and running
+    // them: `subtree:/` normalizes to the EMPTY string, and every branch of the algebra then
+    // answered no. Overlap's `a == b || a.StartsWith(b + "/")` cannot match an empty `a`, and
+    // Covers' `relPath.StartsWith(value + "/")` went looking for a leading "/". So a claim
+    // that READS "the whole tree" overlapped nothing and covered nothing -- an exclusive lock
+    // over everything that let every other ticket straight past it, and a gate that then
+    // denied its own holder every write. The shape of enforcement that is switched off while
+    // looking armed (CLAUDE.md §0.3).
+    //
+    // It is now the whole tree rather than a parse error, for two reasons. The empty value is
+    // needed INTERNALLY anyway -- reducing `subtree:proj` to repo-relative terms inside repo
+    // `proj` yields exactly "" -- so the algebra has to answer this correctly whatever the
+    // parser does. And in a one-repo workspace, where the claim prefix is empty, `subtree:/`
+    // is the ONLY spelling of "I am refactoring the whole repository, claim all of it":
+    // refusing it would leave a legitimate and maximally-safe claim inexpressible.
+
+    [Theory]
+    [InlineData("subtree:/")]
+    [InlineData("subtree:.")]
+    [InlineData("subtree:./")]
+    public void The_whole_tree_parses_to_an_empty_subtree_value(string spec) =>
+        Assert.Equal(("subtree", ""), Claims.Parse(spec)!.Value);
+
+    /// <summary>"./x" and "x" are one file, and the algebra is string comparison -- so if the
+    /// leading "./" survived normalization they would not overlap.</summary>
+    [Fact]
+    public void A_leading_dot_slash_is_the_same_place() =>
+        Assert.True(Claims.Overlap("path", Claims.Normalize("./src/a.cs"), "path", Claims.Normalize("src/a.cs")));
+
+    [Fact]
+    public void The_whole_tree_overlaps_every_path_claim()
+    {
+        Assert.True(Claims.Overlap("subtree", "", "subtree", "src/water"));
+        Assert.True(Claims.Overlap("subtree", "src/water", "subtree", ""));
+        Assert.True(Claims.Overlap("subtree", "", "path", "readme.md"));
+        Assert.True(Claims.Overlap("path", "readme.md", "subtree", ""));
+        Assert.True(Claims.Overlap("subtree", "", "newfile", "src/x.cs"));
+        Assert.True(Claims.Overlap("subtree", "", "subtree", ""));
+    }
+
+    /// <summary>...but not a symbol, and that is not an oversight: a symbol names an
+    /// identifier, not a path, so no subtree contains one. Kept consistent with
+    /// <see cref="A_symbol_only_collides_with_the_same_symbol"/> rather than special-cased,
+    /// because "the widest possible path claim" and "a name" are still not comparable.</summary>
+    [Fact]
+    public void The_whole_tree_does_not_overlap_a_symbol()
+    {
+        Assert.False(Claims.Overlap("subtree", "", "symbol", "Config"));
+        Assert.False(Claims.Overlap("symbol", "Config", "subtree", ""));
+    }
+
+    /// <summary>The other half, and the one that makes the claim usable rather than merely
+    /// blocking: the gate must grant its holder a write anywhere. Against HEAD this denied
+    /// every path, so a ticket holding the whole tree could not touch a single file in it.</summary>
+    [Fact]
+    public void The_whole_tree_covers_every_path()
+    {
+        Assert.True(Claims.Covers("subtree", "", "readme.md"));
+        Assert.True(Claims.Covers("subtree", "", "src/water/sim.cs"));
+    }
+
+    /// <summary>An empty value is the whole tree for a SUBTREE and nonsense for everything
+    /// else: `path:/` names no file and `symbol:   ` names no identifier. Both used to parse,
+    /// and a `path:` claim with an empty value overlapped only other empty ones and covered
+    /// nothing -- so it created a ticket that held a claim on nothing while reporting success,
+    /// which is P0.5's silently-dropped-spec failure reached from the other side. Refused by
+    /// name at the door instead. A truncated `subtree:` (nothing at all after the colon) stays
+    /// refused too: "/" and "." are deliberate spellings, an empty tail is a typo.</summary>
+    [Theory]
+    [InlineData("path:/")]
+    [InlineData("new:/")]
+    [InlineData("path:.")]
+    [InlineData("path:./")]
+    [InlineData("symbol:   ")]
+    [InlineData("subtree:")]
+    public void An_empty_value_is_refused_for_every_kind_but_a_subtree(string spec) =>
+        Assert.Null(Claims.Parse(spec));
+}
+
+/// <summary>
+/// Claim scoping (Phase 0b): the same claim string means different things in different
+/// repositories, and the same folder is spelled differently in one repository over time. Both
+/// follow from Phase 0's finding that a repository's DISPLAY NAME is not stable while an open
+/// ticket's claims are frozen against it — so <c>Store.FindConflicts</c> cannot compare raw
+/// values, and <c>Claims.Overlap(Held, Held)</c> is where it stopped.
+///
+/// The bias is stated once here because every case below is an instance of it: a false
+/// positive refuses work that would have been fine and can be argued with; a false negative
+/// puts two agents in one file and says nothing. So every uncertainty falls through to the
+/// old unscoped comparison.
+/// </summary>
+public class ClaimScopeTests
+{
+    // Two repositories in one workspace, as Repos.Discover names them once a second project
+    // is attached: identity is the path, the display name is what claims are prefixed with.
+    const string EngineKey = @"c:\ws\engine";
+    const string ToolsKey = @"c:\ws\tools";
+    static Claims.Held Engine(string kind, string v) => new(EngineKey, "engine", kind, v);
+    static Claims.Held Tools(string kind, string v) => new(ToolsKey, "tools", kind, v);
+    static Claims.Held Root(string kind, string v) => new(@"c:\ws\solo", ".", kind, v);
+
+    // ---- THE POINT OF THE PHASE: the drift that nothing detected ----------------------
+    //
+    // A repository alone in its workspace is named "." (empty claim prefix); attaching a
+    // second project renames it to its folder leaf, and every ticket already open keeps the
+    // name it was born with. So one folder acquires two spellings, and until this existed the
+    // claim algebra saw two unrelated strings. `workspace-acceptance`'s drift fixture carried
+    // a comment recording exactly this hole: "after the rename it CANNOT be seen to [overlap]
+    // ... (that half is Phase 0b's problem)".
+    [Fact]
+    public void One_folder_under_two_names_in_one_repository_still_overlaps()
+    {
+        var born_before_the_attach = new Claims.Held(EngineKey, ".", "subtree", "src/one");
+        var born_after_it = Engine("subtree", "engine/src/one");
+        Assert.True(Claims.Overlap(born_before_the_attach, born_after_it));
+        Assert.True(Claims.Overlap(born_after_it, born_before_the_attach));
+        // ...and the raw comparison the code used to make says no, which is the incident.
+        Assert.False(Claims.Overlap("subtree", "src/one", "subtree", "engine/src/one"));
+    }
+
+    [Fact]
+    public void A_path_and_the_subtree_it_is_in_still_overlap_across_a_rename()
+    {
+        var before = new Claims.Held(EngineKey, ".", "subtree", "src/one");
+        Assert.True(Claims.Overlap(before, Engine("path", "engine/src/one/a.cs")));
+        Assert.False(Claims.Overlap(before, Engine("path", "engine/src/two/b.cs")));
+    }
+
+    /// <summary>The repository's own root, claimed by name, is the whole of it — and that is
+    /// the same value `subtree:/` produces in a one-repository workspace.</summary>
+    [Fact]
+    public void Claiming_a_repository_by_name_claims_all_of_it() =>
+        Assert.True(Claims.Overlap(Engine("subtree", "engine"), Engine("path", "engine/src/deep/a.cs")));
+
+    // ---- the false positive this removes ----------------------------------------------
+    //
+    // A symbol carries no path (Claims.Parse leaves it alone), ForClaims skips it, and Overlap
+    // compared bare equality — so `symbol:Config` held in `engine` refused `symbol:Config` in
+    // `tools`, where it is a different file in a different repository that no agent in the
+    // first can even reach. A symbol is scoped to its ticket's repository because that is
+    // where it lives: a ticket's claims cannot leave the repository it lands in (ticket-create
+    // and claim-extend both refuse it), so there is no shared resource to protect.
+    [Fact]
+    public void The_same_symbol_in_two_repositories_does_not_collide() =>
+        Assert.False(Claims.Overlap(Engine("symbol", "Config"), Tools("symbol", "Config")));
+
+    /// <summary>...and the detection that matters is untouched. THIS is the check that would
+    /// catch a "scoping" that simply stopped comparing: if narrowing had been done by deleting
+    /// the symbol rule rather than by placing it, this goes green while the one above does too.</summary>
+    [Fact]
+    public void The_same_symbol_in_ONE_repository_still_collides() =>
+        Assert.True(Claims.Overlap(Engine("symbol", "Config"), Engine("symbol", "Config")));
+
+    [Fact]
+    public void Two_repositories_paths_do_not_collide_even_spelled_identically()
+    {
+        // Only reachable for a pre-P0.6 row, since ForClaims/CheckClaims refuse a claim that
+        // is not inside its ticket's repository — but the scoping must be right regardless.
+        Assert.False(Claims.Overlap(Engine("path", "engine/src/main.cs"), Tools("path", "tools/src/main.cs")));
+    }
+
+    // ---- where it deliberately refuses too much --------------------------------------
+
+    /// <summary>A ticket with no recorded repository (pre-schema-9, and its display name no
+    /// longer resolves to anything) cannot be placed, so it is compared against everything the
+    /// old way. It is one ticket in one workspace; over-refusing is a nuisance, and the
+    /// alternative is letting an unplaceable claim collide with nothing at all.</summary>
+    [Fact]
+    public void An_unknown_repository_falls_back_to_the_unscoped_comparison()
+    {
+        var stranded = new Claims.Held("", ".", "subtree", "src/one");
+        Assert.True(Claims.Overlap(stranded, new Claims.Held(EngineKey, ".", "path", "src/one/a.cs")));
+        Assert.True(Claims.Overlap(new Claims.Held(EngineKey, ".", "path", "src/one/a.cs"), stranded));
+    }
+
+    /// <summary>A claim that does not live in the repository its ticket lands in — which
+    /// `--repo tools --claim path:engine/sim.cs` created for as long as P0.6 was open — cannot
+    /// be reduced to repo-relative terms without lying about it. So it keeps the workspace-wide
+    /// comparison, and a legitimately-created claim over the same file is still refused.
+    /// Scoping it to `tools` would have made this pair invisible, which is the one outcome
+    /// worse than a red check.</summary>
+    [Fact]
+    public void A_claim_outside_its_own_repository_is_still_compared_workspace_wide()
+    {
+        var mis_attributed = Tools("path", "engine/src/main.cs");
+        Assert.True(Claims.Overlap(mis_attributed, Engine("path", "engine/src/main.cs")));
+        Assert.True(Claims.Overlap(Engine("path", "engine/src/main.cs"), mis_attributed));
+    }
+
+    /// <summary>The whole WORKSPACE (an empty subtree value in a repository whose prefix is
+    /// not empty) is wider than any one repository, so it is not narrowed to one.</summary>
+    [Fact]
+    public void A_workspace_wide_subtree_in_a_prefixed_repository_is_not_narrowed() =>
+        Assert.True(Claims.Overlap(Engine("subtree", ""), Tools("path", "tools/src/main.cs")));
+
+    // ---- THE INVARIANT: a one-repository workspace is byte-for-byte unchanged ---------
+    //
+    // The operator's own machine is a single-project workspace, so this is not theoretical.
+    // There the repository is named "." for every ticket, the claim prefix is empty, and every
+    // ticket shares one key — so the scoped comparison is the unscoped one, exactly.
+    [Theory]
+    [InlineData("subtree", "src/water", "path", "src/water/sim.cs")]
+    [InlineData("subtree", "src/water", "subtree", "src/waterfall")]
+    [InlineData("path", "src/a.cs", "path", "src/a.cs")]
+    [InlineData("path", "src/a.cs", "path", "src/b.cs")]
+    [InlineData("symbol", "Config", "symbol", "Config")]
+    [InlineData("symbol", "Config", "symbol", "Other")]
+    [InlineData("newfile", "src/water/new.cs", "subtree", "src/water")]
+    [InlineData("subtree", "", "path", "readme.md")]
+    public void In_a_single_repository_workspace_scoping_changes_nothing(string ka, string a, string kb, string b) =>
+        Assert.Equal(Claims.Overlap(ka, a, kb, b), Claims.Overlap(Root(ka, a), Root(kb, b)));
+
+    /// <summary>The prefix rule has one definition now, and `RepoRef.ClaimPrefix` calls it.
+    /// Both spellings of "the repository is the workspace" must produce no prefix, or every
+    /// claim ever written in a one-project workspace stops matching itself.</summary>
+    [Theory]
+    [InlineData(".", "")]
+    [InlineData("", "")]
+    [InlineData("engine", "engine/")]
+    [InlineData("work/engine", "work/engine/")]
+    [InlineData("twin~2", "twin~2/")]
+    public void Prefix_is_empty_only_for_the_root_repository(string name, string prefix) =>
+        Assert.Equal(prefix, Claims.Prefix(name));
 }
 
 /// <summary>

@@ -163,6 +163,29 @@ try {
     $back = Dodona @("token-request", "4")
     Check 'backstop_uses_workspace_paths' ($DODONA_EXIT -eq 1 -and $back -match 'engine/other/sneaky.cs') $back
 
+    # ---- CLAIMS ARE PER REPOSITORY: the same claim string, twice, in two repos (Phase 0b) ----
+    #
+    # THE CHECK THIS PHASE EXISTS FOR, and LOCATIONS-PLAN.md said flatly that it "cannot be
+    # written today". A `symbol:` claim carries no path (Claims.Parse leaves it alone), ForClaims
+    # skips it, and Overlap compared bare equality -- so a symbol named the whole WORKSPACE, and
+    # holding `symbol:Config` in `engine` refused it in `tools`, where it is a different file in
+    # a different repository that no agent in `engine` can even reach. Under HEAD the second
+    # create prints "conflict: symbol:Config overlaps ... held by ticket 5".
+    $sym1 = Dodona @("ticket-create", "--title", "SYM-ENGINE", "--repo", "engine", "--claim", "symbol:Config")
+    Check 'a_symbol_claim_can_be_held_in_one_repo' ($sym1 -match 'ticket 5') $sym1
+    $sym2 = Dodona @("ticket-create", "--title", "SYM-TOOLS", "--repo", "tools", "--claim", "symbol:Config")
+    Check 'the_same_claim_string_is_free_in_a_different_repo' ($DODONA_EXIT -eq 0 -and $sym2 -match 'ticket 6') $sym2
+    # ...AND THE DETECTION SURVIVED, which is the half that makes the pair worth anything. A
+    # "scoping" that simply stopped comparing symbols would turn the check above green while
+    # letting two agents rename one identifier -- the worst outcome available to this phase, and
+    # indistinguishable from the fix unless something asserts the refusal is still reachable.
+    $symSame = Dodona @("ticket-create", "--title", "SYM-AGAIN", "--repo", "engine", "--claim", "symbol:Config")
+    Check 'the_same_claim_string_in_the_SAME_repo_is_still_refused' `
+        ($DODONA_EXIT -ne 0 -and $symSame -match 'conflict:' -and $symSame -match 'ticket 5') $symSame
+    # (the PATH half of cross-repo independence needs a repository whose NAME has drifted, so it
+    # lives in the repo-identity fixture below -- here `engine/...` and `tools/...` never
+    # collided in the first place, and a check that cannot fail is worth nothing)
+
     # ---- lanes are workspace-wide: an agent can run with no repository involved ----
     $ls = Dodona @("lane-start", "--title", "DOCS", "--child", $fake)
     if ($ls -match 'lane (\d+)') { $lane = $Matches[1] } else { throw "lane-start failed: $ls" }
@@ -535,11 +558,55 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
         ($driftRepos -match [regex]::Escape($leafA) -and $driftRepos -notmatch '(?m)^\s*\.\s') $driftRepos
 
     # A second ticket in THE SAME REPOSITORY, created under its new name. Its claim does not
-    # overlap ticket 1's -- and after the rename it CANNOT be seen to, because "src/one" and
-    # "<leaf>/src/two" no longer share a prefix (that half is Phase 0b's problem). So both
-    # tickets are open in one repository, which is exactly the state the merge token exists for.
+    # overlap ticket 1's, and must still be allowed: so both tickets are open in one repository,
+    # which is exactly the state the merge token exists for.
     $dt2 = DodonaBare @("ticket-create", "--title", "DRIFT2", "--claim", "subtree:$leafA/src/two", "--workspace", $drift)
     Check 'second_ticket_lands_in_the_same_repository_under_its_new_name' ($dt2 -match 'ticket 2') $dt2
+
+    # ---- THE DANGEROUS HALF OF THE RENAME (Phase 0b) ----
+    # One directory, two spellings. Ticket 1 holds `subtree:src/one`, written while this
+    # repository was still called "." (a lone project that IS a repo gets the empty claim
+    # prefix); the attach renamed it, so the same directory is now spelled
+    # `<leaf>/src/one`. Store.FindConflicts compared the RAW stored strings, which share no
+    # prefix -- so the claim algebra saw two unrelated folders and granted a second ticket a
+    # directory an open ticket already held. TWO AGENTS INTO ONE FOLDER, silently, with no
+    # merge-token protection between them because the token only serialises the LAND.
+    #
+    # Nothing in the tree detected this before: the comment above used to say so out loud
+    # ("after the rename it CANNOT be seen to ... that half is Phase 0b's problem"). Claims are
+    # now reduced to REPO-RELATIVE terms and compared per repository path, so both spellings
+    # come out as `src/one`.
+    #
+    # THE ORDER OF THESE THREE IS LOAD-BEARING and cost a `dev prove` round: under HEAD each of
+    # them SUCCEEDS, so the first one leaves behind a claim in the new namespace that refuses
+    # the next -- and the second check then went VACUOUS, passing against HEAD for the wrong
+    # reason (refused by the ticket the defect had just created, not by ticket 1). So the
+    # claim-extend case goes FIRST, and no two of them name paths that contain each other:
+    # a.cs and b.cs are siblings, and src/three is elsewhere. Do not reorder or rename these
+    # without re-proving all three.
+
+    # The conflict search has TWO callers, and claim-extend is the one that reads the
+    # repository off the ticket ROW (Store.TxRepoId) rather than being handed one, so it needs
+    # its own check. Widening ticket 2 into the directory ticket 1 holds under the repository's
+    # OLD name must be refused. Under HEAD this prints "extended ticket 2".
+    $dt3d = DodonaBare @("claim-extend", "2", "--claim", "path:$leafA/src/one/a.cs", "--workspace", $drift)
+    Check 'claim_extend_cannot_widen_across_a_rename' `
+        ($DODONA_EXIT -ne 0 -and $dt3d -match 'conflict:' -and $dt3d -match 'ticket 1' -and
+         $dt3d -notmatch 'extended ticket') $dt3d
+    # ...and the same folder cannot be ticketed twice. A path INSIDE the subtree rather than an
+    # identical spelling, deliberately: the reduction has to put a path and a subtree into ONE
+    # namespace, not merely fold two equal strings together. Under HEAD this prints "ticket 3".
+    $dt3 = DodonaBare @("ticket-create", "--title", "DRIFT3", "--claim", "path:$leafA/src/one/b.cs", "--workspace", $drift)
+    Check 'one_folder_under_two_names_is_one_claim' `
+        ($DODONA_EXIT -ne 0 -and $dt3 -match 'conflict:' -and $dt3 -match 'ticket 1') $dt3
+    # ...while a directory nobody holds is still free, so the scoping did not simply start
+    # refusing everything in the repository. VACUOUS BY CONSTRUCTION -- HEAD permits this too --
+    # and kept anyway for the same reason as `an_explicit_root_beats_the_inherited_env` above:
+    # no code state makes it red, and it is what would catch a later "narrowing" that refuses
+    # the whole repository instead of the claim. Extended rather than ticketed on purpose: this
+    # fixture's migration section below reads tickets by id.
+    $dt3c = DodonaBare @("claim-extend", "2", "--claim", "subtree:$leafA/src/three", "--workspace", $drift)
+    Check 'a_disjoint_directory_in_the_renamed_repository_is_still_free' ($DODONA_EXIT -eq 0 -and $dt3c -match 'extended ticket 2') $dt3c
     DodonaBare @("approve", "1", "--workspace", $drift) | Out-Null
     DodonaBare @("approve", "2", "--workspace", $drift) | Out-Null
     $dg1 = DodonaBare @("token-request", "1", "--lease", "300", "--workspace", $drift)

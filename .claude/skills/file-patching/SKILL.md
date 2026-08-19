@@ -31,6 +31,15 @@ against 638 LFs.
 io.open(p, 'w', encoding='utf-8', newline='\n').write(s)   # yes
 ```
 
+**`sed -i` rewrites the WHOLE file's line endings, not the line you matched.** Git Bash's sed
+reads CRLF text, strips the CR, and writes bare LF everywhere — so a one-character `s///` on a
+CRLF working copy shows up as every line changed, and `git diff` starts warning *"LF will be
+replaced by CRLF the next time Git touches it"*. The committed bytes are the same (git normalises
+to LF), which is exactly why this is easy to wave through, but `dev gate`'s P7.5 assertion is
+looking at the working copy. Hit while correcting a single number in a plan file, 2026-08-19,
+Phase 0b. Rule 5 below is what caught it: `git diff --stat` said 610 lines, `git diff -w --stat`
+said the same, and neither matched the one line that was meant to change.
+
 ## 3. Match the BOM. Do not let the writer choose it
 
 `utf-8-sig` **adds** a BOM. This repo is mixed on purpose — `src/Dodona/Program.cs` has one,

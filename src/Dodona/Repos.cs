@@ -15,8 +15,11 @@ namespace Dodona;
 sealed record RepoRef(string Name, string Path, string MemberPath)
 {
     public bool IsRoot => Name == ".";
-    /// <summary>What to prepend to a repo-relative path to make it a claim path.</summary>
-    public string ClaimPrefix => IsRoot ? "" : Name + "/";
+    /// <summary>What to prepend to a repo-relative path to make it a claim path. Delegated to
+    /// <see cref="Claims.Prefix"/> because <c>Store.FindConflicts</c> now needs the same rule
+    /// from a ticket ROW, where there is no <c>RepoRef</c> — and two copies of it drifting
+    /// apart would move an open ticket's claim namespace, which is the Phase 0 incident.</summary>
+    public string ClaimPrefix => Claims.Prefix(Name);
 }
 
 /// <summary>
@@ -146,7 +149,11 @@ static class Repos
     /// about (P0.6). Returns null when every claim belongs, or the refusal to print.
     ///
     /// Symbol claims carry no path and so name no repository — they are skipped here exactly
-    /// as <see cref="ForClaims"/> skips them. Narrowing them is Phase 0b's business.
+    /// as <see cref="ForClaims"/> skips them. Which is what makes them safe to scope: because
+    /// this refuses any PATH claim outside <paramref name="named"/>, a ticket's claims cannot
+    /// leave one repository, so a symbol claim belongs to the repository its ticket lands in
+    /// even though it never says so. <see cref="Claims.Overlap(Claims.Held, Claims.Held)"/>
+    /// places it there (Phase 0b).
     ///
     /// In a one-repository workspace the root repo swallows every path, so this can only
     /// return null: the ordinary case is unchanged, which is the property the whole
@@ -159,9 +166,9 @@ static class Repos
         {
             if (kind == "symbol") continue;
             var r = ForPath(repos, value);
-            if (r is null) strays.Add($"{kind}:{value} is in no repository");
+            if (r is null) strays.Add($"{Claims.Spec(kind, value)} is in no repository");
             else if (!r.Name.Equals(named.Name, StringComparison.OrdinalIgnoreCase))
-                strays.Add($"{kind}:{value} is in repository {r.Name}");
+                strays.Add($"{Claims.Spec(kind, value)} is in repository {r.Name}");
         }
         if (strays.Count == 0) return null;
         return $"these claims are not in repository {named.Name}: {string.Join("; ", strays)} — " +
@@ -196,7 +203,7 @@ static class Repos
         {
             if (kind == "symbol") continue;
             var r = ForPath(repos, value);
-            if (r is null) homeless.Add($"{kind}:{value}");
+            if (r is null) homeless.Add(Claims.Spec(kind, value));
             else hits[r.Name] = r;
         }
 

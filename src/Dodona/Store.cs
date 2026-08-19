@@ -711,7 +711,10 @@ sealed class Store : IDisposable, ILaneSink
         lock (_lock)
         {
             using var tx = _db.BeginTransaction();
-            var conflicts = FindConflicts(tx, claims, excludeTicket: null);
+            // Scoped by the SAME pair that is about to be written to the row: the canonical
+            // path is the identity a conflict is judged against, the display name is the
+            // prefix the claim values carry (Phase 0b).
+            var conflicts = FindConflicts(tx, new RepoId(repoPath, repo), claims, excludeTicket: null);
             if (conflicts.Count > 0) { tx.Rollback(); return (-1, conflicts); }
 
             using var c = _db.CreateCommand();
@@ -735,7 +738,14 @@ sealed class Store : IDisposable, ILaneSink
         lock (_lock)
         {
             using var tx = _db.BeginTransaction();
-            var conflicts = FindConflicts(tx, claims, excludeTicket: ticketId);
+            // The ticket's own repository is READ HERE, inside the transaction, rather than
+            // passed in by the daemon: a caller able to pass the wrong repository is a caller
+            // able to scope a conflict search to the wrong place, and the row already holds
+            // both halves — repo_path is the identity, repo is the frozen display name the
+            // existing claim values were written against. A missing row leaves the pair empty,
+            // which means UNSCOPED, which refuses more rather than less.
+            var repo = TxRepoId(tx, ticketId);
+            var conflicts = FindConflicts(tx, repo, claims, excludeTicket: ticketId);
             if (conflicts.Count > 0) { tx.Rollback(); return conflicts; }
             InsertClaims(tx, ticketId, claims);
             tx.Commit();
@@ -743,13 +753,28 @@ sealed class Store : IDisposable, ILaneSink
         }
     }
 
-    List<string> FindConflicts(SqliteTransaction tx, List<(string Kind, string Value)> claims, long? excludeTicket)
+    RepoId TxRepoId(SqliteTransaction tx, long ticketId)
+    {
+        using var c = _db.CreateCommand();
+        c.Transaction = tx;
+        c.CommandText = "SELECT repo_path, repo FROM tickets WHERE id = $id;";
+        c.Parameters.AddWithValue("$id", ticketId);
+        using var r = c.ExecuteReader();
+        return r.Read() ? new RepoId(r.GetString(0), r.GetString(1)) : new RepoId("", "");
+    }
+
+    /// <summary>Which open tickets' claims intersect these (§6) — asked PER REPOSITORY since
+    /// Phase 0b. <paramref name="repo"/> is the asking ticket's identity/display-name pair;
+    /// <c>Claims.Overlap(Held, Held)</c> carries the whole argument for why the comparison
+    /// cannot be made on the raw stored values, in both directions.</summary>
+    List<string> FindConflicts(SqliteTransaction tx, RepoId repo,
+                               List<(string Kind, string Value)> claims, long? excludeTicket)
     {
         var conflicts = new List<string>();
         using var c = _db.CreateCommand();
         c.Transaction = tx;
         c.CommandText = """
-            SELECT cl.kind, cl.value, t.id, t.title FROM claims cl
+            SELECT cl.kind, cl.value, t.id, t.title, t.repo_path, t.repo FROM claims cl
             JOIN tickets t ON t.id = cl.ticket_id
             WHERE t.state = 'open' AND ($x IS NULL OR t.id != $x);
             """;
@@ -758,9 +783,10 @@ sealed class Store : IDisposable, ILaneSink
         while (r.Read())
         {
             var (ek, ev, tid, ttitle) = (r.GetString(0), r.GetString(1), r.GetInt64(2), r.GetString(3));
+            var held = new Claims.Held(r.GetString(4), r.GetString(5), ek, ev);
             foreach (var (k, v) in claims)
-                if (Claims.Overlap(k, v, ek, ev))
-                    conflicts.Add($"{k}:{v} overlaps {ek}:{ev} held by ticket {tid} ({ttitle})");
+                if (Claims.Overlap(new Claims.Held(repo.Path, repo.Name, k, v), held))
+                    conflicts.Add($"{Claims.Spec(k, v)} overlaps {Claims.Spec(ek, ev)} held by ticket {tid} ({ttitle})");
         }
         return conflicts;
     }

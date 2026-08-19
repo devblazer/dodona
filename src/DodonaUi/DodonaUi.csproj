@@ -34,6 +34,12 @@
     <Compile Include="..\Dodona\Workspaces.cs" Link="Workspaces.cs" />
     <Compile Include="..\Dodona\WorkspaceResolve.cs" Link="WorkspaceResolve.cs" />
     <Compile Include="..\Dodona\Repos.cs" Link="Repos.cs" />
+    <!-- Claims.cs comes with Repos.cs, because Repos VALIDATES claims (CheckClaims,
+         ForClaims) and derives a repository's claim prefix from Claims.Prefix — one
+         definition of that rule, since two copies drifting apart is how an open ticket's
+         claim namespace moves underneath it (Phase 0's incident). The file is pure string
+         comparison with no dependencies at all, so linking it costs nothing. -->
+    <Compile Include="..\Dodona\Claims.cs" Link="Claims.cs" />
     <!-- Which PROJECT a lane is in, and what to say about it. Linked for the same reason as
          Instance and Workspaces above: the window must reach the SAME answer the daemon
          reaches, and two implementations of "which project is this lane in" would be two

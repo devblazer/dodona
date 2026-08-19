@@ -239,6 +239,39 @@ try {
     $landRetry = Dodona @("land", "$t4id")
     Check 'regrant_after_expiry_lands' ($landRetry -match "landed ticket $t4id") $landRetry
 
+    # ---- 11b. `subtree:/` -- the claim that read "the whole tree" and blocked nobody --------
+    #
+    # MEASURED against HEAD before it was changed (unit tests written first, ten of them red):
+    # `subtree:/` normalizes to the EMPTY string, and every branch of the algebra then answered
+    # no. Overlap's `a == b || a.StartsWith(b + "/")` cannot match an empty `a`, and Covers'
+    # `relPath.StartsWith(value + "/")` went looking for a leading "/". So an agent could take
+    # what reads as an exclusive lock over the entire repository while every other ticket walked
+    # straight through it -- enforcement that is switched off while looking armed, which is the
+    # exact failure CLAUDE.md 0.3 is about -- and its own gate then denied it every write.
+    #
+    # Ticket $t3id (WATER-NEXT) is the only one still open, holding subtree:src/water. Under
+    # HEAD this ticket-create SUCCEEDS and prints "ticket N branch ticket/N".
+    if ($t3 -match 'ticket (\d+) ') { $t3id = $Matches[1] } else { $t3id = 0 }
+    $whole = Dodona @("ticket-create", "--title", "WHOLE", "--claim", "subtree:/")
+    Check 'the_whole_tree_claim_conflicts_with_an_open_claim' `
+        ($DODONA_EXIT -ne 0 -and $whole -match 'conflict:' -and $whole -match "ticket $t3id") $whole
+    # An empty value is the whole tree for a SUBTREE and nonsense everywhere else: `path:/`
+    # names no file. HEAD created a ticket holding a claim over nothing and reported success --
+    # P0.5's silently-dropped spec reached from the other side. Refused by name now.
+    $emptyPath = Dodona @("ticket-create", "--title", "NOWHERE", "--claim", "path:/")
+    Check 'an_empty_path_claim_is_refused_rather_than_created' `
+        ($DODONA_EXIT -ne 0 -and $emptyPath -match 'bad claim spec') $emptyPath
+    # The other half, and the one that makes a whole-tree claim usable rather than only
+    # blocking: its holder must be allowed to write anywhere in the tree. Extended onto the open
+    # ticket rather than ticketed, because a whole-tree claim conflicts with every other open
+    # ticket by construction and claim-extend excludes the ticket's own claims.
+    $wide = Dodona @("claim-extend", "$t3id", "--claim", "subtree:/")
+    Check 'the_whole_tree_is_claimable_when_nothing_else_holds_anything' `
+        ($DODONA_EXIT -eq 0 -and $wide -match "extended ticket $t3id") $wide
+    $wideCovered = Dodona @("claim-check", "$t3id", "$root\.dodona\wt\t$t3id\src\sky\box.cs")
+    Check 'the_whole_tree_covers_a_file_no_other_claim_names' `
+        ($DODONA_EXIT -eq 0 -and $wideCovered -match 'covered:') $wideCovered
+
     # ---- 12. the causal chain is in the store (§12) ----
     $events = (python -c "
 import sqlite3
