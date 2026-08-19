@@ -1799,7 +1799,43 @@ sealed class Daemon
         // says the same thing to a child that has no system prompt to read (§17's fake
         // agent), and is worth having in the environment of any child when debugging.
         psi.Environment["DODONA_LANE_ROLE"] = role;
-        Process.Start(psi);
+
+        // A SPAWN THAT NEVER HAPPENED MUST NOT LEAVE THE ROW SAYING `alive`.
+        //
+        // The row is created by SpawnLaneAsync before we get here, and the only failure this
+        // method used to handle was "the pipe never answered" -- which marks the lane
+        // `unreachable` further down. `Process.Start` THROWING is a different path and was not
+        // handled at all, so the exception escaped and the lane stayed `alive` forever: no
+        // process, no shim-info record, and nothing to notice it until the next daemon restart
+        // ran reconcile (P3.4).
+        //
+        // Found by running the app, 2026-08-19: a probe copied Dodona, DodonaUi and the fake
+        // agent into a directory and forgot DodonaShim. `dodona ps` correctly said LANES 0 --
+        // it reads the OS -- while the window faithfully rendered a live FOAM tile from the
+        // store row. That is the count lying in the direction this whole phase exists to stop,
+        // and the UI was not wrong: it showed exactly what it was told.
+        //
+        // The existence check is separate from the catch on purpose: a missing shim is the
+        // overwhelmingly likely cause and deserves to be NAMED rather than reported as a
+        // Win32Exception, because "name the real cause" is the difference between a five-second
+        // fix and an hour (CLAUDE.md 0.3).
+        if (!File.Exists(shimExe))
+        {
+            _store.LaneState(id, "unreachable");
+            var missing = $"shim binary not found: {shimExe}" +
+                          (Environment.GetEnvironmentVariable("DODONA_SHIM") is null
+                              ? " (looked beside this daemon; a published build has it there)"
+                              : " (DODONA_SHIM points at it)");
+            _store.Event("shim_spawn_failed", id, missing);
+            return (-1, $"error: lane {id} not started -- {missing}");
+        }
+        try { Process.Start(psi); }
+        catch (Exception ex)
+        {
+            _store.LaneState(id, "unreachable");
+            _store.Event("shim_spawn_failed", id, $"{ex.GetType().Name}: {ex.Message} (shim={shimExe})");
+            return (-1, $"error: lane {id} not started -- could not launch {shimExe}: {ex.Message}");
+        }
         _store.Event("shim_spawned", id, $"pipe={pipe} child={child} cwd={workDir}");
 
         var rt = new LaneRuntime(id, pipe, _store);

@@ -176,14 +176,36 @@ _ = Task.Run(async () =>
 Note("up");
 
 // Serve clients, one at a time, forever.
+//
+// AND THE NAME NEVER LEAVES THE NAMESPACE (P6.1). This used to construct one server instance,
+// serve it, dispose it, and construct the next -- and in that gap `\\.\pipe\` did not contain
+// this lane at all. Measured: 8 of 192 reads over 1.5 s saw nothing while this process was alive
+// and instantly connectable. Worse, the gap is SYNCHRONISED: every shim in a workspace
+// disconnects the instant its daemon exits, and the next daemon's reconcile runs milliseconds
+// later, so a single read there declared four to seven live lanes "gone" per restart.
+//
+// Two instances, and the successor is created BEFORE the current one is torn down, so there is
+// always a listener holding the name. maxNumberOfServerInstances is 2 for exactly that and no
+// more: only one is ever PUMPED, so the one-client-at-a-time contract (§13) is unchanged. A
+// second client can now connect and sit unpumped instead of failing to connect -- which is why
+// LaneRuntime bounds its wait for `!hello` rather than blocking on a connection it owns but the
+// shim has not promoted.
+const int MaxServers = 2;
+NamedPipeServerStream NewServer() => new(pipeName, PipeDirection.InOut, MaxServers,
+    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+var server = NewServer();
 try
 {
 while (!shutdown.IsCancellationRequested)
 {
-    var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
-        PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
-    try { await server.WaitForConnectionAsync(shutdown.Token); }
-    catch (OperationCanceledException) { server.Dispose(); break; }
+    // Already connected when a spare got taken while we were busy: WaitForConnectionAsync would
+    // throw InvalidOperationException on it, so ask first.
+    if (!server.IsConnected)
+    {
+        try { await server.WaitForConnectionAsync(shutdown.Token); }
+        catch (OperationCanceledException) { server.Dispose(); break; }
+    }
+    var next = NewServer();          // holds the name while this connection is served and closed
 
     var writer = new StreamWriter(server) { AutoFlush = true };
     var reader = new StreamReader(server);
@@ -201,7 +223,7 @@ while (!shutdown.IsCancellationRequested)
     // The decrement is not tidiness: a `continue` that skipped it would leave clientsHere
     // permanently above zero, and the lease would then never expire again -- the guard against
     // immortal shims, made immortal by its own bookkeeping.
-    catch { Interlocked.Decrement(ref clientsHere); lastContact = DateTime.UtcNow; server.Dispose(); continue; }
+    catch { Interlocked.Decrement(ref clientsHere); lastContact = DateTime.UtcNow; server.Dispose(); server = next; continue; }
 
     var pumpOut = Task.Run(() =>
     {
@@ -246,8 +268,10 @@ while (!shutdown.IsCancellationRequested)
     try { await Task.WhenAll(pumpOut, pumpIn); } catch { }
     Interlocked.Decrement(ref clientsHere);
     lastContact = DateTime.UtcNow;                      // the lease runs from the LAST goodbye
+    server = next;                                      // the name was never unheld
     FinishIfDrained();          // the client may have been the one that took the final line
 }
+server.Dispose();
 
 // The record dies with the process that wrote it. Nothing in the tree used to delete a
 // shim-info file on ANY exit path -- not lane-stop, not stop-daemon, not a hot swap, not a

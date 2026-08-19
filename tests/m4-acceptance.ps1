@@ -256,6 +256,17 @@ try {
     # ================= start-on-demand: the daemon is summoned, not served =================
     Dodona @("stop-daemon") | Out-Null
     Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down before autostart is tested' | Out-Null
+    # `status` NO LONGER SUMMONS a daemon, so autostart is provoked by a command that does.
+    # These three checks are about AUTOSTART; they leaned on `status` merely because it happened
+    # to be a summoning command, and that coupling hid what they were really asserting. Two
+    # explicit steps -- summon, then ask -- says it properly.
+    #
+    # Why status changed: it is what people reach for as a health check, and a summoned daemon
+    # runs its warm-up, which spawns the router, brain and compressor pool -- five real
+    # `claude -p --model haiku` processes. CLAUDE.md 3.2 warned about it in prose and a session
+    # did it anyway, twice, against the operator's live workspace.
+    Dodona @("tickets") | Out-Null
+    Wait-Daemon $ws.CtlPipe | Out-Null
     $revived = Dodona @("status")
     Check 'autostart_summons_daemon' ($revived -match 'daemon pid=(\d+)' -and [int]$Matches[1] -ne $newPid2) $revived
     Check 'autostart_reconnects_lane' ($revived -match 'SKY' -and $revived -match 'connected=True') $revived
@@ -267,7 +278,9 @@ try {
     $env:DODONA_NO_AUTOSTART = "1"
     Dodona @("stop-daemon") | Out-Null
     Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down' | Out-Null
-    $noauto = Dodona @("status")
+    # A SUMMONING command, for the same reason: `status` would now refuse whether autostart is
+    # disabled or not, so asking it here would prove nothing about DODONA_NO_AUTOSTART.
+    $noauto = Dodona @("tickets")
     Check 'autostart_can_be_disabled' ($DODONA_EXIT -ne 0 -and $noauto -match 'daemon not running') $noauto
 }
 finally {

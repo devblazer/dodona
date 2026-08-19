@@ -1156,9 +1156,33 @@ int Client(object request, string? pipeName = null)
         // failed swap or a crash: the next command brings the daemon back, and the shims
         // have been buffering the whole time.
         var isWorkspaceCtl = wsCache is not null && pipeName == Instance.CtlPipe(wsCache.Id);
-        if (!isWorkspaceCtl || cmd == "stop-daemon" || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
+        // `status` NEVER SUMMONS, and that is enforcement replacing a warning (D-6).
+        //
+        // CLAUDE.md 3.2 exists solely to warn that `dodona status` is not read-only: it summons a
+        // daemon, and a summoned daemon runs its warm-up, which spawns the router, the brain and
+        // the compressor pool -- five real `claude -p --model haiku` processes. On 2026-08-19 a
+        // session used it twice as a health check against the operator's LIVE workspace, left a
+        // daemon and five model lanes on a machine they believed was idle, and then spent two
+        // hours diagnosing its own five leaked shims as "machine contention".
+        //
+        // A written warning did not stop that and would not stop the next one. A command whose
+        // name promises a reading must not change what it reads. `stop-daemon` was already on this
+        // list for the same reason in the other direction.
+        //
+        // Deliberately NARROW: `tail`, `say` and the rest still summon, because bringing the
+        // daemon back is what the caller wants there -- and the shims have been buffering. Only
+        // the command people reach for to ASK A QUESTION is changed.
+        var neverSummons = cmd is "stop-daemon" or "status";
+        if (!isWorkspaceCtl || neverSummons || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
             return Fail(
-                isWorkspaceCtl ? $"daemon not running for workspace {wsCache!.Name} (ctl pipe {pipeName})"
+                // Say what IS known and what starts nothing, so the answer is useful rather than
+                // just a refusal -- an enforcement that leaves you with no next step is a new way
+                // to be stuck (CLAUDE.md 0.1).
+                isWorkspaceCtl && cmd == "status"
+                    ? $"workspace {wsCache!.Name} is ASLEEP -- nothing was started to answer this. " +
+                      "`dodona where` and `dodona ps` report without starting anything; any command that " +
+                      "needs the daemon (say, tail, lane-start) will summon one."
+                : isWorkspaceCtl ? $"daemon not running for workspace {wsCache!.Name} (ctl pipe {pipeName})"
                 : pipeName == Instance.CtlPipe(Concierge.Id) ? $"concierge not running (ctl pipe {pipeName})"
                 : pipeName.EndsWith("-ui") ? $"no Dodona UI on pipe {pipeName}"
                 : $"nothing listening on pipe {pipeName}");

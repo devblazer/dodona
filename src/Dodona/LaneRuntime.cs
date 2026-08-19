@@ -55,7 +55,22 @@ sealed class LaneRuntime
 
             _writer = new StreamWriter(pipe) { AutoFlush = true };
             var reader = new StreamReader(pipe);
-            var hello = await reader.ReadLineAsync();          // "!hello proto=… shim=… child=… delivered=… buffered=…"
+            // BOUNDED. `!hello` is the first thing a shim writes, so a connection that stays
+            // silent is one the shim has accepted but not promoted -- it is still pumping an
+            // earlier client on its other server instance (the shim keeps a spare listener so
+            // its pipe name never leaves the namespace, P6.1). An unbounded read here would
+            // park reconcile on that connection forever, which is CLAUDE.md 0.1's standing
+            // directive broken by the fix for a race. Give up, drop it, and let the retry loop
+            // come back; by then the shim has almost always promoted us.
+            var helloTask = reader.ReadLineAsync();
+            if (await Task.WhenAny(helloTask, Task.Delay(2000)) != helloTask)
+            {
+                _store.Event("lane_pipe_silent", Id, $"connected to {PipeName} but no !hello in 2s -- the shim is serving someone else; retrying");
+                try { pipe.Dispose(); } catch { }
+                await Task.Delay(300);
+                continue;
+            }
+            var hello = await helloTask;                       // "!hello proto=… shim=… child=… delivered=… buffered=…"
             var proto = System.Text.RegularExpressions.Regex.Match(hello ?? "", @"proto=(\d+)");
             if (proto.Success) ShimProtocol = int.Parse(proto.Groups[1].Value);
             _store.Event("lane_connected", Id, hello);

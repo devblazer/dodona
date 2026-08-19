@@ -274,7 +274,88 @@ try {
     # the honest message matters: "did not answer in N attempt(s)" says nothing about whether
     # the process is there, and that ambiguity is the bug.
 
+    # ---- a spawn that never happened must not leave the row saying `alive` ---------------
+    # Found by RUNNING THE APP, 2026-08-19, not by a suite: a probe copied Dodona, DodonaUi and
+    # the fake agent into a directory and forgot DodonaShim. `dodona ps` correctly reported
+    # LANES 0 -- it reads the OS -- while the window faithfully rendered a live tile from the
+    # store row. The row said `alive` with no process and no shim-info record, and only a daemon
+    # RESTART would ever have noticed. That is the count lying in the direction this phase
+    # exists to stop, and the UI was not wrong: it showed exactly what it had been told.
+    #
+    # THE DAEMON READS DODONA_SHIM AT SPAWN TIME, from its OWN environment -- so pointing this
+    # process at a bogus path would do nothing to a daemon already running. It needs a daemon of
+    # its own, which is why this section starts one rather than reusing #4.
     Dodona @("stop-daemon") | Out-Null
+    Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 15000 'daemon #4 is down' | Out-Null
+    $goodShim = $env:DODONA_SHIM
+    $env:DODONA_SHIM = Join-Path (Use-SuiteTemp) 'no-such-shim-here.exe'
+    $d5 = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\d5.out" -RedirectStandardError "$out\d5.err"
+    $extraDaemons += $d5
+    Wait-Daemon $ws.CtlPipe | Out-Null
+    $before = [int](Rows "SELECT COUNT(*) FROM lanes WHERE state='alive'").Trim()
+    $badStart = Dodona @('lane-start', '--title', 'NOSHIM', '--child', $fake)
+    $env:DODONA_SHIM = $goodShim
+
+    # It must SAY the real cause. A Win32Exception, or silence, is what turns a five-second fix
+    # into an hour of reading your own code (CLAUDE.md 0.3).
+    $results['a_missing_shim_is_named_not_guessed'] =
+        if ($badStart -match 'shim binary not found') { 'PASS' } else { "FAIL ($($badStart.Trim()))" }
+
+    # ...and the STORE must not claim the lane is alive. Asserted on the row, not on a pipe:
+    # there is no process here at all, so a pipe read would be answering a different question.
+    $aliveAfter = [int](Rows "SELECT COUNT(*) FROM lanes WHERE state='alive'").Trim()
+    $results['a_failed_spawn_leaves_no_lane_claiming_alive'] =
+        if ($aliveAfter -eq $before) { 'PASS' }
+        else { "FAIL (alive rows went $before -> $aliveAfter; $(Rows "SELECT id, title, state FROM lanes WHERE state='alive'"))" }
+
+    # And the failure is in the causal chain, because a silent degrade is a bug (CLAUDE.md 0.1).
+    $results['a_failed_spawn_is_recorded'] =
+        if ([int](Rows "SELECT COUNT(*) FROM events WHERE kind='shim_spawn_failed'").Trim() -ge 1) { 'PASS' }
+        else { 'FAIL (no shim_spawn_failed event)' }
+
+    Dodona @("stop-daemon") | Out-Null
+
+    # ---- `status` must not START anything (CLAUDE.md 3.2, as enforcement) -----------------
+    # The incident this replaces a warning for: a session ran `status` twice as a health check
+    # against the operator's LIVE workspace, and each summoned daemon's warm-up spawned the
+    # router, brain and compressor pool -- five real `claude -p --model haiku` processes on a
+    # machine they believed was idle. It then spent two hours diagnosing its own leaked shims as
+    # "machine contention". No quota was burned (turns cost quota, existing does not) but it was
+    # a machine nobody asked for.
+    #
+    # AUTOSTART IS CLEARED FOR THIS CHECK, deliberately: with DODONA_NO_AUTOSTART set -- which the
+    # rest of this suite relies on -- nothing would summon anyway and the check would pass against
+    # any build. That is the vacuous-check trap, so the guard being tested has to be the only
+    # thing standing there.
+    Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 15000 'every daemon is down' | Out-Null
+    $savedAutostart = $env:DODONA_NO_AUTOSTART
+    Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
+    $lanesBefore = [int](Rows "SELECT COUNT(*) FROM lanes").Trim()
+    # STDERR, captured the only way that works: `Fail` writes there, not to stdout, so the
+    # ordinary helper came back empty and the check read FAIL () against a correct product.
+    # Continue + `2> file` is mandatory (CLAUDE.md 0.2): under this suite's `Stop` a native
+    # command writing stderr throws NativeCommandError, and under SilentlyContinue the record is
+    # eaten. Collapse the whitespace before matching, because captured stderr is WRAPPED to the
+    # console width -- a longer temp path moves the wrap and breaks a regex that spanned a space.
+    $statusErr = "$out\status.err"
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $dodona status --root $root 2> $statusErr | Out-Null
+    $ErrorActionPreference = $prevEap
+    $statusOut = if (Test-Path $statusErr) { ((Get-Content $statusErr -Raw) -replace '\s+', ' ').Trim() } else { '' }
+    $daemonAppeared = Wait-Until { Test-DodonaPipe $ws.CtlPipe } 4000 '(expecting NO daemon to appear)'
+    if ($null -eq $savedAutostart) { Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue }
+    else { $env:DODONA_NO_AUTOSTART = $savedAutostart }
+
+    $results['status_does_not_summon_a_daemon'] =
+        if (-not $daemonAppeared) { 'PASS' } else { 'FAIL (a daemon appeared: status started one)' }
+    $results['status_says_the_workspace_is_asleep'] =
+        if ($statusOut -match 'ASLEEP') { 'PASS' } else { "FAIL ($($statusOut.Trim()))" }
+    # ...and it started no LANES either, which is the part that costs real money.
+    $results['status_creates_no_lanes'] =
+        if ([int](Rows "SELECT COUNT(*) FROM lanes").Trim() -eq $lanesBefore) { 'PASS' }
+        else { "FAIL (lanes went $lanesBefore -> $([int](Rows "SELECT COUNT(*) FROM lanes").Trim()))" }
 }
 finally {
     Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
