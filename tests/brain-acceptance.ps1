@@ -37,16 +37,10 @@ function Dump() { Dodona @('ui', 'dump') | ConvertFrom-Json }
 # "not answering yet" as a VALUE rather than an exception, so a Wait-Until can poll it.
 function DumpOrNull() { try { Dump } catch { $null } }
 function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$name] = if ($cond) { 'PASS' } else { "FAIL $detail".Trim() } }
-function Rows([string]$sql) {
-    $env:DODONA_TEST_SQL = $sql
-    $o = (python -c "
-import sqlite3, os
-db = sqlite3.connect(r'$storeDb')
-for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is None else str(x) for x in r))
-") | Out-String
-    Remove-Item env:DODONA_TEST_SQL -ErrorAction SilentlyContinue
-    $o
-}
+# Delegates to the shared helper, which THROWS on a sqlite error instead of returning nothing
+# (tests/_workspace.ps1 Invoke-StoreSql has the incident -- a check in THIS suite queried `lane`
+# instead of `lane_id` and passed against every build because of it).
+function Rows([string]$sql) { Invoke-StoreSql $storeDb $sql }
 
 $daemon = $null
 $uiProc = $null

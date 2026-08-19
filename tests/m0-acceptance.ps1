@@ -41,16 +41,10 @@ $token = "SURVIVED-" + [guid]::NewGuid().ToString('N').Substring(0, 6)
 function Dodona([string[]]$a) { (& $dodona ($a + @('--root', $root))) | Out-String }
 # Reading the store directly, the same shape brain-acceptance uses: the Phase 3 checks below
 # are about what reconcile WROTE, and an event detail is the only place that is recorded.
-function Rows([string]$sql) {
-    $env:DODONA_TEST_SQL = $sql
-    $o = (python -c "
-import sqlite3, os
-db = sqlite3.connect(r'$storeDb')
-for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is None else str(x) for x in r))
-") | Out-String
-    Remove-Item env:DODONA_TEST_SQL -ErrorAction SilentlyContinue
-    $o
-}
+# Delegates to the shared helper, which THROWS on a sqlite error instead of returning nothing
+# (tests/_workspace.ps1 Invoke-StoreSql has the incident). The local copy this replaced swallowed
+# a bad column name into an empty string, and an empty string parses as 0.
+function Rows([string]$sql) { Invoke-StoreSql $storeDb $sql }
 # Live lane pipes for THIS workspace, straight off the OS -- the same question
 # Instance.LiveLanes() answers in the product, asked independently here so a check cannot
 # be satisfied by the code it is testing.
@@ -153,7 +147,7 @@ try {
     # Safe to assert on the namespace HERE, and only because the check above already proved the
     # shim process exited: after that an absent pipe cannot be the between-clients blink.
     $results['dead_lane_pipe_leaves_the_namespace'] =
-        if (Wait-Until { -not (Test-DodonaPipe $oPipe) } 15000 'the lane pipe is gone') { 'PASS' } else { 'FAIL' }
+        if (Wait-Until { Test-DodonaPipeGone $oPipe } 15000 'the lane pipe is gone') { 'PASS' } else { 'FAIL' }
     # Nothing in the tree used to delete a shim-info file on ANY exit path, so the set was
     # monotonic for the life of a workspace: that is why "24 lanes" was every lane the
     # workspace had ever spawned rather than eighteen leftovers.

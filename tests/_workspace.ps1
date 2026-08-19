@@ -298,6 +298,72 @@ function Wait-Daemon([string]$ctlPipe, [int]$TimeoutMs = 20000) {
     Wait-Until { Test-DodonaPipe $ctlPipe } $TimeoutMs "daemon pipe $ctlPipe"
 }
 
+# ---------------------------------------------------------------- asking the store, LOUDLY
+
+# Run one SQL statement against a suite's store and return its rows as text.
+#
+# THIS FAILS LOUDLY, and that is the entire point of it existing (Phase 7, P7.1). Three suites
+# grew their own copy of this that piped python's stdout and let stderr go wherever stderr went.
+# So a query naming a column that does not exist produced an EMPTY result -- and `[int]''` is 0,
+# and `-eq 0` is a passing assertion. Phase 3 shipped a check written against `lane` instead of
+# `lane_id` which therefore passed against every build ever made, and would have passed forever:
+# it was caught only because `dev prove` happened to include it in the proved set.
+#
+# A check that passes because its query is broken is indistinguishable from a check that works.
+# That is the same disease as a green check nobody has seen red (CLAUDE.md 0.3), one layer down.
+function Invoke-StoreSql([string]$db, [string]$sql) {
+    if (-not $db) { throw 'Invoke-StoreSql: no store path' }
+    # Native stderr is capturable ONLY with Continue + `2> file` (CLAUDE.md 0.2): under the
+    # suites' `Stop`, python writing one warning line would throw NativeCommandError, and under
+    # SilentlyContinue the record is eaten -- which is how this was invisible in the first place.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $errFile = Join-Path ([System.IO.Path]::GetTempPath()) ("dodona-sql-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + ".err")
+    $env:DODONA_TEST_SQL = $sql
+    $env:DODONA_TEST_DB = $db
+    try {
+        $out = (python -c "
+import sqlite3, os
+db = sqlite3.connect(os.environ['DODONA_TEST_DB'])
+for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is None else str(x) for x in r))
+" 2> $errFile) | Out-String
+        $err = ''
+        if (Test-Path $errFile) { $err = (Get-Content $errFile -Raw -ErrorAction SilentlyContinue) }
+        # Collapse first: captured native stderr is WRAPPED to the console width, so a newline
+        # lands mid-sentence and any regex spanning a space breaks when a path gets longer.
+        if ($err) { $err = ($err -replace '\s+', ' ').Trim() }
+        if ($err) { throw "store query FAILED: $err  --  sql: $sql" }
+        return $out
+    }
+    finally {
+        $ErrorActionPreference = $prev
+        Remove-Item env:DODONA_TEST_SQL, env:DODONA_TEST_DB -ErrorAction SilentlyContinue
+        Remove-Item $errFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ---------------------------------------------------------------- pipes that BLINK
+
+# Is this pipe REALLY gone? Two absences, 150 ms apart.
+#
+# A lane pipe blinks out of the namespace for a few milliseconds while its shim disposes one
+# NamedPipeServerStream and constructs the next (src/Dodona/LaneLiveness.cs carries the
+# measurement: 8 of 192 reads over 1.5 s saw nothing while the shim was alive and instantly
+# connectable). So `-not (Test-DodonaPipe $p)` is not a test for "gone" -- it is a test for
+# "gone OR mid-reconnect", and inside a Wait-Until that polls for twenty seconds it will
+# eventually catch the gap and call a live agent stopped.
+#
+# Phase 3's own session made that mistake FOUR times, after discovering the blink and writing it
+# up. Hence a function: the rule could not be remembered, so it is not a rule any more.
+# ASSERT WITH THIS, never with a bare Test-DodonaPipe. The Start-Sleep is a real duration -- the
+# blink window itself -- which is the only kind this repo allows (CLAUDE.md 3).
+function Test-DodonaPipeGone([string]$name, [int]$SettleMs = 150) {
+    if (-not $name) { return $false }
+    if (Test-DodonaPipe $name) { return $false }
+    Start-Sleep -Milliseconds $SettleMs
+    return (-not (Test-DodonaPipe $name))
+}
+
 # ---------------------------------------------------------------- processes, BY PATH
 
 # Every process running out of a given directory, resolved by EXECUTABLE PATH -- never by

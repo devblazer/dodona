@@ -384,6 +384,111 @@ stays for the same reason it was built: a silent leak is how this went unnoticed
 | P6.3 | An ad-hoc script spawning real Claude lanes outside `DODONA_HOME` (§6). The lease now bounds the damage to 30 minutes instead of forever, which is what produced the `mlroot` and `freeze-repro` orphans; preventing the spawn needs a hook refusing `lane-start` outside a test home. Design it, do not bolt it on. | Carried from §6 unchanged. Phase 3 bounded it; it did not prevent it. |
 
 ---
+## Phase 7 — The tooling that would have made Phase 3 cheap  *(operator, 2026-08-19)*
+
+**Written from the retrospective on Phase 3, which took ~102 minutes and hit fourteen problems in
+
+a programme whose thesis is that problems are not allowed to exist.** That is not an argument
+
+against the thesis; it is the evidence for it. The breakdown, because the shape matters more than
+
+the count:
+
+| what happened | how many | caught by |
+
+|---|---|---|
+
+| violated a rule that is written down and had been read | 3 | an assertion, a blocked build, hindsight |
+
+| repeated a lesson the same session had just authored | 5 | `dev prove` x2, a red suite run, diff review |
+
+| slipped where nothing was watching | 2 | manual diff review only |
+| ...and once more while writing this phase up | 1 | `git show -w` on the commit that wrote P7.5 |
+
+| genuine discoveries the plan did not know | 4 | a pre-existing red check; running the command |
+
+**The finding that sets this phase's direction.** The session discovered that a lane pipe blinks
+
+out of the namespace, wrote it into `LaneLiveness`' class comment, added it to CLAUDE.md §0.2 and
+
+put it in the commit message — and then violated it **four more times, while writing those very
+
+documents**. That is D-6 (*"a documented warning is not a fix"*) demonstrated on its own author,
+
+inside one session, about a lesson twenty minutes old.
+
+**But "prose does not bind" is the wrong conclusion, and the operator corrected it.** CLAUDE.md
+
+§0.2 already contained the heredoc-backslash trap, and it had been read — at session start, forty
+
+minutes before the moment it applied. The rule was not absent; it was *not present at the point of
+
+use*. That is a retrieval failure, not a persuasion failure, and it has a mechanism: **a skill
+
+gated on a trigger fires when the action happens**, which is why §0 names "skills + CLAUDE.md, or
+
+tooling that enforces" as the reliable set rather than code alone. So this phase has two halves,
+
+and the skills half is not a consolation prize.
+
+### Half one — make the wrong thing impossible
+
+| item | what | status |
+
+|---|---|---|
+
+| P7.1 | **`Invoke-StoreSql` fails loudly** (`tests/_workspace.ps1`). Three suites grew a local `Rows` that piped python's stdout and let stderr go nowhere, so a bad column name returned EMPTY — and `[int]''` is `0`, and `-eq 0` is a passing assertion. A Phase 3 check written against `lane` instead of `lane_id` therefore passed against every build ever made and would have passed forever; `dev prove` caught it only by luck of the draw. **A check that passes because its query is broken is indistinguishable from one that works.** | **DONE.** m0 and brain delegate to it; demonstrated throwing on the exact bad query |
+
+| P7.2 | **`Test-DodonaPipeGone`** (two absences, 150 ms apart). `-not (Test-DodonaPipe $p)` is not a test for "gone", it is a test for "gone OR mid-reconnect" — and inside a 20-second `Wait-Until` it will eventually catch the blink and call a live agent stopped. The rule could not be remembered four times over, so it stopped being a rule. | **DONE.** m0 asserts with it |
+
+| P7.3 | **Migrate `compression-acceptance.ps1`'s local `Rows`** to `Invoke-StoreSql`, and delete the pattern. Left alone in P7.1 to keep that change contained. | todo, ~5 min |
+
+| P7.4 | **Cache the HEAD build in `dev prove`, keyed on the commit SHA.** Nineteen proofs in one session each did a cold `dotnet build` of the *same* SHA: **~19 minutes rebuilding an identical tree**, 45 % of the session inside `dev prove`. The cost is not the waste, it is the incentive — an expensive proof is one people batch, defer, or skip, and skipped proving is the root of every believed-a-green-check incident in CLAUDE.md §0.3. Reuse a build directory named for the SHA; a dirty HEAD is impossible here because prove builds a detached worktree of it. | todo, **highest value** |
+
+| P7.5 | **Encoding invariance in `dev gate`**: for every file differing from HEAD, its BOM presence and line-ending style must match HEAD's. This has now bitten twice, the second time INSIDE THE COMMIT THAT WROTE THIS ROW, which is the strongest evidence for it that could exist. **The mechanism, stated precisely, because the first version of this row got it wrong:** `core.autocrlf=true` is set on this machine, so git stores LF and checks out CRLF. Any patch script that derives its newline from the WORKING-TREE bytes therefore sees CRLF, and a `'
+' -> '
+'` replacement on already-CRLF text produces `
+` -- which defeats git's own normalisation on the way in (the extra CR survives) and turns a 62-line insert into a 1214-line phantom rewrite of the whole file. Measured: 700 CRs against 638 LFs. **The rule for scripts: write `
+` unconditionally and let autocrlf do its job; never sniff the working tree.** The gate assertion is the backstop, and `git show -w --stat` is how you spot it by hand. Compare bytes via a `cmd /c` redirect -- PowerShell's `>` re-encodes and cannot be used for this. Folds into P5.1's lint project. | todo |
+
+| P7.6 | **`DodonaShim` refuses to start from a source-tree build output**, mirroring `Ver.IsSourceTreeBuildOutput` for the daemon. Phase 3's own probe launched a shim from `src\DodonaShim\bin\Release`, blocked the next build, and made one suite run against stale binaries whose results were briefly misread — the exact failure CLAUDE.md §2 forbids that invocation to prevent. `$DODONA_HOME\bin` and published builds stay allowed. | todo |
+
+### Half two — put the rule where the action is
+
+Skills under `.claude/skills/`, whose descriptions make them load when the trigger appears rather
+
+than being read once at session start. Each carries rules that already exist somewhere and were
+
+still violated, because "somewhere" was not "here, now".
+
+| item | skill | fires when | carries |
+
+|---|---|---|---|
+
+| P7.7 | `check-authoring` | adding or editing an acceptance check | assert on PROCESSES and STORE ROWS, never on an instantaneous pipe read (P7.2); every new check gets `dev prove`d and a VACUOUS verdict is a rewrite, not a shrug; a check whose query can error must use `Invoke-StoreSql`; name the incident in a comment |
+
+| P7.8 | `file-patching` | editing a tracked file with a script or heredoc | never `\\` through a bash heredoc — it collapses to `\` (§0.2); preserve BOM and line endings, do not let the writer choose them (P7.5); parse-check every `.ps1` you write; review the diff before believing the edit |
+
+| P7.9 | `probe-hygiene` | writing an ad-hoc script that starts a daemon, shim or agent | isolate `$DODONA_HOME`; get binaries from `Use-TestBinaries`, never from `src\*\bin` (§2, P7.6); no machine-wide mutation while a verification is in flight — `stop-all --lanes --orphans` newly WORKS (it never did before Phase 3) and its blast radius includes another session's suites |
+
+**Becomes impossible:** a check that passes because its query failed; a liveness assertion that
+
+a blink can satisfy; a silent encoding change; a shim started from the compiler's output.
+
+**Becomes present at the moment it is needed:** the three rule sets above.
+
+**What this phase does NOT claim.** P7.7–P7.9 are prose with a better delivery mechanism, and D-6
+
+still applies to them: if a gated skill turns out to be skipped as reliably as a section of
+
+CLAUDE.md was, the honest response is to promote its contents to half one and delete the skill,
+
+not to write a fourth skill. Measure it — the signal is whether the same class of mistake recurs
+
+in a later phase's retrospective.
+
+---
+
 ## Phase 5 — Prose shrinks to what code cannot hold  *(I8)*
 
 **Effort: ~half a day. Depends on P0.2, Phase 4, P5.1.**
