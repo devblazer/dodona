@@ -2119,13 +2119,13 @@ sealed class Daemon
         // directive `routekind:` became a LANE TITLED "ROUTEKIND", after which every later
         // `routekind:...` line was silently delivered to it as a tier-0 prefix — and the same
         // shape bites for real with a lane called HTTP and a sentence containing `http://`.
-        var m = System.Text.RegularExpressions.Regex.Match(text, @"^([A-Za-z0-9_-]+):\s+(.+)$", System.Text.RegularExpressions.RegexOptions.Singleline);
-        if (m.Success)
+        var prefix = LanePrefix(text);
+        if (prefix is not null)
         {
-            var lane = work.FirstOrDefault(l => l.Title.Equals(m.Groups[1].Value, StringComparison.OrdinalIgnoreCase));
+            var lane = work.FirstOrDefault(l => l.Title.Equals(prefix.Value.Target, StringComparison.OrdinalIgnoreCase));
             if (lane is not null && _lanes.TryGetValue(lane.Id, out var rt0))
             {
-                rt0.Say(m.Groups[2].Value);
+                rt0.Say(prefix.Value.Body);
                 _store.RoutingInsert(text, "prefix", lane.Id, lane.Id, "explicit");
                 return $"-> {lane.Title} (tier 0)";
             }
@@ -2312,6 +2312,30 @@ sealed class Daemon
     }
 
     /// <summary>
+    /// Tier 0 of the routing ladder (docs/WORKSPACES-CONCIERGE.md §5): `LANE: text` names its
+    /// own target, so it is decided in code, instantly, and never reaches a model. Returns the
+    /// named target and the body of the sentence, or null when the text is not of that shape.
+    /// (`Body`, not `Rest`: `Rest` is a reserved tuple element name and will not compile.)
+    ///
+    /// `\s+`, not `\s*`, and that single character is the whole lesson: the documented form is
+    /// `LANE: text` WITH a space, and requiring it stops a colon inside an ordinary sentence
+    /// being read as a target. It was found by a test whose directive `routekind:` became a
+    /// lane TITLED "ROUTEKIND", after which every later `routekind:...` line was silently
+    /// delivered to it as a tier-0 prefix. The same shape bites for real with a lane called
+    /// HTTP and a sentence containing `http://`.
+    ///
+    /// Pulled out of RouteInput so it can be checked without a daemon, a store or a lane
+    /// (P4.5) -- this is a pure function over a string, and it was only reachable through
+    /// eight seconds of process startup.
+    /// </summary>
+    internal static (string Target, string Body)? LanePrefix(string text)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(
+            text, @"^([A-Za-z0-9_-]+):\s+(.+)$", System.Text.RegularExpressions.RegexOptions.Singleline);
+        return m.Success ? (m.Groups[1].Value, m.Groups[2].Value) : null;
+    }
+
+    /// <summary>
     /// Unmistakable generics — the ones worth deciding in code so they are instant and free.
     ///
     /// Deliberately SHORT and anchored. This list exists to make "stop" fast, not to
@@ -2319,7 +2343,7 @@ sealed class Daemon
     /// because the cost of a wrong guess here is a polluted lane. It matches the whole input,
     /// so "stop the nightly build from running" is not a generic — it is work.
     /// </summary>
-    static bool IsObviousGeneric(string text) =>
+    internal static bool IsObviousGeneric(string text) =>
         System.Text.RegularExpressions.Regex.IsMatch(
             text.Trim(),
             @"^(stop|wait|hold on|no|nope|yes|yep|ok|okay|continue|carry on|go on|go ahead|" +

@@ -19,6 +19,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Dodona", "src\Dodona\Dodona
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DodonaUi", "src\DodonaUi\DodonaUi.csproj", "{4E2D1006-E374-46D9-84B6-26927362CA6F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Dodona.Tests", "tests\Dodona.Tests\Dodona.Tests.csproj", "{7E3B1A54-9C2D-4F6A-B8E1-3D5A7C9F0B24}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -48,6 +50,10 @@ Global
 		{4E2D1006-E374-46D9-84B6-26927362CA6F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4E2D1006-E374-46D9-84B6-26927362CA6F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4E2D1006-E374-46D9-84B6-26927362CA6F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7E3B1A54-9C2D-4F6A-B8E1-3D5A7C9F0B24}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7E3B1A54-9C2D-4F6A-B8E1-3D5A7C9F0B24}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7E3B1A54-9C2D-4F6A-B8E1-3D5A7C9F0B24}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7E3B1A54-9C2D-4F6A-B8E1-3D5A7C9F0B24}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{FCC6A237-25E7-40C6-AFEC-62D402022D43} = {2EADF13F-456D-452E-A9D3-40755F2882EB}

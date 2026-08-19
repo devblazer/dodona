@@ -156,3 +156,135 @@ function Assert-NoBuildOutputProcesses([string]$repo, $results, [int]$graceMs = 
     Write-Output "LEAKED INTO THE BUILD OUTPUT -- these block the next build, invisibly:"
     foreach ($l in $leaks) { Write-Output "  $l" }
 }
+
+# ---------------------------------------------------------------- waiting on a CONDITION
+
+# A wait is a CONDITION plus a DEADLINE, never a duration (CLAUDE.md §0.1: nothing may be
+# hung, halted or stuck -- every wait names the thing that un-sticks it, and a condition-wait
+# with no deadline is that standing directive violated in a new costume).
+#
+# WHY THIS EXISTS. Measured on 2026-08-19: the eleven suites took 5 min 20 s, of which
+# 214 s -- 68 % -- was fixed `Start-Sleep`. Almost none of it was real waiting: a
+# `Start-Sleep -Seconds 3` in front of a check is a guess about the slowest machine that
+# ever ran it, paid in full on every machine since. The condition is already written down
+# one line below, in the check itself; this just waits for THAT instead of for a clock.
+# CLAUDE.md §1 recorded the opposite conclusion as measured fact ("the rest is inherent and
+# cannot be optimised away"), which is how twenty-minute verification became something to
+# skip rather than something to fix.
+#
+# ON TIMEOUT IT RETURNS $false AND SAYS SO -- it does not throw. The check that follows then
+# fails on its own terms and prints the real value it saw, which is a far better diagnosis
+# than a wait's own idea of what went wrong. So the idiom is: wait for the condition, then
+# assert it.
+#
+# GETTING A VALUE BACK OUT. $Condition runs in a child scope, so a plain `$d = Dump` inside
+# it is discarded. Assign to $script: and the suite body (which is script scope) sees it:
+#
+#     Wait-Until { $script:d = Dump; @($script:d.slots).Count -eq 3 } 8000 'three tiles' | Out-Null
+#     Check 'grid_grows_to_the_number_of_lanes' ((@($d.slots).Count) -eq 3) "tiles=$(@($d.slots).Count)"
+#
+# Stopwatch, not [Environment]::TickCount, and that is not fussiness: TickCount is a signed
+# 32-bit millisecond counter that wraps every 24.9 days, so `TickCount + $timeout` can
+# overflow to a negative deadline -- which either times out instantly or, on the other side
+# of the wrap, waits approximately forever. The second one is the hang this function exists
+# to make impossible.
+function Wait-Until {
+    param(
+        [Parameter(Mandatory = $true, Position = 0)][scriptblock]$Condition,
+        [Parameter(Position = 1)][int]$TimeoutMs = 15000,
+        [Parameter(Position = 2)][string]$What = '',
+        # 250 ms, not the 120 ms this started at. Each poll of a UI condition SPAWNS
+        # dodona.exe, and each poll of a UIA condition walks the desktop's window tree; with
+        # eleven suites polling at once that cost is paid eleven times over and it showed --
+        # ui-use went from 42.5 s alone to 69.3 s in the parallel wave, on a 22-core machine
+        # that was nowhere near CPU-bound. A quarter-second of latency per condition is
+        # invisible against what it replaced (a flat 2 to 3 second sleep).
+        [int]$PollMs = 250
+    )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    # BACKOFF, not a flat interval, because a poll is not free: every UI condition here spawns
+    # dodona.exe and every UIA one walks a window tree cross-process. Most conditions are true
+    # within a few hundred milliseconds, so the first polls are quick; the ones that are really
+    # waiting on a 14-second agent turn back off to $PollMs and stop paying for the answer
+    # sixty times. Measured: a flat 120ms was costing ui-use more in process starts than the
+    # sleeps it replaced were costing in idling.
+    $wait = 60
+    while ($true) {
+        $ok = $false
+        # A condition that throws is a condition that is not true YET -- a dump against a
+        # window still starting, a store row that does not exist. Throwing out of the wait
+        # would turn "not ready" into a suite crash.
+        try { $ok = [bool](& $Condition) } catch { $ok = $false }
+        if ($ok) { return $true }
+        if ($sw.ElapsedMilliseconds -ge $TimeoutMs) {
+            $desc = if ($What) { $What } else { ($Condition.ToString() -replace '\s+', ' ').Trim() }
+            # STDERR, never Write-Output: this function returns a bool, and a Write-Output
+            # here lands IN that return value -- `$ok = Wait-Until {...}` would come back as
+            # a two-element array whose [bool] cast is always $true. A wait that reported
+            # success on timeout would be the exact green-check-nobody-has-seen-fail this
+            # phase exists to remove.
+            [Console]::Error.WriteLine(("WAIT TIMEOUT after {0:N1}s: {1}" -f ($sw.Elapsed.TotalSeconds), $desc))
+            return $false
+        }
+        Start-Sleep -Milliseconds $wait
+        if ($wait -lt $PollMs) { $wait = [Math]::Min($PollMs, [int]($wait * 1.6)) }
+    }
+}
+
+# Is a named pipe on the machine right now? Asked of the OS, which is the authority --
+# Instance.LivePipes() in the daemon does exactly this, and for the same reason: a file we
+# wrote is a record of what we intended, not of what is running (INVESTIGATION-2026-08-18
+# RC2). The pipe namespace is flat, so this is one enumeration.
+function Test-DodonaPipe([string]$name) {
+    # An empty name matches an empty leaf in the enumeration and comes back TRUE, so a
+    # wait on a pipe name nobody set would satisfy itself instantly. Refuse it.
+    if (-not $name) { return $false }
+    # [IO.Path]::GetFileName, NOT Split-Path -Leaf. Measured 2026-08-19: Split-Path returns
+    # an EMPTY STRING for a pipe path, so the list came back as 962 empty strings, every
+    # lookup missed, and Wait-Daemon sat out its full 20 s timeout twice in m0 while the
+    # daemon had been answering the whole time -- a condition-wait made slower than the
+    # sleep it replaced. Instance.LivePipes() in the daemon uses Path.GetFileName; so does
+    # this now, which is the general lesson: match the code that already answers this.
+    try { return @([System.IO.Directory]::GetFiles('\\.\pipe\') | ForEach-Object { [System.IO.Path]::GetFileName($_) }) -contains $name }
+    catch { return $false }
+}
+
+# Wait for a daemon to be ANSWERING, not for a number of milliseconds. Every suite used to
+# open with `Start-Sleep -Milliseconds 800` after starting a daemon; measured, the pipe is up
+# in about 250 ms, and on a slow machine 800 ms was never enough anyway -- a fixed sleep is
+# simultaneously too long and too short, which is the whole case against it.
+function Wait-Daemon([string]$ctlPipe, [int]$TimeoutMs = 20000) {
+    Wait-Until { Test-DodonaPipe $ctlPipe } $TimeoutMs "daemon pipe $ctlPipe"
+}
+
+# ---------------------------------------------------------------- processes, BY PATH
+
+# Every process running out of a given directory, resolved by EXECUTABLE PATH -- never by
+# process name, ever (CLAUDE.md §4: a by-name query once murdered the operator's live
+# session's shim and window mid-dogfood, because a name cannot tell their work from a test's).
+#
+# Get-Process is enumerated once and filtered on .Path, the same shape tools\dev.ps1's
+# Blockers and LiveApp use. A path a suite owns -- a GUID temp directory -- is an identity;
+# "DodonaUi.exe" is a category, and the operator's own window is in it.
+#
+# $dir is REQUIRED and must be non-empty: `-like "$dir*"` with an empty $dir matches every
+# process on the machine, which is the by-name failure wearing a path's clothes. That is a
+# throw rather than an empty result, because silently matching nothing and silently matching
+# everything look identical at the call site.
+function Get-ProcessesUnder([string]$dir) {
+    if (-not $dir) { throw "Get-ProcessesUnder: refusing an empty directory -- it would match every process on the machine" }
+    if (-not $dir.EndsWith('\')) { $dir += '\' }
+    @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+            $path = $null
+            try { $path = $_.Path } catch { }
+            if ($path -and $path.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase)) {
+                [pscustomobject]@{ Id = $_.Id; Name = $_.ProcessName; Path = $path }
+            }
+        })
+}
+
+# Stop everything running out of $dir. Same rule, same reason -- and it can only ever reach
+# processes whose image lives in a directory the caller named.
+function Stop-ProcessesUnder([string]$dir) {
+    foreach ($p in (Get-ProcessesUnder $dir)) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } }
+}

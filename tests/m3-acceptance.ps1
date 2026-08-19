@@ -1,4 +1,4 @@
-# M3 acceptance: the UI is a dumb view over the store (§8, §17). Fake agents, zero model
+﻿# M3 acceptance: the UI is a dumb view over the store (§8, §17). Fake agents, zero model
 # calls. Assertions are `dodona ui dump` JSON (the UI testifies about what it shows),
 # store rows, and screenshot pixel dimensions — no human eye required.
 
@@ -35,6 +35,8 @@ git -C $root -c user.email=t@t -c user.name=t commit -q -m init
 $results = [ordered]@{}
 function Dodona([string[]]$a) { $global:DODONA_EXIT = 0; $o = (& $dodona ($a + @('--root', $root))) | Out-String; $global:DODONA_EXIT = $LASTEXITCODE; $o.Trim() }
 function Dump() { Dodona @('ui', 'dump') | ConvertFrom-Json }
+# "not answering yet" as a VALUE rather than an exception, so a Wait-Until can poll it.
+function DumpOrNull() { try { Dump } catch { $null } }
 function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$name] = if ($cond) { 'PASS' } else { "FAIL $detail".Trim() } }
 function PngDims([string]$path) {
     # [int] casts matter: -shl on a [byte] stays a byte and overflows to zero.
@@ -55,7 +57,7 @@ try {
 
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
-    Start-Sleep -Milliseconds 800
+    Wait-Daemon $ws.CtlPipe | Out-Null
 
     # Lanes: a ticket-agent lane (WATER, linked to ticket 1 — the fake agent ignores the
     # claude argv, which is exactly the §17 test seam) and a plain lane (SKY).
@@ -71,7 +73,7 @@ try {
 
     # ---- the UI is a replay of rows: launch AFTER the messages exist ----
     $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
-    Start-Sleep -Milliseconds 1800
+    Wait-Until { (@((DumpOrNull).slots | Where-Object { -not $_.empty }).Count) -ge 2 } 30000 'the window answers with both lanes' | Out-Null
 
     $d = Dump
     $water = $d.slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }
@@ -84,7 +86,7 @@ try {
     # ---- a click and a pipe message are the same thing: route via daemon, see it in the UI ----
     Dodona @("focus", "$skyLane") | Out-Null
     Dodona @("input", "say focus works") | Out-Null
-    Start-Sleep -Milliseconds 900
+    Wait-Until { ((@((DumpOrNull).slots | Where-Object { $_.title -eq 'SKY' }).lines) -join '|') -match 'you> say focus works' } 25000 'the routed input reaches the SKY pane' | Out-Null
     $d = Dump
     $sky = $d.slots | Where-Object { $_.title -eq 'SKY' }
     Check 'routed_input_reaches_pane' (($sky.lines -join '|') -match 'you> say focus works') ($sky.lines -join '|')
@@ -92,7 +94,7 @@ try {
 
     # ---- blocked-on-you (§8): refused merge -> border+glyph+badge+presence+feed row ----
     Dodona @("token-request", "1") | Out-Null      # on-approval, unapproved -> refused
-    Start-Sleep -Milliseconds 900
+    Wait-Until { (@((DumpOrNull).slots | Where-Object { $_.title -eq 'WATER' }).blocked) -eq $true } 25000 'the WATER pane shows blocked-on-you' | Out-Null
     $d = Dump
     $water = $d.slots | Where-Object { $_.title -eq 'WATER' }
     Check 'blocked_state_in_pane' ($water.blocked -eq $true -and $water.presence -eq 'waiting on you: merge' -and $water.badge -eq 1) ($water | ConvertTo-Json -Compress)
@@ -101,7 +103,7 @@ try {
 
     # ---- ack clears the badge but the row stays (greyed), never deleted ----
     Dodona @("ack", "$($feedRow.id)") | Out-Null
-    Start-Sleep -Milliseconds 900
+    Wait-Until { (@((DumpOrNull).slots | Where-Object { $_.title -eq 'WATER' }).badge) -eq 0 } 25000 'the ack clears the badge' | Out-Null
     $d = Dump
     $water = $d.slots | Where-Object { $_.title -eq 'WATER' }
     $acked = $d.feed | Where-Object { $_.id -eq $feedRow.id }
@@ -109,7 +111,7 @@ try {
 
     # ---- approve unblocks: presence back to idle, receipt announced ----
     Dodona @("approve", "1") | Out-Null
-    Start-Sleep -Milliseconds 900
+    Wait-Until { (@((DumpOrNull).slots | Where-Object { $_.title -eq 'WATER' }).blocked) -eq $false } 25000 'approval unblocks the lane' | Out-Null
     $d = Dump
     $water = $d.slots | Where-Object { $_.title -eq 'WATER' }
     Check 'approve_unblocks_lane' ($water.blocked -eq $false -and $water.presence -eq 'idle' -and
@@ -117,14 +119,14 @@ try {
 
     # ---- undo-route (§4): undo is labeled data + a retraction the agent can act on ----
     Dodona @("input", "say oops wrong lane") | Out-Null
-    Start-Sleep -Milliseconds 400
+    Wait-Until { ((@((DumpOrNull).slots | Where-Object { $_.title -eq 'SKY' }).lines) -join '|') -match 'oops wrong lane' } 25000 'the input lands before it is undone' | Out-Null
     $route = (python -c "
 import sqlite3
 db = sqlite3.connect(r'$storeDb')
 print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fetchone()[0])
 ") | Out-String
     Dodona @("undo-route", $route.Trim()) | Out-Null
-    Start-Sleep -Milliseconds 400
+    Wait-Until { (Dodona @("tail", "$skyLane", "10")) -match 'disregard' } 25000 'the retraction reaches the lane' | Out-Null
     $tail = Dodona @("tail", "$skyLane", "10")
     $undone = (python -c "
 import sqlite3
@@ -158,9 +160,16 @@ r = db.execute('SELECT MAX(id) FROM events WHERE kind=? AND lane_id=?', ('shim_s
 print(0 if r is None or r[0] is None else r[0])
 ") | Out-String
     Dodona @("lane-stop", "$waterLane") | Out-Null
-    Start-Sleep -Milliseconds 900
+    Wait-Until { (@((DumpOrNull).slots | Where-Object { $_.title -eq 'WATER' }).state) -ne 'alive' } 25000 'the lane stops' | Out-Null
     Dodona @("lane-respawn", "$waterLane") | Out-Null
-    Start-Sleep -Milliseconds 1200
+    # The respawn is done when a NEW shim_spawned row exists for this lane, which is exactly
+    # what the checks below read -- not after 1.2 seconds.
+    Wait-Until { [int](((python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+r = db.execute('SELECT MAX(id) FROM events WHERE kind=? AND lane_id=?', ('shim_spawned', $waterLane)).fetchone()
+print(0 if r is None or r[0] is None else r[0])
+") | Out-String).Trim()) -gt [int]($spawnsBefore.Trim()) } 25000 'the lane respawns' | Out-Null
     $spawn = (python -c "
 import sqlite3
 db = sqlite3.connect(r'$storeDb')
@@ -188,7 +197,7 @@ print('|' if r is None else str(r[0]) + '|' + r[1])
     Dodona @("token-request", "1") | Out-Null
     $land = Dodona @("land", "1")
     Check 'land_succeeds' ($land -match 'landed ticket 1') $land
-    Start-Sleep -Seconds 2
+    Wait-Until { -not (Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue) } 25000 'landing retires the agent' | Out-Null
     Check 'land_retires_the_agent' (-not (Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue)) "agent pid $($shimInfo.childPid) still alive"
     $d = Dump
     $water = $d.slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }
@@ -197,16 +206,16 @@ print('|' if r is None else str(r[0]) + '|' + r[1])
 
     # wake: a fresh agent resumes the thread (fake = fresh session; real claude = --resume)
     Dodona @("lane-respawn", "$waterLane") | Out-Null
-    Start-Sleep -Milliseconds 900
+    Wait-Until { (@((DumpOrNull).slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }).state) -eq 'alive' } 25000 'the lane wakes' | Out-Null
     Dodona @("say", "$waterLane", "say woke up fine") | Out-Null
-    Start-Sleep -Milliseconds 900
+    Wait-Until { ((@((DumpOrNull).slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }).lines) -join '|') -match 'woke up fine' } 25000 'the woken lane answers' | Out-Null
     $d = Dump
     $water = $d.slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }
     Check 'wake_revives_the_lane' ($water.state -eq 'alive' -and (($water.lines) -join '|') -match 'woke up fine') ($water | ConvertTo-Json -Compress)
 
     # ---- overlay maximize: verb-driven, grid never reflows underneath ----
     Dodona @("ui", "overlay", "WATER") | Out-Null
-    Start-Sleep -Milliseconds 700
+    Wait-Until { $null -ne (DumpOrNull).overlay } 25000 'the overlay opens' | Out-Null
     $d = Dump
     Check 'overlay_opens' ($d.overlay -eq 'WATER') $d.overlay
     Dodona @("ui", "overlay", "off") | Out-Null
@@ -243,13 +252,13 @@ print('|' if r is None else str(r[0]) + '|' + r[1])
 
     # ---- pose live returns to the store's truth ----
     Dodona @("ui", "pose", "live") | Out-Null
-    Start-Sleep -Milliseconds 900
+    Wait-Until { $null -eq (DumpOrNull).pose } 25000 'the pose returns to live' | Out-Null
     $d = Dump
     Check 'pose_live_resumes_store' ($null -eq $d.pose -and (($d.slots | Where-Object { -not $_.empty }).title -contains 'WATER')) ($d.pose)
 
     # ---- clean close, exit-code honest ----
     Dodona @("ui", "close") | Out-Null
-    Start-Sleep -Milliseconds 1200
+    Wait-Until { $null -eq (DumpOrNull) } 25000 'the window is gone' | Out-Null
     Check 'ui_close_exits_process' ($uiProc.HasExited) ''
 
     Dodona @("stop-daemon") | Out-Null

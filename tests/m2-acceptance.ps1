@@ -1,4 +1,4 @@
-# M2 acceptance, model-free half: merge-time claim backstop (§6 layer 2), code-derived
+﻿# M2 acceptance, model-free half: merge-time claim backstop (§6 layer 2), code-derived
 # presence (§5), tier-0 prefix routing + focus routing with routing_decisions rows (§4).
 # Fake agents only — zero model calls.
 
@@ -43,7 +43,7 @@ try {
 
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
-    Start-Sleep -Milliseconds 800
+    Wait-Daemon $ws.CtlPipe | Out-Null
 
     # ---- backstop: branch touching outside its claim cannot get the token ----
     Dodona @("ticket-create", "--title", "WATER", "--claim", "subtree:src/water") | Out-Null
@@ -66,7 +66,7 @@ try {
     $ls = Dodona @("lane-start", "--title", "SKY", "--child", $fake)
     if ($ls -match 'lane (\d+)') { $sky = $Matches[1] } else { throw "lane-start failed: $ls" }
     Dodona @("say", "$sky", "tool:Write:src/sky/box.cs sleep:2 then say presence-done") | Out-Null
-    Start-Sleep -Milliseconds 900
+    Wait-Until { (Dodona @("status")) -match 'presence=write: box.cs' } 20000 'presence shows the tool in use' | Out-Null
     $status = Dodona @("status")
     Check 'presence_shows_tool' ($status -match 'presence=write: box.cs') $status
     Start-Sleep -Seconds 2

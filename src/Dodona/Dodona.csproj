@@ -18,4 +18,14 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
   </ItemGroup>
 
+  <!-- The pure-logic tests (tests\Dodona.Tests) reach Claims, Policy, Repos, Instance and the
+       code-only routing decisions. Those are  with no modifier — internal — and
+       they stay that way: what counts as this assembly's API is a design decision, and it does
+       not get widened because a test wants in. This grants the one assembly access instead. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Dodona.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

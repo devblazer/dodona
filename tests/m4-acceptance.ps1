@@ -1,4 +1,4 @@
-# M4 acceptance (design §13/§14): hot-swap the daemon while an agent is mid-turn and the
+﻿# M4 acceptance (design §13/§14): hot-swap the daemon while an agent is mid-turn and the
 # session must not notice. This is the milestone that gates dogfooding Dodona on Dodona —
 # self-hosting before the swap works means every daemon iteration kills live sessions.
 #
@@ -78,7 +78,7 @@ try {
     # ================= the swap test: mid-turn handoff =================
     $d1 = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\d1.out" -RedirectStandardError "$out\d1.err"
-    Start-Sleep -Milliseconds 800
+    Wait-Daemon $ws.CtlPipe | Out-Null
 
     $ls = Dodona @("lane-start", "--title", "SKY", "--child", $fake)
     if ($ls -notmatch 'lane (\d+)') { throw "lane-start failed: $ls" }
@@ -89,9 +89,11 @@ try {
     function LaneSession { ((Dodona @("status")) -split "`r?`n" | Where-Object { $_ -match "^lane $lane\b" }) -replace '.*session=(\S+).*', '$1' }
     $sessionBefore = LaneSession
 
-    # a 6-second turn: the swap happens squarely inside it
+    # a 6-second turn: the swap happens squarely inside it. The turn must actually BE in
+    # flight before publish is called -- that is the whole test -- so wait for the agent
+    # process rather than guessing a second.
     Dodona @("say", "$lane", "sleep:6 then say $token") | Out-Null
-    Start-Sleep -Milliseconds 1000
+    Wait-Until { (Sql "SELECT COUNT(*) FROM pane_events WHERE lane_id=$lane AND kind='user_input'").Trim() -ne '0' } 15000 'the turn has been handed to the agent' | Out-Null
 
     $publish = Dodona @("publish", "--project", $repo)
     Set-Content "$out\publish.txt" $publish
@@ -99,7 +101,7 @@ try {
     Check 'publish_hands_off' ($publish -match 'handed off to build') $publish
 
     # daemon #1 must be GONE (it exited after the handoff) and #2 must own the pipe
-    Start-Sleep -Seconds 3
+    Wait-Until { $d1.HasExited -and (Dodona @("status")) -match 'daemon pid=(\d+)' } 30000 'daemon #1 exits and a successor answers' | Out-Null
     Check 'old_daemon_exited' ($d1.HasExited) "pid $($d1.Id) still alive"
     $status = Dodona @("status")
     Set-Content "$out\status-after-swap.txt" $status
@@ -134,7 +136,9 @@ try {
     Check 'agent_survived_swap' ([bool](Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue)) ''
 
     # the turn that was in flight during the swap: landed, exactly once
-    Start-Sleep -Seconds 5
+    Wait-Until {
+        @((Dodona @("tail", "$lane", "50")) -split "`r?`n" | Where-Object { $_ -match [regex]::Escape($token) -and $_ -match 'result' }).Count -ge 1
+    } 30000 'the orphaned turn lands as a RESULT through the new daemon' | Out-Null
     $tail = Dodona @("tail", "$lane", "50")
     Set-Content "$out\tail.txt" $tail
     $hits = @(($tail -split "`r?`n") | Where-Object { $_ -match [regex]::Escape($token) -and $_ -match 'result' })
@@ -151,7 +155,7 @@ try {
     Check 'same_session_after_swap' ($sessionAfter -eq $sessionBefore -and $sessionAfter -match '^fake-') "before=$sessionBefore after=$sessionAfter"
     $rt = "ROUNDTRIP-" + [guid]::NewGuid().ToString('N').Substring(0, 6)
     Dodona @("say", "$lane", "say $rt") | Out-Null
-    Start-Sleep -Seconds 2
+    Wait-Until { (Dodona @("tail", "$lane", "10")) -match [regex]::Escape($rt) } 25000 'the same agent answers through the new daemon' | Out-Null
     Check 'same_agent_answers_new_daemon' ((Dodona @("tail", "$lane", "10")) -match [regex]::Escape($rt)) ''
 
     # the handoff is in the causal chain, and the successor announced itself
@@ -197,13 +201,11 @@ try {
 
     # defer to a CONDITION, not a timer: release the token and it must swap itself
     Dodona @("token-release", "1") | Out-Null
-    $swapped = $false
-    foreach ($i in 1..15) {
-        Start-Sleep -Seconds 1
+    $swapped = Wait-Until {
         $s = Dodona @("status")
-        if ($s -match 'daemon pid=(\d+)' -and [int]$Matches[1] -ne $newPid) { $newPid2 = [int]$Matches[1]; $swapped = $true; break }
-    }
-    Check 'armed_swap_fires_when_blocker_clears' $swapped "still pid $newPid after 15s"
+        if ($s -match 'daemon pid=(\d+)' -and [int]$Matches[1] -ne $newPid) { $script:newPid2 = [int]$Matches[1]; $true } else { $false }
+    } 20000 'the armed swap fires once the merge token clears'
+    Check 'armed_swap_fires_when_blocker_clears' $swapped "still pid $newPid after 20s"
     Check 'armed_swap_recorded' ((Sql "SELECT state FROM swaps ORDER BY id DESC LIMIT 1") -match 'swapped') ''
     Check 'agent_survived_second_swap' ([bool](Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue)) ''
 
@@ -226,18 +228,18 @@ try {
 
     # ================= start-on-demand: the daemon is summoned, not served =================
     Dodona @("stop-daemon") | Out-Null
-    Start-Sleep -Seconds 2
+    Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down before autostart is tested' | Out-Null
     $revived = Dodona @("status")
     Check 'autostart_summons_daemon' ($revived -match 'daemon pid=(\d+)' -and [int]$Matches[1] -ne $newPid2) $revived
     Check 'autostart_reconnects_lane' ($revived -match 'SKY' -and $revived -match 'connected=True') $revived
     $rt2 = "AFTERAUTOSTART-" + [guid]::NewGuid().ToString('N').Substring(0, 6)
     Dodona @("say", "$lane", "say $rt2") | Out-Null
-    Start-Sleep -Seconds 2
+    Wait-Until { (Dodona @("tail", "$lane", "10")) -match [regex]::Escape($rt2) } 25000 'the agent answers after autostart' | Out-Null
     Check 'agent_answers_after_autostart' ((Dodona @("tail", "$lane", "10")) -match [regex]::Escape($rt2)) ''
 
     $env:DODONA_NO_AUTOSTART = "1"
     Dodona @("stop-daemon") | Out-Null
-    Start-Sleep -Seconds 1
+    Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down' | Out-Null
     $noauto = Dodona @("status")
     Check 'autostart_can_be_disabled' ($DODONA_EXIT -ne 0 -and $noauto -match 'daemon not running') $noauto
 }
@@ -245,9 +247,13 @@ finally {
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     if ($shimInfo) { foreach ($p in @($shimInfo.shimPid, $shimInfo.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } } }
-    Get-CimInstance Win32_Process -Filter "Name='dodona.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like "*$root*" } |
-        ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch { } }
+    # By the PATH this run owns, never by the name dodona.exe (CLAUDE.md §4, and P4.2). The
+    # old query enumerated every dodona.exe on the machine and narrowed on a COMMAND LINE
+    # substring afterwards -- which is one empty $root away from matching, and stopping,
+    # the operator's live daemon. $bin and $binRoot are this run's own GUID temp directories,
+    # so nothing outside this suite can be in them.
+    Stop-ProcessesUnder $bin
+    if ($binRoot) { Stop-ProcessesUnder $binRoot }
     if ($d1 -and -not $d1.HasExited) { try { Stop-Process -Id $d1.Id -Force } catch { } }
     # Scoped cleanup: only THIS test's processes, resolved from its own shim-info
     # files. Killing by process NAME once murdered the operator's live session's shim

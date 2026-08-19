@@ -234,6 +234,36 @@ suite's questions and failed 21 checks; roots are GUID temp dirs; all four UI la
 | after P4.3 | **~35–45 s** | unchanged |
 | after P4.5 | ~40 s | **<1 s** for pure logic |
 
+**LANDED 2026-08-19.** What the plan got wrong, recorded because the next phase inherits it:
+
+- **The baseline was not green.** P4's "343 checks, 0 failed" was never true on this machine.
+  Re-measured at `892b548`: `m0` printed no tally at all (so `dev.ps1` could not detect an m0
+  failure), `ui-use` crashed in its own `finally` on a `concierge-stop` stderr line and
+  reported **nothing** while `dev.ps1` counted it as fine, and `m4` (2) and `publish` (2) were
+  genuinely red. Five of the twelve rows were lying or blank.
+- **`dev suites` could hang forever, and probably did.** PowerShell's `& powershell ... 2>&1`
+  reads stdout through a pipe that closes when the last INHERITED handle closes, not when the
+  child exits; `publish-acceptance` leaks four `DodonaShim` processes and a shim's only exit is
+  a message from a daemon that is already gone. Measured: eight minutes of waiting after the
+  suite had printed its results. This is the most likely thing that was killed three times as
+  "too slow" in the Phase 2 session.
+- **P4.2's premise did not hold.** All three by-name queries already narrowed by path or by a
+  GUID root, so they were not the concurrency blocker the plan names. They are converted anyway
+  (`Get-ProcessesUnder`/`Stop-ProcessesUnder`, which refuse an empty directory) because
+  `-like "*$root*"` is one empty variable away from matching every process on the machine.
+- **P4.3's "m4 must run alone" is not required.** `publish` passes
+  `-p:BaseOutputPath=<temp>\` per project, so its bin output never touches `src\...\bin`;
+  only `obj\` stays in the tree, and `obj\` is contended by another COMPILE, which is `unit`
+  and nothing else. m4 runs in the parallel wave and that is worth 28 s.
+- **All twelve at once is worse than five at a time.** On 22 cores, never CPU-bound: `ui-use`
+  went 42.5 s → 70.6 s and went intermittently RED. The contention is windows, UIA and
+  process starts. Cap is 5, `DODONA_TEST_CONCURRENCY` overrides.
+- **Still red, and out of this phase's scope:** `m4 gate_points_at_running_build`,
+  `publish default_target_is_the_owning_workspace` (an unhandled `Git.Sha` exception when the
+  project is not a git repo) and `publish no_provenance_daemon_refuses_to_guess` (the suite
+  calls `dodona feed`, which is not a command). All three predate this phase and are visible
+  now only because the tally rule and the hang fix made them visible.
+
 **Becomes impossible:** skipping verification because it is expensive. This is the only durable
 fix for "believing a green check" — make checking cheaper than guessing.
 
@@ -278,7 +308,7 @@ is believed — a check that has not been seen red is worth nothing, and that is
 | lane pipes == `ps` lanes | I3 | 11 vs 7 |
 | two agents `dev build` concurrently, both succeed | I2 | **earned 2a** — but weaker than it reads: two concurrent builds of one *shared* tree were measured and both succeeded, so this row is regression protection for worktree builds, not proof of the fix |
 | `dev suites` green while the live app runs, app untouched | I1, I2 | **earned 2a** — asserts the live app's pids survive the suites; prints `n/a` rather than a green line when no app is running |
-| `Measure-Command { dev suites }` under 60 s | I7 | 5 m 16 s |
+| `dev suites` wall clock inside its budget | I7 | **earned 4** — the runner measures and prints its own wall clock and the gate asserts it. Budget is **90 s**, not the 35–45 s P4.3 projected: measured across six full runs the same code gave 53.7 s and 71.7 s, and a 60 s line would be red on half of green runs. `ui-use` is the long pole (42.5 s alone, up to 69 s in a parallel wave) and is really four suites wearing one name |
 | repo lint clean | I8 | 2 corrupt lines |
 | `dodona status` build SHA is a commit `git log` knows | I2 | **earned 2b** — asks the INSTALLED build and demands `git cat-file -t` resolves it to a commit; prints `n/a` when nothing is installed, or when the installed image carries no provenance (a `dev build` or `--exe` publish, which is a real state and not a failure) |
 

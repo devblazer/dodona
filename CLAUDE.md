@@ -157,10 +157,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 |---|---|
 | `check` | Can this tree build? What is in the way? Seconds. **Run it before starting work, not after.** |
 | `build` | Builds. Only *real* compile errors reach you; a locked output is named, never mistaken for one. |
-| `test <suite>...` | One or more named suites. |
-| `suites` | All eleven. A **gate before committing**, never a loop — it is twenty minutes. |
+| `test <suite>...` | One or more named suites, run concurrently. `--sequential` for one at a time. |
+| `test unit` | The pure logic — no daemon, no store, no window. **~1 second**; run it while you edit. |
+| `suites` | All twelve, five at a time. **~54–72 s**, so it is a gate before committing rather than the twenty-minute event this table used to claim. |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. |
-| `gate` | The pre-commit gate: runs the suites, then **asserts** the invariants — nothing left running in the build output, and a suite run that dirtied nothing. Prints the six rows of `RECOVERY-PHASES` §2 it does not cover yet, so it can never be mistaken for a full pass. |
+| `gate` | The pre-commit gate: runs the suites, then **asserts** seven invariants — nothing left running in the build output, a suite run that dirtied nothing, the commit guard deployed and unoverridden, the live build’s commit resolvable in `git log`, and the full run inside its time budget (I7). Prints the two rows of `RECOVERY-PHASES` §2 it does not cover yet, so it can never be mistaken for a full pass. `dev gate <suite>` runs the same machinery over less, in ~20 s, and says PARTIAL on every line. |
 | `ship` | build + suites + publish. |
 | `worktree <name>` | a tree of your own under `.claude\worktrees\`. All work goes in one (§0.0). |
 
@@ -190,21 +191,69 @@ history — twice:
 If you cannot build — permission denied, a lock the wrapper could not clear, anything — **say
 so as the headline of your reply**, not as a footnote, and name the exact command.
 
-### Iterate fast, gate slow (operator directive, 2026-08-18)
+### Iterate fast, gate slow — and "slow" is now 54 seconds, not twenty minutes
 
 *"Ban any test that takes longer than a second or two. Twenty minutes of test is ridiculous."*
 
-The eleven suites take about twenty minutes because they start real daemons, real WPF windows
-and real builds — measured: only 3.6 minutes of that is fixed `Start-Sleep`, so the rest is
-inherent and cannot be optimised away. So they are **a gate, not a loop**:
+**This section used to say the suites take twenty minutes, that only 3.6 minutes of that is
+`Start-Sleep`, and therefore "the rest is inherent and cannot be optimised away". Every part
+of that was wrong, and it was stated as measured.** Measured properly on 2026-08-19 the
+eleven suites took **5 min 20 s**, of which **214 s — 68 % — was fixed `Start-Sleep`**: not
+inherent at all, and almost none of it real waiting. A `Start-Sleep -Seconds 3` in front of a
+check is a guess about the slowest machine that ever ran it, paid in full on every machine
+since, while the condition it is waiting for is already written down one line below in the
+check itself.
 
-- **While iterating**: the narrowest thing that can fail. A single scenario against a fake
-  agent is ~10 seconds; pure-logic checks are instant. Anything that must start a daemon has
-  a ~5-10 second floor, and that is the honest target — 20 minutes down to 10 seconds, not to
-  1 second.
-- **Before committing**: `dev suites`, once.
-- **Three consecutive failed verification attempts**: stop and report. Do not grind. That one
-  rule would have saved most of 2026-08-18.
+That wrong number was not harmless. It is the reason verification became a thing to skip
+rather than a thing to fix — and skipped verification is the root of every believed-a-green-
+check incident in §0.3. **A measurement you did not take is not a measurement.**
+
+Where it stands now, all measured on this machine:
+
+| | before | after |
+|---|---|---|
+| full run, all suites | 5 min 20 s (and it could **hang forever**, see below) | **54–72 s** |
+| the same run, sequential | ~320 s | ~200 s |
+| fixed `Start-Sleep` across the suites | 214 s | ~4 s |
+| the narrowest useful check | ~7 s (a daemon must start) | **~1 s** (`dev test unit`) |
+
+Three changes did it, and all three are in `tools/dev.ps1` and `tests/_workspace.ps1`:
+
+- **`Wait-Until` (a condition plus a deadline) replaced the sleeps.** Every wait now names the
+  thing that un-sticks it, per §0.1's standing directive — a condition-wait with no deadline
+  would be that directive violated in a new costume, so timing out is a normal return that
+  prints one line and lets the following check fail on its own terms.
+- **Suites run five at a time**, each in its own process with its own `DODONA_HOME`. Not all
+  twelve: measured, that made ui-use *slower* (42.5 s alone → 70 s) and intermittently red,
+  because the contention is windows and process starts, not CPU. `DODONA_TEST_CONCURRENCY`
+  overrides; `dev suites --sequential` is the debugging escape hatch.
+- **`dev test unit`** runs the pure logic — the claim algebra, the policy table, repo
+  resolution, path canonicalization, the two routing decisions made in code — with no daemon,
+  no store and no window. 54 checks in about a second. That is the "one or two seconds" the
+  operator asked for; it does not and cannot replace an acceptance suite.
+
+So the doctrine stands, with better numbers behind it:
+
+- **While iterating**: `dev test unit` for anything that is a function (~1 s), then the single
+  suite your change touches (7–45 s). Anything that must start a daemon has a ~7 second floor,
+  and that is the honest target.
+- **Before committing**: `dev gate`, once. About 70 s of suites plus ~15 s of its own two
+  concurrent builds.
+- **Three consecutive failed verification attempts**: stop and report. Do not grind.
+
+**A suite that does not print `<N> checks, <M> failed` is now a FAILURE, not a shrug.** This
+is not bookkeeping. `m0` had never printed a tally in its life, so `dev.ps1` could not detect
+an m0 failure at all; and `ui-use` was dying inside its own `finally` on a stray stderr line
+(§0.2's `NativeCommandError` trap) — 74 checks computed, discarded, and reported as `no tally
+line`, which counted as nothing. Both were green-looking and both were blind.
+
+**And `dev suites` could hang forever, which is very probably what was killed three times as
+"too slow".** Reading a child's stdout through a pipe does not end when the child exits — it
+ends when the last handle to the write end closes, and every process a suite spawns inherits
+that handle. `publish-acceptance` leaks four `DodonaShim` processes, and a shim's only exit is
+a message from a daemon that is already gone. Measured: eight minutes of waiting after the
+suite had finished and printed its results, and it would never have ended. Suite output goes
+to **files** now, and every suite has a deadline.
 
 ## 2. Completed work gets published — and the daemon now enforces this itself
 
@@ -327,22 +376,38 @@ the design doc records the revision.
 
 ## 3. Verify with the suites, not by looking
 
-Eleven model-free suites, all fake agents, all free. Run the ones your change touches; run
-all of them before publishing something structural:
+Twelve model-free suites, all fake agents, all free. **Run them through `dev test`, never by
+invoking the `.ps1` directly** — the wrapper is what enforces that a suite which crashed, hung
+or never reported is a FAILURE rather than a blank line (P4.4), and it is what runs them five
+at a time:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\m0-acceptance.ps1   # daemon death
-powershell ... tests\m1-acceptance.ps1        # claims, gate, merge token
-powershell ... tests\m2-acceptance.ps1        # routing, backstop, presence
-powershell ... tests\m3-acceptance.ps1        # the UI as a view over the store
-powershell ... tests\m4-acceptance.ps1        # hot swap
-powershell ... tests\workspace-acceptance.ps1 # workspaces: identity, repo-exclusivity, multi-repo
-powershell ... tests\ui-use-acceptance.ps1    # the UI driven like a person
-powershell ... tests\compression-acceptance.ps1  # selective compression (§5)
-powershell ... testsrain-acceptance.ps1     # the dispatcher brain and its routing ladder
-powershell ... tests\concierge-acceptance.ps1 # the group-scope ladder, the fence, the review-behind
-powershell ... tests\publish-acceptance.ps1   # publish targeting: --all spares foreign instances
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test m3 brain
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit      # ~1s, no daemon
 ```
+
+| suite | what it covers | alone |
+|---|---|---|
+| `unit` | the pure logic: claim algebra, policy table, repo resolution, canonical paths, the code-only routing decisions | ~1 s |
+| `m0` | daemon death mid-turn | ~7 s |
+| `m1` | claims, the gate, the merge token | ~8 s |
+| `m2` | routing, the backstop, presence | ~8 s |
+| `m3` | the UI as a view over the store | ~17 s |
+| `m4` | hot swap (runs a REAL build — the slow one) | ~28 s |
+| `workspace` | identity, repo-exclusivity, multi-repo | ~14 s |
+| `ui-use` | the UI driven like a person | ~43 s |
+| `compression` | selective compression (§5) | ~12 s |
+| `brain` | the dispatcher brain and its routing ladder | ~23 s |
+| `concierge` | the group-scope ladder, the fence, the review-behind | ~11 s |
+| `publish` | publish targeting: `--all` spares foreign instances | ~30 s |
+
+**Waits are conditions, not sleeps.** `Wait-Until { <condition> } <timeoutMs> '<what>'` in
+`tests/_workspace.ps1` is how every one of them is written now; `Wait-Daemon` is the common
+case. Do not add a `Start-Sleep` — the four that survive are each a real duration (a fake
+agent's own turn length) and say so in a comment. A wait with no deadline is §0.1's standing
+directive violated in a new costume, so `Wait-Until` always has one and returns `$false`
+rather than throwing: the check that follows then fails on its own terms and prints the real
+value it saw, which is a better diagnosis than a wait's own idea of what went wrong.
 
 **A suite that builds the thing it tests proves nothing about the wiring.** The routing
 ladder — four verdicts, the escalation chain, the held-input rung — was fully covered and

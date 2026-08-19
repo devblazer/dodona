@@ -1,4 +1,4 @@
-# Selective compression acceptance (§5): a pane says the short readable thing, the raw
+﻿# Selective compression acceptance (§5): a pane says the short readable thing, the raw
 # text stays one keystroke away, and mid-turn narration never reaches the grid at all.
 # Fake agents on both sides — the pool runs DodonaFakeAgent with DODONA_LANE_ROLE set, so
 # this suite costs zero model calls like every other one.
@@ -38,6 +38,8 @@ git -C $root -c user.email=t@t -c user.name=t commit -q -m init
 $results = [ordered]@{}
 function Dodona([string[]]$a) { $o = (& $dodona ($a + @('--root', $root))) | Out-String; $o.Trim() }
 function Dump() { Dodona @('ui', 'dump') | ConvertFrom-Json }
+# "not answering yet" as a VALUE rather than an exception, so a Wait-Until can poll it.
+function DumpOrNull() { try { Dump } catch { $null } }
 function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$name] = if ($cond) { 'PASS' } else { "FAIL $detail".Trim() } }
 function Rows([string]$sql) {
     # The query travels via an environment variable, not string interpolation: a query
@@ -79,7 +81,7 @@ try {
 
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
-    Start-Sleep -Milliseconds 800
+    Wait-Daemon $ws.CtlPipe | Out-Null
 
     # Assert the store migrated to whatever THIS binary declares, never a frozen literal.
     # The old form was `-match '7'`, which went red the moment Ver.Schema became 8 (M5.1's
@@ -95,15 +97,15 @@ try {
     # ---- a work lane with NO compressor pool: the full text must still arrive ----
     # lane-start names the lane itself; on an empty store the first work lane is 1.
     Dodona @("lane-start", "--child", $fake) | Out-Null
-    Start-Sleep -Milliseconds 600
+    Wait-Until { (Rows "SELECT COUNT(*) FROM lanes WHERE role='work' AND state='alive'").Trim() -eq '1' } 25000 'the work lane is alive' | Out-Null
     Dodona @("say", "1", "say $long") | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Wait-Until { (Rows "SELECT COUNT(*) FROM pane_events WHERE kind='result'").Trim() -ne '0' } 25000 'the turn result arrives' | Out-Null
 
     $uncompressed = Rows "SELECT compressed IS NULL, substr(body,1,40) FROM pane_events WHERE kind='result' ORDER BY id DESC LIMIT 1"
     Check 'no_pool_leaves_the_row_uncompressed' ($uncompressed -match '^1\|') $uncompressed
 
     $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
-    Start-Sleep -Milliseconds 1800
+    Wait-Until { (@((DumpOrNull).slots | Where-Object { -not $_.empty }).Count) -ge 1 } 30000 'the window answers with the lane' | Out-Null
     $pane = (Dump).slots | Where-Object { -not $_.empty }
     Check 'no_pool_still_shows_the_agents_words' (($pane.lines -join '|') -match 'only breaking crests foam') ($pane.lines -join '|')
 
@@ -114,13 +116,13 @@ try {
 
     # ---- now warm the pool and take another turn ----
     Dodona @("compressor-start", "--child", $fake, "--count", "2") | Out-Null
-    Start-Sleep -Milliseconds 1200
+    Wait-Until { (Rows "SELECT COUNT(*) FROM lanes WHERE role='compressor' AND state='alive'").Trim() -eq '2' } 25000 'the compressor pool is warm' | Out-Null
     $pool = Rows "SELECT COUNT(*) FROM lanes WHERE role='compressor' AND state='alive'"
     Check 'pool_is_two_sessions_not_one' ([int]($pool.Trim()) -eq 2) $pool
     Check 'pool_takes_no_grid_slot' ((@((Dump).slots | Where-Object { -not $_.empty })).Count -eq 1) ''
 
     Dodona @("say", "1", "say $long") | Out-Null
-    Start-Sleep -Seconds 3
+    Wait-Until { (Rows "SELECT compressed IS NOT NULL FROM pane_events WHERE kind='result' AND lane_id=1 ORDER BY id DESC LIMIT 1") -match '^1' } 30000 'the turn final is compressed' | Out-Null
 
     # lane_id=1 everywhere: the compressor's OWN reply is also a result row (in its own
     # lane), and "latest result in the store" is usually that one, not the work lane's.
@@ -131,8 +133,10 @@ try {
     $body = Rows "SELECT length(body) FROM pane_events WHERE kind='result' AND lane_id=1 ORDER BY id DESC LIMIT 1"
     Check 'raw_body_is_never_overwritten' ([int]($body.Trim()) -eq $long.Length) "$body vs $($long.Length)"
 
-    Start-Sleep -Milliseconds 800
-    $pane = (Dump).slots | Where-Object { -not $_.empty }
+    Wait-Until {
+        $script:pane = @((DumpOrNull).slots | Where-Object { -not $_.empty })
+        ($script:pane.lines -join '|') -match 'the shoreline foam looked wrong at grazing angles'
+    } 25000 'the pane renders the short version' | Out-Null
     Check 'pane_shows_the_short_version' (($pane.lines -join '|') -match 'the shoreline foam looked wrong at grazing angles') ($pane.lines -join '|')
     # The FIRST turn ran with no pool, so its full text legitimately stands (that is the
     # §5 floor, asserted above). The precise claim: the LAST result line — the turn that
@@ -146,7 +150,7 @@ try {
     # the overlay is the raw truth: unfiltered kinds, uncompressed bodies (§12)
     $laneTitle = ((Dump).slots | Where-Object { -not $_.empty }).title
     Dodona @("ui", "overlay", $laneTitle) | Out-Null
-    Start-Sleep -Milliseconds 900
+    Wait-Until { (DumpOrNull).overlay -eq $laneTitle } 25000 'the overlay opens on the lane' | Out-Null
     $ovd = Dump
     Check 'overlay_selected' ($ovd.overlay -eq $laneTitle) "$($ovd.overlay)"
     Check 'overlay_keeps_midturn_and_full_text' ((Rows "SELECT COUNT(*) FROM pane_events WHERE kind='agent_line'").Trim() -ne '0') ''
@@ -154,8 +158,11 @@ try {
 
     # ---- already-short turn-finals must not buy a model call (§2.2) ----
     $before = [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='compressed'").Trim())
+    # A NEGATIVE: nothing must happen. There is no arrival to wait for, so this waits for the
+    # short result to LAND (which is observable) and then asserts no compression followed it.
+    $shortBefore = [int]((Rows "SELECT COUNT(*) FROM pane_events WHERE kind='result' AND lane_id=1").Trim())
     Dodona @("say", "1", "say done: fixed") | Out-Null
-    Start-Sleep -Seconds 2
+    Wait-Until { ([int]((Rows "SELECT COUNT(*) FROM pane_events WHERE kind='result' AND lane_id=1").Trim())) -gt $shortBefore } 25000 'the short result lands' | Out-Null
     $after = [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='compressed'").Trim())
     Check 'short_results_skip_the_compressor' ($after -eq $before) "before=$before after=$after"
 
@@ -163,14 +170,14 @@ try {
     # Long enough to clear the 120-char skip: an already-short result never buys a model
     # call, and the first draft of this text was 118 characters — silently skipped.
     Dodona @("say", "1", "say BLOCKED I need you to choose a name for the water-in-frame visibility rule before I can continue writing the shader, the sim hooks and their golden-image tests") | Out-Null
-    Start-Sleep -Seconds 3
+    Wait-Until { (Rows "SELECT compressed FROM pane_events WHERE kind='result' AND lane_id=1 ORDER BY id DESC LIMIT 1") -match 'BLOCKED' } 30000 'the blocked result is compressed to the fixed schema' | Out-Null
     $blocked = Rows "SELECT compressed FROM pane_events WHERE kind='result' AND lane_id=1 ORDER BY id DESC LIMIT 1"
     $emdash = [string][char]0x2014
     Check 'blocked_uses_the_fixed_schema' ($blocked -match "BLOCKED $emdash" -and $blocked -match 'options:') $blocked
 
     Dodona @("ui", "screenshot", "--out", "$out\compressed.png") | Out-Null
     Dodona @("ui", "close") | Out-Null
-    Start-Sleep -Milliseconds 1000
+    Wait-Until { $null -eq (DumpOrNull) } 25000 'the window is gone' | Out-Null
     Dodona @("stop-daemon") | Out-Null
 }
 finally {

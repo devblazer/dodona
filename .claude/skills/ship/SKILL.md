@@ -28,29 +28,30 @@ Get-CimInstance Win32_Process -Filter "Name='dodona.exe'" | Select ProcessId, Co
 
 ## 2. Run the acceptance suites
 
-All model-free (fake agents). Run the ones your change touches; run all eleven before
-shipping anything structural:
+**Through `dev`, never by invoking a `.ps1` directly.** That is not a style preference: the
+wrapper is what makes a suite which crashed, hung or printed no tally a FAILURE instead of a
+blank line, and it is what runs them five at a time. Invoking the scripts by hand gives back
+exactly the blindness this step exists to remove — `ui-use` spent its whole life dying in its
+own `finally` and reporting nothing, and nobody saw it, because the tally was never required.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\m0-acceptance.ps1          # daemon death is a non-event
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\m1-acceptance.ps1          # claims, gate, merge token
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\m2-acceptance.ps1          # routing, backstop, presence
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\m3-acceptance.ps1          # UI as a view; land/dormant/wake
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\m4-acceptance.ps1          # hot swap
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\workspace-acceptance.ps1   # workspace identity + repo-exclusivity + multi-repo
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\ui-use-acceptance.ps1      # UI driven like a person
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\compression-acceptance.ps1 # selective compression
-powershell -NoProfile -ExecutionPolicy Bypass -File testsrain-acceptance.ps1       # the dispatcher brain + routing ladder
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\concierge-acceptance.ps1   # group-scope ladder, fence, review-behind
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\publish-acceptance.ps1     # publish targeting; --all spares foreign instances
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit        # ~1 s, while you edit
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test m3 brain    # the ones you touched
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 gate             # before committing: all 12 + the assertions
 ```
 
-Exit code 0 each, or fix before proceeding. UI affordances need a check in `ui-use`
-(driven via UI Automation), not only a `ui dump` assertion — dumps prove the UI *reports*
-correctly while the first thing a person tries can still be a dead end.
+`dev gate` is the real step here — it runs every suite AND asserts the seven invariants
+(nothing left in the build output, the run dirtied nothing, two concurrent worktree builds,
+the live app untouched, the commit guard deployed, the installed build's SHA resolvable, and
+the run inside its time budget). About 70 s of suites plus ~15 s of its own two builds.
+
+Exit code 0, or fix before proceeding. UI affordances need a check in `ui-use` (driven via UI
+Automation), not only a `ui dump` assertion — dumps prove the UI *reports* correctly while the
+first thing a person tries can still be a dead end.
 
 If a fresh failure is in the **test**, fix the test and say so; known test traps are in
-CLAUDE.md ("Windows & PS 5.1 traps").
+CLAUDE.md ("Windows & PS 5.1 traps"). If it is a TIMING failure, do not add a `Start-Sleep`:
+wait for the condition the check asserts (`Wait-Until` in `tests/_workspace.ps1`).
 
 ## 3. Commit
 

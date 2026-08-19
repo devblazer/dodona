@@ -1,4 +1,4 @@
-# Dispatcher-brain acceptance (§3's middle rung, model-free): the brain reviews BEHIND
+﻿# Dispatcher-brain acceptance (§3's middle rung, model-free): the brain reviews BEHIND
 # the instant code path and corrects visibly — silent unless it disagrees (operator rule).
 # The fake agent plays both worker and brain (DODONA_LANE_ROLE), driven by directives
 # embedded in the operator text, so every judgement here is deterministic.
@@ -34,6 +34,8 @@ git -C $root -c user.email=t@t -c user.name=t commit -q -m init
 $results = [ordered]@{}
 function Dodona([string[]]$a) { $o = (& $dodona ($a + @('--root', $root))) | Out-String; $o.Trim() }
 function Dump() { Dodona @('ui', 'dump') | ConvertFrom-Json }
+# "not answering yet" as a VALUE rather than an exception, so a Wait-Until can poll it.
+function DumpOrNull() { try { Dump } catch { $null } }
 function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$name] = if ($cond) { 'PASS' } else { "FAIL $detail".Trim() } }
 function Rows([string]$sql) {
     $env:DODONA_TEST_SQL = $sql
@@ -57,14 +59,14 @@ try {
 
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
-    Start-Sleep -Milliseconds 800
+    Wait-Daemon $ws.CtlPipe | Out-Null
     Dodona @("brain-start") | Out-Null
-    Start-Sleep -Milliseconds 800
+    Wait-Until { (Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1' } 25000 'the brain lane is alive' | Out-Null
     Check 'brain_is_warm_and_off_grid' ((Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1') ''
 
     # ---- silent when it agrees: no announcement beyond the standard creation receipt ----
     Dodona @("input", "make the water foam softer") | Out-Null
-    Start-Sleep -Seconds 2
+    Wait-Until { [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='brain_review' AND detail LIKE 'agree=True%'").Trim()) -ge 1 } 25000 'the brain reviews and agrees' | Out-Null
     $agreeRows = Rows "SELECT COUNT(*) FROM events WHERE kind='brain_review' AND detail LIKE 'agree=True%'"
     Check 'brain_reviewed_and_agreed' ([int]($agreeRows.Trim()) -ge 1) $agreeRows
     $noise = Rows "SELECT COUNT(*) FROM pane_events WHERE kind='announcement' AND body LIKE '%dispatcher%'"
@@ -73,9 +75,9 @@ try {
     # ---- disagreement: rename applied + receipt with undo; ticket only suggested ----
     # The brain reviews lane BIRTHS; with a live lane the input would just route to it.
     Dodona @("lane-stop", "2") | Out-Null
-    Start-Sleep -Milliseconds 600
+    Wait-Until { (Rows "SELECT COUNT(*) FROM lanes WHERE role='work' AND state='alive'").Trim() -eq '0' } 25000 'the work lane is stopped' | Out-Null
     Dodona @("input", "brainname:SHORELINE brainticket:FOAM do the shoreline foam work") | Out-Null
-    Start-Sleep -Seconds 2
+    Wait-Until { (Rows "SELECT id, title FROM lanes WHERE role='work' ORDER BY id") -match 'SHORELINE' } 25000 'the brain renames the new lane' | Out-Null
     $lanes = Rows "SELECT id, title FROM lanes WHERE role='work' ORDER BY id"
     Check 'rename_applied' ($lanes -match 'SHORELINE') $lanes
     $renamed = Rows "SELECT COUNT(*) FROM events WHERE kind='brain_renamed'"
@@ -98,22 +100,28 @@ try {
 
     # ---- the pulse: a routed message flashes the receiving pane ----
     $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
-    Start-Sleep -Milliseconds 1800
+    Wait-Until { $null -ne (DumpOrNull) } 30000 'the UI window answers ui dump' | Out-Null
     Dodona @("say", "$laneId", "say pulse check") | Out-Null
-    Start-Sleep -Milliseconds 700
-    $d = Dump
-    $pane = $d.slots | Where-Object { -not $_.empty } | Where-Object { $_.lane -eq $laneId }
+    # The pulse is a TRANSIENT: it must be caught while it is on, so this waits for it to
+    # appear rather than sleeping past it -- which is also why it cannot be replaced with a
+    # wait for the fade alone.
+    Wait-Until {
+        $script:pane = @((DumpOrNull).slots | Where-Object { -not $_.empty } | Where-Object { $_.lane -eq $laneId })[0]
+        $script:pane.pulsing -eq $true
+    } 20000 'the receiving pane pulses' | Out-Null
     Check 'pulse_on_arrival' ($pane.pulsing -eq $true) ($pane | ConvertTo-Json -Compress)
-    Start-Sleep -Seconds 2
-    $pane = (Dump).slots | Where-Object { -not $_.empty } | Where-Object { $_.lane -eq $laneId }
+    Wait-Until {
+        $script:pane = @((DumpOrNull).slots | Where-Object { -not $_.empty } | Where-Object { $_.lane -eq $laneId })[0]
+        $script:pane.pulsing -eq $false
+    } 20000 'the pulse fades' | Out-Null
     Check 'pulse_fades' ($pane.pulsing -eq $false) ''
 
     # ---- the escalation ladder end to end (operator's routing tiers + final rung) ----
     Dodona @("router-start", "--child", $fake) | Out-Null
     Dodona @("brain-start", "--hi") | Out-Null
-    Start-Sleep -Milliseconds 900
+    Wait-Until { (Rows "SELECT COUNT(*) FROM lanes WHERE role IN ('router','brain-hi') AND state='alive'").Trim() -eq '2' } 25000 'the classifier and the expensive tier are warm' | Out-Null
     Dodona @("lane-start", "--title", "WATER", "--child", $fake) | Out-Null
-    Start-Sleep -Milliseconds 600
+    Wait-Until { (Rows "SELECT COUNT(*) FROM lanes WHERE title='WATER' AND state='alive'").Trim() -eq '1' } 25000 'the WATER lane is alive' | Out-Null
     Dodona @("focus", "$laneId") | Out-Null
 
     # =====================================================================================
@@ -131,7 +139,7 @@ try {
 
     # generic → the focused lane, never second-guessed.
     Dodona @("input", "routekind:generic say dont do that") | Out-Null
-    Start-Sleep -Seconds 2
+    Wait-Until { (Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$laneId AND kind='user_input' AND body LIKE '%dont do that%'").Trim() -eq '1' } 25000 'the generic reaches the focused lane' | Out-Null
     Check 'generic_goes_to_the_focused_lane' `
         ((Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$laneId AND kind='user_input' AND body LIKE '%dont do that%'").Trim() -eq '1') `
         (Rows "SELECT tier, delivered_lane FROM routing_decisions ORDER BY id DESC LIMIT 1")
@@ -139,7 +147,7 @@ try {
     # An unmistakable generic is decided in CODE — instant, and it never reaches a model. That
     # is what keeps "stop" fast even though everything else now waits for a verdict.
     Dodona @("input", "stop") | Out-Null
-    Start-Sleep -Seconds 1
+    Wait-Until { (Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 1") -match 'generic\|explicit' } 25000 'the unmistakable generic is decided in code' | Out-Null
     Check 'obvious_generic_needs_no_model' `
         ((Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 1") -match 'generic\|explicit') `
         (Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 1")
@@ -149,20 +157,20 @@ try {
     # work just finished).
     $waterLane = (Rows "SELECT id FROM lanes WHERE title='WATER'").Trim()
     Dodona @("input", "routekind:addendum routetarget:WATER routereason:direct say make the water red") | Out-Null
-    Start-Sleep -Seconds 2
+    Wait-Until { (Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$waterLane AND kind='user_input' AND body LIKE '%water red%'").Trim() -eq '1' } 25000 'the addendum reaches the named lane' | Out-Null
     Check 'addendum_goes_to_the_named_lane' `
         ((Rows "SELECT COUNT(*) FROM pane_events WHERE lane_id=$waterLane AND kind='user_input' AND body LIKE '%water red%'").Trim() -eq '1') ''
     Check 'addendum_records_its_reason' ((Rows "SELECT detail FROM events WHERE kind='routed_addendum' ORDER BY id DESC LIMIT 1") -match 'direct') ''
 
     Dodona @("input", "routekind:addendum routetarget:WATER routereason:tweak say actually make it darker") | Out-Null
-    Start-Sleep -Seconds 2
+    Wait-Until { (Rows "SELECT detail FROM events WHERE kind='routed_addendum' ORDER BY id DESC LIMIT 1") -match 'tweak' } 25000 'the tweak is recorded as an addendum' | Out-Null
     Check 'tweak_is_an_addendum_too' ((Rows "SELECT detail FROM events WHERE kind='routed_addendum' ORDER BY id DESC LIMIT 1") -match 'tweak') ''
 
     # new-task → A FRESH LANE, spawned and delivered. The verdict that did not exist before:
     # while any lane was alive, every input used to be a continuation of something.
     $before = [int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()
     Dodona @("input", "routekind:new-task say build the configuration dialog") | Out-Null
-    Start-Sleep -Seconds 3
+    Wait-Until { ([int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()) -eq $before + 1 } 30000 'the new task spawns its own lane' | Out-Null
     $after = [int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()
     Check 'new_task_spawns_its_own_lane' ($after -eq $before + 1) "before=$before after=$after"
     $newLane = (Rows "SELECT id FROM lanes WHERE role='work' ORDER BY id DESC LIMIT 1").Trim()
@@ -183,7 +191,10 @@ try {
     # unclear + brain-hi sure → the expensive tier decides, and can itself say new-task.
     $before2 = [int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()
     Dodona @("input", "routekind:unclear hikind:new-task say overhaul the export pipeline") | Out-Null
-    Start-Sleep -Seconds 4
+    Wait-Until {
+        (Rows "SELECT COUNT(*) FROM events WHERE kind='classified_escalated'").Trim() -ne '0' -and
+        ([int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()) -eq $before2 + 1
+    } 30000 'the unclear input escalates and the expensive tier spawns a lane' | Out-Null
     Check 'unclear_escalates_to_the_expensive_tier' `
         ((Rows "SELECT COUNT(*) FROM events WHERE kind='classified_escalated'").Trim() -ne '0') ''
     Check 'escalated_new_task_spawns_a_lane' `
@@ -204,7 +215,7 @@ try {
     $inputsBefore = [int](Rows $workInputs).Trim()
     $lanesBefore = [int](Rows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()
     Dodona @("input", "routekind:unclear say something entirely cryptic") | Out-Null
-    Start-Sleep -Seconds 4
+    Wait-Until { (Rows "SELECT COUNT(*) FROM events WHERE kind='routing_clarification'").Trim() -eq '1' } 30000 'double uncertainty holds the sentence and asks' | Out-Null
     $ask = Rows "SELECT body, acked FROM pane_events WHERE body LIKE '%new work or continues%' LIMIT 1"
     Check 'double_uncertainty_asks_the_operator' (($ask -match 'NOT delivered') -and ($ask -match '\|0')) $ask
     Check 'clarification_in_causal_chain' ((Rows "SELECT COUNT(*) FROM events WHERE kind='routing_clarification'").Trim() -eq '1') ''
@@ -228,10 +239,13 @@ try {
     $brainBefore = (Rows "SELECT id FROM lanes WHERE role='brain' AND state='alive' ORDER BY id").Trim()
 
     Dodona @("stop-daemon") | Out-Null
-    Start-Sleep -Seconds 1
+    Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down' | Out-Null
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws.Id -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon2.out" -RedirectStandardError "$out\daemon2.err"
-    Start-Sleep -Milliseconds 1200
+    Wait-Daemon $ws.CtlPipe | Out-Null
+    # Being up is not being RECONCILED. The checks below are about adoption, so wait for the
+    # reconcile_done row that records it -- the very thing the last check reads.
+    Wait-Until { (Rows "SELECT detail FROM events WHERE kind='reconcile_done' ORDER BY id DESC LIMIT 1") -match 'brain=\d+' } 25000 'the restarted daemon has reconciled' | Out-Null
 
     $brainAfter = (Rows "SELECT id FROM lanes WHERE role='brain' AND state='alive' ORDER BY id").Trim()
     Check 'restart_adopts_the_brain_it_already_had' ($brainAfter -eq $brainBefore) "before=[$brainBefore] after=[$brainAfter]"
@@ -240,7 +254,7 @@ try {
         (Rows "SELECT id, title, role, state FROM lanes WHERE role LIKE 'brain%'")
     # ...and asking for one again reuses it rather than making another.
     Dodona @("brain-start") | Out-Null
-    Start-Sleep -Milliseconds 600
+    Wait-Until { (Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1' } 25000 'brain-start after a restart reuses the brain' | Out-Null
     Check 'brain_start_after_restart_reuses_it' `
         ((Rows "SELECT COUNT(*) FROM lanes WHERE role='brain' AND state='alive'").Trim() -eq '1') `
         (Rows "SELECT id, role, state FROM lanes WHERE role LIKE 'brain%'")
@@ -264,11 +278,12 @@ try {
     $routerLane = (Rows "SELECT id FROM lanes WHERE role='router' AND state='alive'").Trim()
     Dodona @("lane-stop", $routerLane) | Out-Null
     Dodona @("stop-daemon") | Out-Null
-    Start-Sleep -Seconds 1
+    Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down' | Out-Null
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue    # as the operator has it
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws.Id -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon3.out" -RedirectStandardError "$out\daemon3.err"
-    Start-Sleep -Seconds 3
+    Wait-Daemon $ws.CtlPipe | Out-Null
+    Wait-Until { ([int](Rows "SELECT COUNT(*) FROM lanes WHERE role='router' AND state='alive'").Trim()) -eq 1 } 30000 'autostart creates a classifier' | Out-Null
 
     Check 'autostart_creates_a_classifier' `
         (([int](Rows "SELECT COUNT(*) FROM lanes WHERE role='router' AND state='alive'").Trim()) -eq 1) `
@@ -282,7 +297,7 @@ try {
     # fails the instant the create-side role and the use-side role diverge again.
     $classifiedBefore = [int](Rows "SELECT COUNT(*) FROM events WHERE kind='classified'").Trim()
     Dodona @("input", "routekind:generic routeconf:high say carry on then") | Out-Null
-    Start-Sleep -Seconds 3
+    Wait-Until { ([int](Rows "SELECT COUNT(*) FROM events WHERE kind='classified'").Trim()) -gt $classifiedBefore } 30000 'the typed sentence reaches the classifier' | Out-Null
     Check 'typed_input_reaches_the_classifier_autostart_made' `
         (([int](Rows "SELECT COUNT(*) FROM events WHERE kind='classified'").Trim()) -gt $classifiedBefore) `
         (Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 3")
@@ -293,10 +308,11 @@ try {
     # ...and the classifier obeys the same no-leak rule the brain does.
     $routerNow = (Rows "SELECT id FROM lanes WHERE role='router' AND state='alive' ORDER BY id").Trim()
     Dodona @("stop-daemon") | Out-Null
-    Start-Sleep -Seconds 1
+    Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down' | Out-Null
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws.Id -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon4.out" -RedirectStandardError "$out\daemon4.err"
-    Start-Sleep -Seconds 3
+    Wait-Daemon $ws.CtlPipe | Out-Null
+    Wait-Until { (Rows "SELECT id FROM lanes WHERE role='router' AND state='alive' ORDER BY id").Trim() -eq $routerNow } 30000 'the restart adopts the classifier it already had' | Out-Null
     Check 'restart_adopts_the_classifier_it_already_had' `
         ((Rows "SELECT id FROM lanes WHERE role='router' AND state='alive' ORDER BY id").Trim() -eq $routerNow) `
         (Rows "SELECT id, role, state FROM lanes WHERE role='router'")

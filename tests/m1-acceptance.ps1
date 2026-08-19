@@ -1,4 +1,4 @@
-# M1 acceptance (design §16): claims + hook gate + fenced merge token + verify config.
+﻿# M1 acceptance (design §16): claims + hook gate + fenced merge token + verify config.
 # Runs on a scripted git fixture — zero model calls. The test performs the git work a
 # real agent would (commit, rebase), and asserts on every §6/§7 behavior:
 #   plan-time conflict detection, disjoint parallelism, hook-gate allow/deny,
@@ -55,7 +55,7 @@ try {
 
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
-    Start-Sleep -Milliseconds 800
+    Wait-Daemon $ws.CtlPipe | Out-Null
 
     # ---- 1. ticket WATER claims src/water ----
     $t1 = Dodona @("ticket-create", "--title", "WATER", "--claim", "subtree:src/water")
@@ -94,10 +94,43 @@ try {
     # so it now exercises whatever is wired, whatever that turns out to be.
     $hookCmd = ((Get-Content "$wt1\.claude\settings.local.json" -Raw | ConvertFrom-Json).hooks.PreToolUse[0].hooks[0].command)
     Check 'gate_registration_names_a_command' ([bool]$hookCmd) "settings.local.json: $hookCmd"
-    $allow = $inJson  | & cmd /c $hookCmd | Out-String
-    $deny  = $outJson | & cmd /c $hookCmd | Out-String
+    # STDERR IS CAPTURED, AND THE DENY IS A CONDITION-WAIT. Both because of what this check did
+    # when the suites started running concurrently: it went red with an EMPTY detail, which said
+    # only that the gate had not denied, never why. Worse, the ALLOW check passes on empty
+    # output -- so a gate producing nothing at all reads as half green, the exact trap the
+    # comment above already warns about.
+    #
+    # What the empty output actually meant, once it could be seen: `dodona gate-hook` asks the
+    # daemon (`claim-check` over the ctl pipe) and DELIBERATELY FAILS OPEN on anything that is
+    # not a clean allow/deny -- src/Dodona/Program.cs GateHook, "Anything else (no daemon, a
+    # pipe error) is a fail-open, logged where the merge backstop's reader will look for it".
+    # With eleven suites on the machine the pipe sometimes did not answer in time, so the gate
+    # allowed the write and said nothing. That is the DESIGN (§6 layer 2, the merge-time diff
+    # backstop, is what catches it), not a regression -- but it means this check has to
+    # distinguish three outcomes, not two: denied, allowed, and could-not-ask.
+    #
+    # So: retry with a deadline, the same idiom as everything else in these suites, and if it
+    # never denies, quote the bypass log the hook leaves behind. A retry is honest here because
+    # the gate is deterministic once the daemon answers -- what is being waited for is the
+    # daemon being reachable, not a different verdict.
+    $ErrorActionPreference = 'Continue'
+    $gerr = Join-Path $out 'gate.err'
+    $allow = ($inJson | & cmd /c $hookCmd 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
     Check 'gate_allows_inside_claim' ($allow.Trim() -eq '') "expected silence, got: $allow"
-    Check 'gate_denies_outside_claim' ($deny -match '"permissionDecision":"deny"') $deny
+
+    $deny = ''
+    Wait-Until {
+        $script:deny = ($outJson | & cmd /c $hookCmd 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
+        $script:deny -match '"permissionDecision":"deny"'
+    } 20000 'the claim gate denies a write outside the claim' | Out-Null
+    $bypass = Join-Path $wt1 '.dodona-bypass.log'
+    $bypassed = if (Test-Path $bypass) { (Get-Content $bypass -Raw).Trim() } else { '' }
+    Check 'gate_denies_outside_claim' ($deny -match '"permissionDecision":"deny"') `
+        "hook=$hookCmd output=[$($deny.Trim())] bypass-log=[$bypassed]"
+    # A fail-open is not a gate failure -- but it must never be SILENT, because the only
+    # evidence it happened is a file nobody reads (CLAUDE.md §3: a silent degrade is a bug).
+    Check 'gate_never_failed_open_silently' ($bypassed -eq '' -or $deny -match 'deny') `
+        "the gate could not reach the daemon and allowed the write: $bypassed"
 
     # ---- 5. agent work: commit in wt1 (the test IS the agent at the git layer) ----
     Set-Content "$wt1\src\water\sim.cs" "// water sim v2"

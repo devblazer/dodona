@@ -1,4 +1,4 @@
-# Workspace acceptance: one project root, several repositories under it. One daemon, one
+﻿# Workspace acceptance: one project root, several repositories under it. One daemon, one
 # store, one grid, one dispatcher — and a merge token PER REPOSITORY, so a ticket landing
 # in `engine` never queues behind one landing in `tools`.
 #
@@ -66,7 +66,7 @@ try {
 
     $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
-    Start-Sleep -Milliseconds 800
+    Wait-Daemon $ws.CtlPipe | Out-Null
 
     # ---- discovery: the workspace knows its repositories ----
     $repos = Dodona @("repos")
@@ -146,7 +146,7 @@ try {
     $ls = Dodona @("lane-start", "--title", "DOCS", "--child", $fake)
     if ($ls -match 'lane (\d+)') { $lane = $Matches[1] } else { throw "lane-start failed: $ls" }
     Dodona @("say", "$lane", "say lanes span the workspace") | Out-Null
-    Start-Sleep -Milliseconds 700
+    Wait-Until { (Dodona @("tail", "$lane", "10")) -match 'lanes span the workspace' } 20000 'the lane answers' | Out-Null
     Check 'lanes_are_workspace_wide' ((Dodona @("tail", "$lane", "5")) -match 'lanes span the workspace') ''
 
     # ---- one store, one causal chain for the whole workspace ----
@@ -199,7 +199,7 @@ for r in db.execute('''SELECT detail FROM events WHERE kind='ticket_created' ORD
         $p = Start-Process $dodona -ArgumentList "daemon", "--workspace", $wsId -PassThru -NoNewWindow `
             -RedirectStandardOutput "$out\daemon-$wsId.out" -RedirectStandardError "$out\daemon-$wsId.err"
         [void]$extraDaemons.Add($p)
-        Start-Sleep -Milliseconds 800
+        Wait-Daemon (& $dodona where --workspace $wsId --json | Out-String | ConvertFrom-Json).ctlPipe | Out-Null
         $p
     }
 
