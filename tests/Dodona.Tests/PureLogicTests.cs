@@ -894,6 +894,66 @@ public class ProjectResolutionTests
     [Fact]
     public void A_work_lane_in_the_neutral_directory_is_named_as_neutral() =>
         Assert.Equal("neutral", Projects.Field("work", Neutral, One, Neutral));
+
+    // ------------------------------------------------- ScopeField: which project a MANAGER is for
+    //
+    // The second half of the same question, and it needs its own answer because Field CANNOT give
+    // one: Field reads `lanes.cwd`, and a brain's cwd is the neutral directory on purpose (P5.8 --
+    // a manager inside a project loads that project's CLAUDE.md and skills, i.e. a judgement agent
+    // that can end up running `/ship`). So with a brain per project (P5.6), "which project is this
+    // brain for" had no surface anywhere a person or a check could read.
+
+    /// <summary>A manager in a two-project workspace names its project. This is the whole new
+    /// fact: two brains, and nothing else in the product can tell them apart.</summary>
+    [Fact]
+    public void A_manager_in_a_multi_project_workspace_names_the_project_it_is_for() =>
+        Assert.Equal(Beta, Projects.ScopeField("brain", Beta, Two));
+
+    /// <summary>THE BYTE-FOR-BYTE RULE, and the reason this function is on the 1-second loop at
+    /// all. Every phase of docs/LOCATIONS-PLAN.md leaves the one-project case identical -- the
+    /// operator's own machine is a one-project workspace -- so with one project there is exactly
+    /// one possible answer and the field would be pure noise.</summary>
+    [Theory]
+    [InlineData("brain")]
+    [InlineData("brain-hi")]
+    [InlineData("router")]
+    [InlineData("compressor")]
+    public void A_one_project_workspace_says_nothing_about_scope(string role) =>
+        Assert.Null(Projects.ScopeField(role, Alpha, One));
+
+    /// <summary>A WORK lane's scope is never printed here: its folder IS its project, so
+    /// <see cref="Projects.Field"/> already answers it and two fields saying one thing is how a
+    /// reader learns to stop reading either.</summary>
+    [Theory]
+    [InlineData("work")]
+    [InlineData("dispatcher")]
+    [InlineData(null)]
+    public void A_work_lane_has_no_scope_field(string? role) =>
+        Assert.Null(Projects.ScopeField(role, Beta, Two));
+
+    /// <summary>A row with no registration says nothing rather than `none`: "this lane was never
+    /// scoped" and "this lane is scoped to a project that left" are different facts, and the
+    /// second one has its own answer below.</summary>
+    [Fact]
+    public void An_unregistered_manager_says_nothing()
+    {
+        Assert.Null(Projects.ScopeField("brain", "", Two));
+        Assert.Null(Projects.ScopeField("brain", null, Two));
+    }
+
+    /// <summary>P5.5 MADE VISIBLE. A brain registered to a project the workspace no longer has is
+    /// reaped -- but between the detach and the reap a person reading `status` must be able to see
+    /// WHY, or the disappearance is the silent kind this codebase keeps paying for.</summary>
+    [Fact]
+    public void A_manager_registered_to_a_departed_project_is_named_as_gone() =>
+        Assert.Equal($"gone ({Beta})", Projects.ScopeField("brain", Beta, new[] { Alpha, @"C:\ws\gamma" }));
+
+    /// <summary>Case is folded, because one side comes from a `ProcessStartInfo` or a command line
+    /// and the other from the registry, while `==` is binary-collated. `C:\WS\Beta` reading as a
+    /// departed project would reap a healthy brain over a folder rename.</summary>
+    [Fact]
+    public void Scope_is_matched_case_insensitively() =>
+        Assert.Equal(@"C:\WS\BETA", Projects.ScopeField("brain", @"C:\WS\BETA", Two));
 }
 
 /// <summary>

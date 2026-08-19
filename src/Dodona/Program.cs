@@ -166,7 +166,7 @@ async Task<int> Dispatch() => cmd switch
     // gives: this is an operator-explicit registry edit, exactly like workspace-create, and the
     // partial unique index is the arbiter rather than a process.
     "project-alias" => WorkspaceEdit((r, id) => r.AddProjectAlias(id, RequireMember(), pos[0], out var e) ? null : e, "project aliased"),
-    "workspace-forget" => WorkspaceEdit((r, id) => r.Forget(id, out var e) ? null : e, "forgotten"),
+    "workspace-forget" => WorkspaceEdit((r, id) => r.Forget(id, out var e) ? null : e, "forgotten", tellDaemonForgotten: true),
     "where" => Where(),
     "ps" => Ps(),
     "stop-all" => StopAll(),
@@ -191,7 +191,9 @@ async Task<int> Dispatch() => cmd switch
     "lane-stop" => Client(new { cmd = "lane-stop", lane = long.Parse(pos[0]) }),
     "lane-respawn" => Client(new { cmd = "lane-respawn", lane = long.Parse(pos[0]), project = One("project") }),
     "lane-rename" => Client(new { cmd = "lane-rename", lane = long.Parse(pos[0]), title = pos[1] }),
-    "brain-start" => Client(new { cmd = "brain-start", hi = opts.ContainsKey("hi") }),
+    // --project: WHICH project's brain (P5.3). Omitted means the workspace's first project,
+    // which is byte-for-byte what "the brain" meant before a brain was per project.
+    "brain-start" => Client(new { cmd = "brain-start", hi = opts.ContainsKey("hi"), project = One("project") }),
     "say" => Client(new { cmd = "say", lane = long.Parse(pos[0]), text = pos[1] }),
     "tail" => Client(new { cmd = "tail", lane = long.Parse(pos[0]), n = pos.Count > 1 ? int.Parse(pos[1]) : 20 }),
     "status" => Client(new { cmd = "status" }),
@@ -356,7 +358,8 @@ int AttachOne(Registry reg, string wsId, string path)
 
 string RequireMember() => One("member") ?? (pos.Count > 0 ? pos[0] : throw new ArgumentOutOfRangeException(nameof(opts), "--member <path> required"));
 
-int WorkspaceEdit(Func<Registry, string, string?> op, string verb, string? tellDaemonProjectGone = null)
+int WorkspaceEdit(Func<Registry, string, string?> op, string verb, string? tellDaemonProjectGone = null,
+                  bool tellDaemonForgotten = false)
 {
     // Ws() BEFORE the registry opens, so the name we report is the one before a rename.
     var was = Ws();
@@ -364,6 +367,17 @@ int WorkspaceEdit(Func<Registry, string, string?> op, string verb, string? tellD
     var err = op(reg, was.Id);
     if (err is not null) return Fail($"error: {err}");
     Console.WriteLine($"{verb}: workspace {was.Name} ({was.Id})");
+    // P2.7: FORGET REACHES ITS DAEMON TOO. `Registry.Forget` deletes every `members` row in one
+    // transaction and was wired to nothing, so forgetting a live workspace left agents in folders
+    // the registry no longer records -- and orphaned the daemon, which `publish --all` resolves
+    // by id from that registry and can therefore never swap again.
+    //
+    // Same `TellIfLive` as detach, and for the same two reasons: never summon (a summoned daemon
+    // runs its warm-up, and a registry edit that starts four haiku processes is the §3.2 incident
+    // in a new costume) and never fail (the forget has already succeeded and is what the operator
+    // asked for). A sleeping workspace needs no message: it holds no live lanes, and the rows are
+    // covered when something wakes it.
+    if (tellDaemonForgotten) TellIfLive(was.Id, new { cmd = "workspace-forgotten" });
     // P2.6 / trap T4: a registry edit that removes a project must reach the LANES in it. These
     // are registry writes made here in the CLI, and until now they touched no lane row at all --
     // so a live agent kept working in a folder this workspace no longer owns, and the daemon had
@@ -1450,7 +1464,7 @@ static void Help() => Console.WriteLine("""
       dodona lane-rename <lane> <TITLE> | lane-respawn <lane> [--project <path>] | lane-stop <lane>
       dodona lane-collapse <lane> | lane-expand <lane>
               the grid GROWS with the work; you collapse what you are not dealing with
-      dodona brain-start [--hi]             (warm the dispatcher brain; hi = expensive tier)
+      dodona brain-start [--hi] [--project <path>]  (warm a project's brain; hi = expensive tier)
     ui (§8/§17 — talks to the DodonaUi process, not the daemon):
       dodona ui type <text>                 (submit through the same path as Enter — no focus)
       the box is multiline: Enter sends, Shift+Enter is a new line, and the grip drags it taller

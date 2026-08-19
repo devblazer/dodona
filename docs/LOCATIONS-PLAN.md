@@ -549,6 +549,17 @@ be one instantaneous pipe read.** A shim's pipe name blinks out of the namespace
 — 8 of 192 reads over 1.5 s saw nothing while the shim was alive — and a single read declared
 4–7 lanes dead per restart. Use `LaneLiveness` (the union of pipe **and** live recorded pid).
 
+**Handed to Phase 3 by Phase 5 (deliberately NOT numbered — two lanes have already collided on
+one P-number, so this is prose for whoever owns Phase 3 to number as they see fit).** A brain is
+now per project, and `EnsureBrainAsync` / `AskBrainHiAsync` take an optional project which
+defaults to the workspace's first — byte-for-byte today's behaviour. **Two call sites inside
+`RouteInput` still take that default**, and they are the two Phase 3 owns: the escalation to the
+expensive tier ([Daemon.cs:3393](../src/Dodona/Daemon.cs#L3393)) and whatever rung 2/3 ends up
+asking. Once a sentence has been resolved to a project, pass it — a classifier reasoning about
+project B's lanes while the answer comes from project A's manager is the cross-project confusion
+this phase removed everywhere it could reach. `BrainReview` already does this: it resolves the
+reviewed lane's own registration and asks that project's brain.
+
 **Checks that must change:**
 - `concierge:226-228` loops over literal rung names. A new rung needs a name here **and** a
   fixture producing it. Renaming any rung breaks six checks at once.
@@ -915,6 +926,153 @@ healthy is ever killed.
 **Prove red first:** two projects get two distinct brains; a restart adopts both and retires
 neither; a stuck brain in project A does not block project B; a detached project's brain is
 reaped.
+
+**Becomes impossible:** a healthy brain shut down because another project has one; a brain
+answering questions about a project the workspace no longer has; one wedged utility agent
+blocking judgement for every project at once; N projects quietly becoming 2N model-backed
+processes with nothing capping them.
+
+### Delivered 2026-08-19 (branch `loc-p5`), and what verifying it corrected
+
+**Both of the plan's claims about the code were verified against the source, and one of them
+needed restating.**
+
+- **`_shutdownAsked` really is never cleared.** Two references in the whole tree — one `Add`,
+  one declaration. No `Remove`, no `Clear`. It is now `_shutdownAttempts`, a bounded three
+  pokes per lane per daemon, *and* scoped by (role, project): the first fixes "a shim that
+  would have accepted a second `##shutdown` is never asked again", the second fixes "one
+  wedged brain refuses to let a brain be created for every project".
+- **"`EnsureBrainAsync` for project A can silently return project B's session" is a claim about
+  the code AFTER a project parameter exists, and the row should have said so.** Before this
+  phase `EnsureBrainAsync(bool hi)` took no project at all, so there was exactly one brain per
+  role per workspace and no cross-project confusion was reachable. What was verified is the
+  mechanism the row is really about, and it is worse than a wrong return: **reconcile's
+  adoption loop assigned `_brainLo = l.Id` unconditionally for every brain row it adopted**, so
+  with two brains the scalar held whichever was iterated last — and the retirement loop's
+  `keep` was that same single value, so the other healthy session was shut down and announced
+  as a repair. The scalar was not a latent risk; it was the live mechanism of the bug.
+
+**The registration, in one line:** `lanes.project` (v10) is the row that says a manager should
+exist for (role, project). Reconcile reaps a management lane whose project is no longer
+attached, and a **second claimant on one slot** — never the Nth brain. Compressors are exempt
+from the duplicate rule because a pool is *meant* to have several per project (§5).
+
+**Two safety properties that are easy to lose and were the most dangerous part of the phase:**
+
+- **The reaper only runs on a membership list the registry actually gave us**
+  (`Daemon.TrustedProjects`). `Members()` degrades to `{_primary}` when the registry cannot be
+  opened — deliberately — and fed to a reaper that reads as *every project but the first is
+  gone*, i.e. every brain outside the first project killed. That is this phase's own bug in the
+  costume of its fix. A forgotten workspace lands here too (`ById` returns null), which is
+  correct: forget is handled explicitly by P2.7 below, where the intent is known.
+- **`RegistrationKey` never answers `""` for a manager.** An empty registration reads as
+  unregistered, which the reaper acts on — so a v10 stamp that failed quietly (locked store,
+  store copied out of a suite) would kill a healthy brain. A manager with no stamp resolves to
+  the first project, which is exactly what "the brain" meant before this phase.
+
+**The v10 migration** adds one `COLLATE NOCASE` column and takes the pre-migration backup the
+`Store` constructor already writes (`store.db.pre-v9`), announced with its path — the daemon
+refuses to hot-swap DOWN across a schema version, so this is a one-way door unless the operator
+knows where the key is. The stamping pass follows P0.3's shape: a work lane is stamped from its
+cwd (a fact), a MANAGEMENT lane is stamped to the first project and that is **announced as an
+assumption** (`lane_project_assumed`), and anything unresolvable is reported and left blank
+(`lane_project_unresolved`) rather than guessed.
+
+**P5.7's cap** is `maxBrains` in `dodona.json`, default **6** — three projects fully warm, or
+six on the cheap tier, and deliberately out of reach of a one-project workspace (which can want
+at most 2). It **refuses and never evicts**: making room by shutting a brain down is the
+count-and-kill loop growing back somewhere else. The refusal is announced once per daemon and
+names the setting, because a project with no judgement is a degrade and a silent degrade is a
+bug.
+
+**P5.8 held.** Brains keep `NeutralCwd()`; `key` is passed as a separate `scope` argument, and
+the comment at the spawn site says the two are two arguments because they are two facts.
+
+| check | suite | what HEAD did instead |
+|---|---|---|
+| `two_projects_get_two_distinct_brains` | brain | one brain for the workspace; the second request returned the first |
+| `a_brains_project_is_recorded_on_its_lane_row` | brain | `no such column: project` |
+| `status_names_the_project_a_brain_is_scoped_to` | brain | no `scope=` field exists |
+| `restart_adopts_a_brain_for_every_project` | brain | one brain adopted, the other retired |
+| `no_healthy_brain_is_retired_as_a_surplus` | brain | a `brain_surplus_retired` row |
+| `reconcile_lists_a_brain_per_project` | brain | `brain=<one id>` |
+| `a_detached_projects_brain_is_reaped` | brain | the brain stayed alive, scoped to a project that had left |
+| `a_wedged_brain_in_one_project_does_not_block_another` | brain | no brain for the other project at all |
+| `the_brain_cap_refuses_a_new_project` | brain | no cap exists |
+| `forgetting_a_workspace_stops_its_agents` | workspace | the shim was still alive |
+| `forgetting_a_workspace_stops_its_orphaned_daemon` | workspace | the daemon was still running |
+
+**Two checks came back VACUOUS and were REWRITTEN rather than shrugged at**, and both were
+vacuous the same way — the defect is unreachable at HEAD, so the assertion was true for the
+wrong reason:
+
+- `restart_adopts_a_brain_for_every_project` compared `before` against `after`. Against a build
+  with one brain per WORKSPACE both lists are `[1]`, they match, and it passes having asserted
+  nothing. `$after.Count -eq 2` is now part of the assertion.
+- `no_healthy_brain_is_retired_as_a_surplus` asserted zero `brain_surplus_retired` rows. A build
+  that never makes two brains never makes a surplus either. It now also requires both brains to
+  still be alive.
+
+Five are **negative guards, VACUOUS by construction** and kept for the reason Phase 0c kept
+`an_explicit_root_beats_the_inherited_env`: `a_one_project_workspace_says_nothing_about_scope`,
+`a_brain_in_a_project_that_stayed_is_untouched`, `the_wedged_brain_was_never_called_gone`,
+`the_brain_cap_never_evicts_an_existing_brain`, and
+`a_forgotten_workspaces_transcripts_survive`. Each is the only line in the tree that would
+notice a reaper going too wide, a cap that evicts, or a one-project workspace starting to print
+a new field. `dev prove unit:` refuses by design (P1.6), so `Projects.ScopeField`'s six unit
+checks are stated as unprovable rather than reported as verdicts.
+
+**Both guards were then seen RED by deliberate break, because "no code state makes it fail" is
+not the same as "it works"** (CLAUDE.md §0.3: a new check is worth nothing until it has been seen
+red). Two one-line breaks, each built and run, then reverted:
+
+| break | brain suite | what it proves |
+|---|---|---|
+| the reap slot keyed on `role` only (`$"{l.Role}\|DELIBERATE-BREAK"`) — the deleted loop's own rule | **6 failed**, `restart_adopts_a_brain_for_every_project: before=[1,2] after=[1]`, project B's row `dead` | the (role, project) key is what stops a healthy brain being killed. This is the original bug, reproduced on demand. |
+| the not-attached test forced true (`Projects.Of(livePro, key) is null` → `true`) | **12 failed**, including `a_brain_in_a_project_that_stayed_is_untouched` and `restart_adopts_the_brain_it_already_had: before=[1] after=[]` in the ONE-project workspace | a reaper that widens until everything matches kills every brain everywhere, and the negative guards catch it. |
+
+The second break also earned a suite fix on its own: `the_wedged_brain_is_provably_alive` reported
+`<could not hold pipe 'dodona-…-lane-1': The operation has timed out.>` as a **failure detail**
+where it would previously have thrown out of a `finally`-only `try`, printed no tally, and made
+`dev prove` report every check in the file as MISSING. That happened for real on the first proof
+of this phase — twenty MISSING verdicts for a suite that had simply died in a probe.
+
+**Checks that had DEGRADED, each fixed rather than relaxed** — the point of the plan's warning
+was that all three would have kept passing:
+
+- `brain:333`'s `LIMIT 1` now selects the brain **for this project**. With N it picked an
+  arbitrary row and the whole wedge/refusal/never-called-gone block became a green about
+  whichever one sqlite happened to return first.
+- `brain:256-258`'s `brain=\d+` now matches `brains=[<leaf>=<lane>]` for the named project. The
+  event key was renamed *so that the old pattern cannot match*, which is what turns a silent
+  degrade into a red.
+- `brain:58-59, 246-248, 250-253`'s `COUNT(*) = 1` are per-project counts. The value is
+  unchanged in a one-project workspace; the QUESTION changed, and it stays meaningful with N.
+
+**A fixture bug this cost, worth knowing before adding v11.** `workspace-acceptance`'s pre-v9
+section stands the store back up in the v8 shape and sets `PRAGMA user_version = 8` — but it did
+not drop v10's column, so v10's `ADD COLUMN` failed with "duplicate column" **inside the `Store`
+constructor**. The daemon died before opening its control pipe and **four checks about repo
+identity went red pointing at nothing that was broken**. The drop is now keyed on the column
+existing rather than on a version number, so it survives v11 and still works under `dev prove`
+against a build that has no v10.
+
+### P2.7, handed over by Phase 2 and delivered here
+
+`workspace-forget` deletes every `members` row in one transaction and was wired to nothing, so
+forgetting a live workspace stranded agents in folders the registry no longer records — the same
+trap-T4 state Phase 2 closed for `detach`. It also **orphans the daemon**, which is why it
+belonged with this phase's reaping: `publish --all` resolves swap targets by id *from the
+registry*, so a daemon whose workspace has been forgotten can never be hot-swapped again. It
+becomes an un-updatable process holding agents nothing lists.
+
+`workspace-forget` now sends `workspace-forgotten` through the same `TellIfLive` path detach
+uses — **never summoning** (a summoned daemon's warm-up is four real haiku processes, and a
+registry edit that starts them is the §3.2 incident in a new costume) and **never failing** (the
+edit has already succeeded and is what the operator asked for). The daemon stops every agent,
+retires the managers, marks work lanes `unreachable` with their transcripts intact (§12), and
+then stops itself. It is reversible and says so: forget keeps the store directory, so
+re-creating the workspace brings all of it back.
 
 ---
 

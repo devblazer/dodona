@@ -212,6 +212,52 @@ static class Projects
         return result;
     }
 
+    // -------------------------------------------------- P5.6: which project a MANAGER is for
+
+    /// <summary>
+    /// The roles whose project is a SCOPE rather than a location — a manager is a per-project
+    /// scope and not a process (docs/GLOSSARY.md, decision D-L1), so these lanes are scoped to
+    /// a project while running in the neutral directory (P5.8). `dispatcher` is not here: it is
+    /// only a UI row and has no process at all.
+    /// </summary>
+    public static bool IsManagementRole(string? role) =>
+        role is "brain" or "brain-hi" or "router" or "compressor";
+
+    /// <summary>
+    /// What `status` SAYS about the project a management lane is scoped to — or null for "say
+    /// nothing", which is what keeps the one-project case byte-for-byte identical.
+    ///
+    /// This is the second half of <see cref="Field"/> and it exists because the first half
+    /// cannot answer the question. `Field` reads `lanes.cwd`, and a brain's cwd is the neutral
+    /// directory on purpose, so `Field` correctly says nothing about it — which left "which
+    /// project is this brain for" with no surface anywhere a person looks. With one brain per
+    /// workspace that was fine; with one per project it is the whole fact.
+    ///
+    /// Three answers:
+    ///   * null              — nothing to say: this is not a management lane, or the workspace
+    ///                         has one project (exactly one answer, so the field is noise and a
+    ///                         one-project workspace must not start printing a new one), or the
+    ///                         lane has no registration at all (a row that never spawned).
+    ///   * the project path  — this manager is for that project.
+    ///   * `gone (…)`        — the lane is registered to a project this workspace no longer has.
+    ///                         That is P5.5's state made visible rather than merely acted on:
+    ///                         a brain whose project was detached is reaped, and a person
+    ///                         reading `status` between the detach and the reap should see why.
+    ///
+    /// Pure, no I/O, so the rule about what a one-project workspace must NOT print is
+    /// re-checkable on the ~1 second `unit` loop rather than discovered by an operator.
+    /// </summary>
+    public static string? ScopeField(string? role, string? project, IReadOnlyList<string> projects)
+    {
+        if (!IsManagementRole(role)) return null;
+        if (string.IsNullOrWhiteSpace(project)) return null;
+        // ONE PROJECT MEANS ONE ANSWER. The operator's own machine is a one-project workspace
+        // and every phase of docs/LOCATIONS-PLAN.md leaves that case unchanged; printing a
+        // field whose value is never in doubt is the noise the omission rules exist to avoid.
+        if (projects.Count <= 1) return null;
+        return Of(projects, project) is not null ? project : $"gone ({project})";
+    }
+
     // ------------------------------------------------------------------ T1: one folder, said once
 
     /// <summary>The lead-in of the sentence a plain lane's system prompt uses to name its

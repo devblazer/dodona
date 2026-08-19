@@ -109,6 +109,19 @@ nothing while looking installed).
   Land it in a variable first (`$all = ... | ConvertFrom-Json`, then `@($all) | Where…`).
   This turned three acceptance checks into silent no-ops before it was noticed.
 - **A `.ps1` that fails to PARSE never reaches `finally`** — everything it started leaks.
+- **A plain `function f([string]$x)` SILENTLY SWALLOWS extra arguments into `$args`.** So
+  `$(Rows "SELECT …" -replace '\s+', ' ')` parses as `Rows` with four arguments: the query runs,
+  the `-replace` never happens, and there is no error anywhere. Written inside a check's detail
+  string it produces a wrapped, unreadable diagnosis at exactly the moment you need to read one;
+  written anywhere that consumes the value it is a wrong answer. Parenthesise the call:
+  `$((Rows "SELECT …") -replace '\s+', ' ')`.
+- **A `Store` migration that THROWS kills the daemon in its constructor**, before the control
+  pipe exists — so `Wait-Daemon` times out and every check in that section goes red pointing at
+  whatever it was really testing. Cost a debugging round in Phase 5: a fixture that stands a
+  store back up in an older shape (`PRAGMA user_version = 8`) must drop the columns of **every**
+  later version, or that version's `ADD COLUMN` fails with "duplicate column". Key such a drop on
+  the column existing, never on a version number — the same suite runs under `dev prove` against
+  a build that does not have the column at all.
 - **WPF**: implicit usings omit `System.IO`; with `AcceptsReturn` the TextBox class
   handler eats Enter before instance `KeyDown` (use `PreviewKeyDown`);
   `RenderTargetBitmap` renders in the element's own coordinate space (capture the Window,

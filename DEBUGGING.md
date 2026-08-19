@@ -287,14 +287,42 @@ not badge, toast, or set presence — blocked-on-you is code-derived from ticket
 today, and handing a small model the badge is a policy decision `docs/LANE-LIFECYCLE.md`
 §4 has not taken.
 
-## The schema (v9 — `PRAGMA user_version`)
+## The schema (v10 — `PRAGMA user_version`)
 
 *(This heading said v7 while the store was on v8. It is `Ver.Schema` in
 `src/Dodona/Ver.cs` and the highest `PRAGMA user_version` in `Store.Migrate`; those two
 are the authority and they must agree.)*
 
 - **`lanes`** — `id, title, state (alive|unreachable|dead), pipe_name, session_id,
-  created_ts`. The session_id is the resume handle; the pipe is the reattach handle.
+  presence, role, cwd, project, created_ts`. The session_id is the resume handle; the pipe
+  is the reattach handle.
+  **Two location columns, and the distinction is load-bearing (v10, P5.1):** `cwd` (v8) is
+  where the lane's process RUNS; `project` is which project it is FOR. For a work lane they
+  are the same folder, and `project` is a cache of what `Projects.Of(cwd)` derives. For a
+  MANAGEMENT lane they are deliberately different: a brain runs in `Paths.NeutralDir` on
+  purpose (a manager inside a project loads that project's `CLAUDE.md` and skills, i.e. a
+  judgement agent that can end up running `/ship`), so its cwd can never say which project
+  it serves.
+  **`project` is a REGISTRATION, and it is what decides whether a brain lives.** A brain is
+  valid iff a row says it should exist for (role, project) — operator, 2026-08-19: *"If it's
+  not tracked, it's not valid. Why must you do some weird kill to count?"* Reconcile reaps a
+  management lane whose `project` is no longer a project of the workspace, and a second
+  claimant on one (role, project) slot; it reaps nothing for being the Nth brain.
+  Compressors are exempt from the duplicate rule — a pool is *meant* to have several per
+  project.
+  Empty means "not resolved yet": every pre-v10 row is, and `Store.StampLaneProjects` fills
+  them in at daemon start (the store knows nothing about workspace membership, so the daemon
+  resolves and the store writes — the same split as v9's `#unresolved:` repo paths). A work
+  lane is stamped from its cwd; a MANAGEMENT lane is stamped to the workspace's first project
+  and that is **announced as an assumption** (`lane_project_assumed`), because before v10
+  there was one brain per workspace and no row records which project it was for. Anything
+  unresolvable is reported (`lane_project_unresolved`), never guessed.
+  **`RegistrationKey` never answers "" for a manager**, and that matters more than it looks:
+  an empty registration reads as *unregistered*, which the reaper acts on — so a stamp that
+  failed quietly (a locked store, a store copied out of a suite) would kill a healthy brain.
+  And the reaper only ever runs on a membership list the registry actually gave us
+  (`TrustedProjects`): `Members()` degrades to the first project alone when the registry
+  cannot be opened, and fed to a reaper that reads as *every project but the first is gone*.
 - **`pane_events`** — everything a pane would show, in order: `lane_id, ts, kind, body,
   seq, raw, acked, compressed`. `compressed` is the short readable rendering (§5), NULL
   when the row was not eligible or the compressor never answered; `body` is never
@@ -360,6 +388,16 @@ are the authority and they must agree.)*
 - **`events`** — the causal chain: `ts, kind, lane_id, detail`. Every daemon action
   writes here. Lane kinds: `daemon_start`, `reconcile_done`, `shim_spawned`,
   `lane_connected`, `lane_unreachable`, `lane_pipe_lost`, `say`, `daemon_stop`.
+  `reconcile_done`'s detail is `connected=<n> brains=[<leaf>=<lane>,…] brains-hi=[…]
+  compressors=<n>`. **The key is `brains=`, plural, and the rename is deliberate (v10, P5.6):**
+  it was `brain=<lane>`, and the check that read it regexed `brain=\d+` — which a per-project
+  `brain=3,7` would have kept matching while asserting nothing about either brain. Renaming
+  the key makes the old pattern impossible to match, so a check that would have degraded into
+  a green proving nothing goes red and has to be rewritten. `dodona status` answers the same
+  question per lane, as `scope=<project>` — printed only for a management lane in a workspace
+  with more than one project, because with one project there is exactly one answer and a
+  one-project workspace must not start printing a new field (`Projects.ScopeField`, on the
+  `unit` loop).
   Project kinds (LOCATIONS-PLAN Phase 2): `lane_config` (which project's dodona.json
   configured this lane, and the permission mode it got — `source=argv` when read back out of
   the real claude argv, `source=config` when the child takes no claude flags),
@@ -426,6 +464,24 @@ are the authority and they must agree.)*
   how 14 orphaned BRAIN lanes were manufactured, one per daemon start).
   `utility_predecessor_live` (a spawn was REFUSED because the predecessor is still running;
   routing degrades loudly for that one call and retries on the next — never a second orphan).
+  The refusal is scoped to **(role, project)** and the poke is bounded to three attempts per
+  lane per daemon (v10, P5.4): it used to be role-only over a `HashSet` that was never
+  cleared, so one wedged brain refused to let a brain be created for *every* project, forever,
+  and a shim that would have accepted a second `##shutdown` was never asked again.
+  `brain_unregistered` (a management lane was stopped because its registration is not valid —
+  its project left the workspace, another lane already holds that (role, project) slot, or the
+  workspace was forgotten). **`brain_surplus_retired` is GONE**, with the count-and-kill loop
+  that wrote it: it kept ONE lane id per role and shut every other alive lane of that role
+  down as "a duplicate left by a fixed leak", which with a brain per project killed N-1
+  healthy sessions on every daemon start — including every auto-publish swap — and announced
+  it as a repair. An old store may still hold those rows; they are history, not behaviour.
+  `brain_cap_reached` (`maxBrains` in `dodona.json`, default 6: a new project gets no judgement
+  agent rather than an existing one being evicted — a cap that made room by shutting a brain
+  down would be the count-and-kill loop growing back somewhere else).
+  `lane_projects_stamped` / `lane_project_assumed` / `lane_project_unresolved` (the v10
+  migration's own report, per the `lanes.project` notes above).
+  `reap_skipped_untrusted_projects` (the registry did not answer, so nothing was reaped for
+  being unregistered this start — see `TrustedProjects`).
   Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
   `swap_forced`, `swap_refused`, `swap_failed`, `daemon_handoff`, `binary_gc`,
   `binary_gc_skipped`. **If a state change happened with no event row naming why, that

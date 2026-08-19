@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
@@ -43,7 +44,25 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
                      // says its own confidence is low, the SAME question goes to the
                      // expensive tier (operator: "unless it's not very confident, then
                      // route to a more expensive model"). Silent unless it disagrees.
-                     bool Brain = true, string BrainModel = "haiku", string BrainEffort = "low")
+                     bool Brain = true, string BrainModel = "haiku", string BrainEffort = "low",
+                     // THE CEILING ON A BRAIN PER PROJECT (P5.7). Measured before that phase:
+                     // each lane is two OS processes, and the steady state was 4 lanes / 8
+                     // processes. Ten projects would be 13 / 26, peaking at 23 / 46 with every
+                     // `brain-hi` warm -- ten of them opus. Quota is the scarce resource (§2.6),
+                     // so a per-project brain needs a limit that is not "however many projects
+                     // you attached".
+                     //
+                     // 6 is three projects fully warm, or six on the cheap tier alone, and it
+                     // is deliberately out of reach of a ONE-project workspace (which can only
+                     // ever want 2, one per tier) so that case stays byte-for-byte unchanged.
+                     //
+                     // IT REFUSES; IT NEVER EVICTS. Making room by shutting an existing brain
+                     // down is the count-and-kill loop growing back somewhere else, and it
+                     // would kill a session mid-question to serve one that is not. A refusal
+                     // degrades that project to no judgement, which every caller already
+                     // handles (the brain is an improver, never a gate) and which announces
+                     // itself out loud rather than silently.
+                     int MaxBrains = 6)
 {
     public PolicyRule[] Rules => Policy ?? Dodona.Policy.Default;
 
@@ -97,7 +116,8 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
             d.RootElement.TryGetProperty("autoPublish", out var ap) && ap.ValueKind == JsonValueKind.True,
             Str("autoPublishProject", ""),
             !(d.RootElement.TryGetProperty("brain", out var br) && br.ValueKind == JsonValueKind.False),
-            Str("brainModel", "haiku"), Str("brainEffort", "low"));
+            Str("brainModel", "haiku"), Str("brainEffort", "low"),
+            Num("maxBrains", 6));
     }
 }
 
@@ -112,10 +132,39 @@ sealed class Daemon
     readonly Store _store;
     readonly Dictionary<long, LaneRuntime> _lanes = new();
     readonly SemaphoreSlim _routerLock = new(1, 1);   // one classification at a time on the warm session
-    readonly SemaphoreSlim _brainLoLock = new(1, 1), _brainHiLock = new(1, 1);
-    long _brainLo = -1, _brainHi = -1;                // lane ids of the two brain tiers
+    /// <summary>The two brain tiers, PER PROJECT (P5.3, decision D-L8) — a manager is a
+    /// per-project scope (GLOSSARY), so "the brain" is not one thing any more.
+    ///
+    /// THESE WERE TWO SCALARS AND THAT IS THE BUG, not a style point. Reconcile's adoption loop
+    /// assigned `_brainLo = l.Id` for every brain row it adopted, so with two projects the
+    /// second overwrote the first — and the surplus loop then shut "the other one" down as a
+    /// leak. Verified by reading the code, not inferred: adoption keeps the last row iterated
+    /// and `keep` is that single value.
+    ///
+    /// Ordinal-ignore-case because the keys are filesystem paths and `=` is not. `C:\Proj` and
+    /// `c:\proj` as two keys is two brains over one project, reached by a folder rename — the
+    /// same drift schema 9 records for repo names.
+    ///
+    /// CONCURRENT, and that is not belt-and-braces: `EnsureBrainAsync` is reached from the
+    /// startup warm-up task, from the control-pipe handler, and from `BrainReview`'s
+    /// fire-and-forget task — all of which can be in flight at once. A `long` field tolerated
+    /// that; a plain `Dictionary` written from three threads can corrupt its buckets, so
+    /// replacing the scalars with one would have been a regression dressed as a fix.</summary>
+    readonly ConcurrentDictionary<string, long> _brainLo = new(StringComparer.OrdinalIgnoreCase),
+                                                _brainHi = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>One lock per brain SESSION, keyed by lane id — the shape `_compressorLocks`
+    /// below already has, and for the reason stated there. Two scalars were two serialization
+    /// points across every project: project B's review waited behind project A's, on a lock
+    /// that guards a conversation neither of them shares.
+    ///
+    /// Keyed by lane id rather than by project so a stale key cannot outlive the session it
+    /// guards: a project whose brain is reaped and re-created gets a new id and therefore a new
+    /// lock, where a project-keyed dictionary would hand the new session the old lock.</summary>
+    readonly ConcurrentDictionary<long, SemaphoreSlim> _brainLocks = new();
     long _routerLo = -1;                              // lane id of the warm input classifier
     bool _saidNoClassifier;                           // the fallback announces ONCE per daemon
+    bool _saidBrainCap;                               // ...and so does the brain cap (P5.7)
+    bool _saidUntrustedProjects;                      // ...and so does a registry we could not read
     // One lock per compressor session, not one for the pool: the point of a pool is that
     // two lanes finishing at once compress concurrently. A single lock would rebuild the
     // serialization point §3 forbids the dispatcher to be (§5).
@@ -204,6 +253,56 @@ sealed class Daemon
             LaneLiveness.LiveRecords(Paths.WorkspaceDir(_instanceId)).Select(t => t.Lane),
             lanes.Where(l => _lanes.TryGetValue(l.Id, out var rt) && rt.Connected).Select(l => l.Id));
     }
+
+    /// <summary>
+    /// The workspace's projects, AND WHETHER THE ANSWER IS TRUSTWORTHY (P5.2). Reaping decides
+    /// whether to stop an agent, so it may only ever act on a membership list the registry
+    /// actually gave us.
+    ///
+    /// This distinction is the single most dangerous thing in Phase 5. <see cref="Members"/>
+    /// degrades to `{_primary}` when the registry cannot be opened — deliberately, so a locked
+    /// registry leaves a daemon working rather than unable to find any repository at all. But
+    /// fed to a reaper, that fallback says *every project except the first one is gone*, and the
+    /// reaper would shut down every brain outside the first project. That is precisely the
+    /// kill-healthy-sessions bug this phase removes, wearing the costume of the fix.
+    ///
+    /// So: false means "do not reap anything for being unregistered". A workspace that has been
+    /// FORGOTTEN also lands here (`ById` returns null), which is the right conservative answer —
+    /// forgetting is handled explicitly by the `workspace-forgotten` command (P2.7), where the
+    /// intent is known, rather than inferred from an absence.
+    /// </summary>
+    (List<string> Projects, bool Trusted) TrustedProjects()
+    {
+        try
+        {
+            using var reg = new Registry();
+            var ws = reg.ById(_instanceId);
+            if (ws is not null && ws.Members.Count > 0) return (ws.Members.Select(m => m.Path).ToList(), true);
+        }
+        catch { }
+        return (new List<string> { _primary }, false);
+    }
+
+    /// <summary>
+    /// The project a lane row is REGISTERED to (P5.1/P5.2) — the key a manager's validity is
+    /// decided by, and never a guess dressed as a fact.
+    ///
+    /// Reading order, and each rung exists for a case that happened:
+    ///   1. `lanes.project`, when it is set. This is the registration itself.
+    ///   2. the project that owns `lanes.cwd`, for a WORK lane — its folder IS its project, so
+    ///      the column is a cache of a derivable fact and either answer is the same answer.
+    ///   3. the workspace's first project, for a MANAGEMENT lane with neither. That is a lane
+    ///      older than schema 10 whose stamp did not land (a locked store, a store copied out of
+    ///      a suite), and answering "" for it would make it unregistered — i.e. reaped. A brain
+    ///      that has done nothing wrong must not be killed by a migration that failed quietly,
+    ///      so it is adopted for the first project, which is exactly what "the brain" meant
+    ///      before this phase existed.
+    /// </summary>
+    string RegistrationKey(Store.LaneRow l, IReadOnlyList<string> projects) =>
+        l.Project.Length > 0 ? l.Project
+        : Projects.Of(projects, l.Cwd) is string owner ? owner
+        : Projects.IsManagementRole(l.Role) ? _primary
+        : "";
 
     /// <summary>
     /// WHERE A LANE MAY OPEN (docs/LOCATIONS-PLAN.md P2.1). Resolves a requested folder to a
@@ -487,6 +586,47 @@ sealed class Daemon
         // is one reconcile away. Pipes alone declared four to seven live lanes "gone" per
         // restart. LaneLiveness carries the measurement.
         var liveLanes = LaneLiveness.Live(_instanceId, Paths.WorkspaceDir(_instanceId));
+
+        // WHICH PROJECT EVERY EXISTING LANE IS FOR (P5.1's migration), before anything reads a
+        // registration. `lanes.project` is new in schema 10 and every carried-over row is empty,
+        // so a reaper run first would see a store full of unregistered managers and shut the
+        // operator's live brain down — the bug this phase removes, delivered by its own
+        // migration. The store cannot resolve this itself (it knows nothing about membership,
+        // exactly as with schema 9's repo paths), so the daemon does it here, where the registry
+        // is.
+        //
+        // The rule per lane, and it ANNOUNCES an assumption rather than making one quietly:
+        //   * a work lane   -> the project that owns its cwd. A fact.
+        //   * a manager     -> the workspace's FIRST project, ASSUMED and said out loud. Before
+        //                      this phase there was exactly one brain per role for the whole
+        //                      workspace, and the first project is what `_primary` stood in for
+        //                      everywhere else, so it is the only non-arbitrary answer. In the
+        //                      one-project case it is not even an assumption, which is what
+        //                      keeps that case byte-for-byte identical.
+        //   * anything else -> left empty and REPORTED, never guessed (P0.3's shape).
+        var stampProjects = ProjectPaths();
+        var laneStamp = _store.StampLaneProjects(l =>
+            Projects.Of(stampProjects, l.Cwd) is string owner ? (owner, false)
+            : Projects.IsManagementRole(l.Role) ? (_primary, true)
+            : (null, false));
+        if (laneStamp.Stamped.Count > 0 || laneStamp.Assumed.Count > 0 || laneStamp.Unresolved.Count > 0)
+        {
+            _store.Event("lane_projects_stamped", null,
+                $"stamped={laneStamp.Stamped.Count} assumed={laneStamp.Assumed.Count} unresolved={laneStamp.Unresolved.Count}");
+            foreach (var line in laneStamp.Assumed)
+                _store.Event("lane_project_assumed", null, line);
+            foreach (var line in laneStamp.Unresolved)
+                _store.Event("lane_project_unresolved", null, line);
+            if (laneStamp.Assumed.Count > 0)
+                Announce($"[dodona] schema {Ver.Schema}: {laneStamp.Assumed.Count} management lane(s) had no recorded project and were " +
+                         $"assumed to be for {_primary} (the workspace's first project) — `dodona status` shows the scope of each" +
+                         (_store.PreMigrationBackup is string bak ? $"; the pre-migration store is at {bak}" : ""));
+            if (laneStamp.Unresolved.Count > 0)
+                Announce($"[dodona] {laneStamp.Unresolved.Count} lane(s) are in a folder no project of this workspace owns, so they have " +
+                         "no project recorded: " + string.Join("; ", laneStamp.Unresolved));
+        }
+        var adoptProjects = stampProjects;
+
         foreach (var l in _store.LanesAll().Where(l => l.State == "alive" && l.Role != "dispatcher"))
         {
             // The stored pipe name, hoisted once. `LaneRow.Pipe` is declared non-nullable, but
@@ -557,14 +697,24 @@ sealed class Daemon
             //
             // No quota was burned (LANE-LIFECYCLE §2: quota is consumed by turns, not by
             // existing) — but it grows without bound and buries `dodona status`.
+            //
+            // ...AND IT ADOPTS ONE PER PROJECT NOW (P5.3). The pointer was a scalar, so with two
+            // projects the second adoption overwrote the first and the retirement loop below shut
+            // "the other one" down. Keyed on the lane's REGISTRATION, and first-wins on purpose:
+            // the oldest row for a key is the one that has been serving, so a duplicate claimant
+            // is always the newer arrival and the reap below is deterministic rather than
+            // dependent on iteration order.
             if (_lanes.ContainsKey(l.Id))
             {
-                if (l.Role == "brain") _brainLo = l.Id;
-                else if (l.Role == "brain-hi") _brainHi = l.Id;
+                var key = RegistrationKey(l, adoptProjects);
+                if (l.Role == "brain") _brainLo.TryAdd(key, l.Id);
+                else if (l.Role == "brain-hi") _brainHi.TryAdd(key, l.Id);
                 // ...and the ROUTER, for exactly the same reason. It was added later than the
                 // brain and inherited none of the brain's lessons: adopt it or every start
-                // spawns another one, retire the surplus or a store accumulates them.
+                // spawns another one, retire the surplus or a store accumulates them. The router
+                // stays ONE PER WORKSPACE (GLOSSARY) and therefore stays a scalar.
                 else if (l.Role == "router") _routerLo = l.Id;
+                if (l.Role is "brain" or "brain-hi") BrainLock(l.Id);
             }
         }
         // Retire UTILITY lanes whose shim is gone. A brain, router or compressor is fungible
@@ -599,26 +749,74 @@ sealed class Daemon
             _store.Event("utility_lane_reaped", l.Id, $"role={l.Role}: shim gone or shut down, nothing to resume");
         }
 
-        // Retire brain lanes the old bug already leaked. Adopting one is what stops NEW ones
-        // appearing; this clears the ones a store has accumulated, so an existing instance
-        // heals itself on the next start instead of needing the operator to go and count
-        // processes. Utility roles only — a work lane is never retired behind the operator's
-        // back (LANE-LIFECYCLE §2: no eviction, and a parked lane is often deliberate).
-        foreach (var role in new[] { "brain", "brain-hi", "router" })
+        // REGISTRATION, NOT COUNTING (P5.2, decision D-L8). What was here counted: it kept one
+        // `keep` lane id per utility role and shut every other alive lane of that role down as
+        // "a duplicate left by a fixed leak". With a brain per project that kills N-1 HEALTHY
+        // SESSIONS on every daemon start — including every auto-publish swap — and announces it
+        // as a repair.
+        //
+        // The operator's correction, which is what dissolved the blocker: *"You just use a
+        // global system to keep track of that stuff. If it's not tracked, it's not valid. Why
+        // must you do some weird kill to count?"* So a manager is valid iff a row says it should
+        // exist for (role, project), and "surplus" stops being arithmetic:
+        //
+        //   * NO REGISTRATION -> its project is not a project of this workspace any more (P5.5).
+        //     A lifecycle event that did not exist: `project-gone` reaches lanes by CWD, and a
+        //     manager's cwd is the neutral directory, so a brain for a departed project was
+        //     invisible to every existing path and was the obvious source of the next leak.
+        //   * DUPLICATE CLAIMANT -> another lane already holds this exact (role, project). At
+        //     most one can, by definition, so this is never "N brains because N projects" — it
+        //     is two rows over one slot, which is what a store carrying the old leak looks like
+        //     after its lanes are stamped, and it is how such a store still heals itself.
+        //
+        // COMPRESSORS ARE EXEMPT FROM THE DUPLICATE RULE and that is not an oversight: a POOL is
+        // meant to have several members per project (§5 — one lock for the pool would rebuild
+        // the serialization point the design forbids), so "another lane holds this key" is the
+        // normal, configured state for them.
+        //
+        // AND NONE OF IT RUNS ON AN UNTRUSTED MEMBERSHIP LIST. `Members()` degrades to the first
+        // project alone when the registry cannot be opened, which fed to this loop reads as
+        // "every project but the first is gone" — every brain outside the first project reaped,
+        // which is this phase's own bug in the costume of its fix.
+        var (livePro, projectsTrusted) = TrustedProjects();
+        if (!projectsTrusted && !_saidUntrustedProjects)
         {
-            var keep = role switch { "brain" => _brainLo, "brain-hi" => _brainHi, _ => _routerLo };
-            var surplus = _store.LanesAll()
-                .Where(l => l.Role == role && l.State == "alive" && l.Id != keep)
-                .ToList();
-            foreach (var l in surplus)
-            {
-                if (_lanes.TryGetValue(l.Id, out var rt)) { rt.Shutdown(); _lanes.Remove(l.Id); }
-                _store.LaneState(l.Id, "dead");
-                _store.Event("brain_surplus_retired", l.Id, $"role={role}; kept lane {keep}");
-            }
-            if (surplus.Count > 0)
-                Announce($"[dodona] retired {surplus.Count} duplicate {role.ToUpperInvariant()} lane(s) left by a fixed leak — one per daemon start; kept lane {keep}");
+            _saidUntrustedProjects = true;
+            _store.Event("reap_skipped_untrusted_projects", null,
+                $"the registry did not answer for workspace {_instanceId}: nothing is reaped for being unregistered this start");
         }
+        var reapable = _store.LanesAll()
+            .Where(l => l.State == "alive" && Projects.IsManagementRole(l.Role))
+            .ToList();
+        var claimed = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        var reaped = new List<string>();
+        foreach (var l in reapable)
+        {
+            var key = RegistrationKey(l, livePro);
+            var slot = $"{l.Role}|{key}";
+            string? why = null;
+            if (projectsTrusted && (key.Length == 0 || Projects.Of(livePro, key) is null))
+                why = $"role={l.Role}: registered to '{(key.Length > 0 ? key : "(nothing)")}', which is no project of this workspace";
+            else if (l.Role != "compressor" && claimed.TryGetValue(slot, out var holder))
+                why = $"role={l.Role} project={key}: lane {holder} already holds that registration";
+            if (why is null) { claimed.TryAdd(slot, l.Id); continue; }
+
+            // Ask the SHIM to go, over its own pipe — it takes the child tree with it and exits
+            // cleanly, which needs no pid bookkeeping (CLAUDE.md §4). Walking away instead is
+            // what left three unkillable shims running out of the compiler's output directory.
+            if (_lanes.TryGetValue(l.Id, out var rrt)) { rrt.Shutdown(); _lanes.Remove(l.Id); }
+            else if (l.Pipe is { Length: > 0 }) await LaneRuntime.ShutdownShimAsync(l.Pipe);
+            _brainLocks.TryRemove(l.Id, out _);
+            if (l.Role == "brain" && _brainLo.TryGetValue(key, out var lo) && lo == l.Id) _brainLo.TryRemove(key, out _);
+            if (l.Role == "brain-hi" && _brainHi.TryGetValue(key, out var hi) && hi == l.Id) _brainHi.TryRemove(key, out _);
+            if (l.Role == "router" && _routerLo == l.Id) _routerLo = -1;
+            _store.LaneState(l.Id, "dead");
+            _store.Event("brain_unregistered", l.Id, why);
+            reaped.Add($"lane {l.Id} ({l.Role})");
+        }
+        if (reaped.Count > 0)
+            Announce($"[dodona] stopped {reaped.Count} management agent(s) with no valid registration: {string.Join(", ", reaped)} — " +
+                     "each was for a project this workspace no longer has, or was a second claimant on one project's slot");
 
         // Re-deploy the claim gate into every open ticket's worktree. Gate files are
         // deployment, and deployment rots: each script hard-codes the exe that wrote it,
@@ -654,9 +852,16 @@ sealed class Daemon
         catch (Exception ex) { _store.Event("gate_redeploy_failed", null, ex.Message); }
 
         // A leak this quiet needs to be visible in the chain, not just absent.
+        //
+        // ONE ENTRY PER PROJECT, AND THE KEY IS DELIBERATELY `brains=` RATHER THAN `brain=`
+        // (P5.6). The check that reads this line regexed `brain=\d+`, so `brain=3,7` would have
+        // kept matching while asserting nothing at all — a check that degrades into a green
+        // proving nothing, which is the failure mode this whole plan keeps hitting. Renaming the
+        // key makes the old pattern impossible to match, so a degraded check goes RED and has to
+        // be rewritten instead of going quiet.
         _store.Event("reconcile_done", null,
-            $"connected={_lanes.Count} brain={(_brainLo > 0 ? _brainLo.ToString() : "-")} " +
-            $"brain-hi={(_brainHi > 0 ? _brainHi.ToString() : "-")} compressors={_compressorLocks.Count}");
+            $"connected={_lanes.Count} brains=[{BrainList(_brainLo)}] brains-hi=[{BrainList(_brainHi)}] " +
+            $"compressors={_compressorLocks.Count}");
         if (predecessorPid > 0)
         {
             Announce($"[dodona] swapped to build {Ver.Build} — {_lanes.Count} lane(s) adopted, nothing interrupted");
@@ -933,7 +1138,19 @@ sealed class Daemon
                 {
                     var connected = _lanes.TryGetValue(l.Id, out var rt) && rt.Connected;
                     var proj = Projects.Field(l.Role, l.Cwd, projects, Paths.NeutralDir);
+                    // WHICH PROJECT A MANAGER IS FOR (P5.6). `project=` above reads `lanes.cwd`
+                    // and a brain's cwd is the neutral directory on purpose (P5.8), so it is
+                    // silent about a brain by design -- which left "one brain per project" with
+                    // no surface a person could read at all. Null for "say nothing", including
+                    // for every one-project workspace, which is what keeps that output identical.
+                    //
+                    // IT GOES BEFORE `project=` AND MUST STAY THERE: tests/_workspace.ps1's
+                    // Get-StatusProject anchors on `project=(.+?)\s*$`, so a field appended after
+                    // it would be captured as part of the project path and five checks in two
+                    // suites would start comparing a path against a path-plus-a-field.
+                    var scope = Projects.ScopeField(l.Role, l.Project, projects);
                     w.WriteLine($"lane {l.Id}  {l.Title,-10}  role={l.Role,-6}  state={l.State}  connected={connected}  presence={l.Presence,-16}  session={l.Session ?? "-"}" +
+                                (scope is null ? "" : $"  scope={scope}") +
                                 (proj is null ? "" : $"  project={proj}"));
                 }
                 break;
@@ -981,11 +1198,20 @@ sealed class Daemon
             {
                 // For suites (NO_AUTOSTART skips the warm-at-start) and for restarting a
                 // brain by hand after changing its config.
-                var lo = await EnsureBrainAsync(hi: false);
+                // P5.3: WHICH project's brain. `BrainProject` resolves a subfolder up to its
+                // project and falls back to the first one, so the no-argument call is exactly
+                // what it always was.
+                var bProject = BrainProject(One(e, "project"));
+                var lo = await EnsureBrainAsync(hi: false, bProject);
                 var wantHi = e.TryGetProperty("hi", out var bh) && bh.ValueKind == JsonValueKind.True;
-                var hi2 = wantHi ? await EnsureBrainAsync(hi: true) : -2;
-                w.WriteLine($"brain: cheap tier lane {(lo > 0 ? lo.ToString() : "FAILED")}" +
-                            (wantHi ? $", expensive tier lane {(hi2 > 0 ? hi2.ToString() : "FAILED")}" : ""));
+                var hi2 = wantHi ? await EnsureBrainAsync(hi: true, bProject) : -2;
+                // THE REASON IT FAILED, NOT JUST "FAILED" (CLAUDE.md §0.1 -- a silent degrade is
+                // a bug, and "FAILED" with no cause is the same thing wearing a word). The cap is
+                // the answer a caller can act on, so it is the one named here.
+                var capped = BrainLaneCount() >= Math.Max(1, _config.MaxBrains);
+                var why = capped ? $"CAPPED (maxBrains={_config.MaxBrains})" : "FAILED";
+                w.WriteLine($"brain for {bProject}: cheap tier lane {(lo > 0 ? lo.ToString() : why)}" +
+                            (wantHi ? $", expensive tier lane {(hi2 > 0 ? hi2.ToString() : why)}" : ""));
                 break;
             }
             case "compressor-start":
@@ -1562,6 +1788,37 @@ sealed class Daemon
                 // haiku processes is the §3.2 incident wearing a different hat.
                 var gonePath = Instance.Canonical(e.GetProperty("project").GetString()!);
                 var stopped = new List<long>();
+                // P5.5 FIRST: THE MANAGERS THIS PROJECT HAD, whose cwd can never name it.
+                // `project-gone` matched on `lanes.cwd`, and a brain's cwd is the neutral
+                // directory (P5.8) -- so a brain for a departing project was invisible to this
+                // handler, invisible to reconcile's old count-and-kill loop (which only ever
+                // asked "how many of this role"), and would have sat there answering questions
+                // about a project the workspace no longer has until its 30-minute lease ran out.
+                // The obvious source of the next leak, and a lifecycle event that did not exist.
+                //
+                // A manager is fungible infrastructure with no transcript anyone reads, so its
+                // row is retired rather than left visible the way a work lane's is.
+                var goneManagers = new List<long>();
+                // Read the project list ONCE, not per lane: Members() re-opens the registry on
+                // every call, and this is a loop over every row in the store.
+                var goneProjects = ProjectPaths();
+                foreach (var l in _store.LanesAll())
+                {
+                    if (l.State == "dead" || !Projects.IsManagementRole(l.Role)) continue;
+                    if (!string.Equals(RegistrationKey(l, goneProjects), gonePath, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (_lanes.TryGetValue(l.Id, out var mrt)) { mrt.Shutdown(); _lanes.Remove(l.Id); }
+                    else if (l.Pipe is { Length: > 0 }) await LaneRuntime.ShutdownShimAsync(l.Pipe);
+                    _brainLocks.TryRemove(l.Id, out _);
+                    if (l.Role == "brain") _brainLo.TryRemove(gonePath, out _);
+                    if (l.Role == "brain-hi") _brainHi.TryRemove(gonePath, out _);
+                    if (l.Role == "router" && _routerLo == l.Id) _routerLo = -1;
+                    _store.LaneState(l.Id, "dead");
+                    _store.Event("brain_unregistered", l.Id, $"role={l.Role}: project {gonePath} left this workspace");
+                    goneManagers.Add(l.Id);
+                }
+                if (goneManagers.Count > 0)
+                    Announce($"[dodona] {gonePath} left this workspace: stopped {goneManagers.Count} management agent(s) that were for it " +
+                             $"({string.Join(", ", goneManagers)})");
                 foreach (var l in _store.LanesAll())
                 {
                     if (l.State == "dead" || l.Cwd is not { Length: > 0 }) continue;
@@ -1650,6 +1907,63 @@ sealed class Daemon
             case "stop-daemon":
                 w.WriteLine("stopping (lanes keep running)");
                 return true;
+
+            case "workspace-forgotten":
+            {
+                // P2.7, HANDED TO PHASE 5 BY PHASE 2 ON PURPOSE. `Registry.Forget` deletes every
+                // `members` row in one transaction, and unlike `workspace-detach` it was wired to
+                // nothing -- so forgetting a live workspace left agents working in folders the
+                // registry no longer records, exactly the trap-T4 state Phase 2 closed for
+                // detach. It was deferred because forget also orphans the DAEMON, which is a
+                // lifecycle call and belongs beside this phase's reaping rather than bolted onto
+                // detach.
+                //
+                // WHY THE DAEMON MUST GO TOO, and it is not tidiness: `publish --all` resolves
+                // its swap targets by id FROM THE REGISTRY, so a daemon whose workspace has been
+                // forgotten can never be hot-swapped again. It becomes an un-updatable process
+                // holding agents nothing lists -- the shape of every orphan incident in this
+                // codebase.
+                //
+                // AND IT IS REVERSIBLE, which is what makes acting rather than asking correct
+                // (CLAUDE.md §0.1): forget keeps the store directory, so re-creating a workspace
+                // over the same folder wakes it with every transcript intact. The announcement
+                // says so.
+                //
+                // Every project is gone by definition, so every lane is stranded. Work lanes keep
+                // their rows and their transcripts (§12); managers are retired, being fungible
+                // infrastructure nobody reads.
+                var forgottenLanes = new List<long>();
+                foreach (var l in _store.LanesAll())
+                {
+                    if (l.State == "dead" || l.Role == "dispatcher") continue;
+                    if (_lanes.TryGetValue(l.Id, out var frt)) { frt.Shutdown(); _lanes.Remove(l.Id); }
+                    else if (l.Pipe is { Length: > 0 }) await LaneRuntime.ShutdownShimAsync(l.Pipe);
+                    _brainLocks.TryRemove(l.Id, out _);
+                    if (Projects.IsManagementRole(l.Role))
+                    {
+                        _store.LaneState(l.Id, "dead");
+                        _store.Event("brain_unregistered", l.Id, $"role={l.Role}: workspace {_wsName} was forgotten");
+                    }
+                    else
+                    {
+                        _store.LaneState(l.Id, "unreachable");
+                        _store.Event("lane_project_detached", l.Id, $"workspace {_wsName} was forgotten; project={(l.Project.Length > 0 ? l.Project : l.Cwd)}");
+                        _store.PaneEvent(l.Id, "announcement",
+                            "this workspace was forgotten, so the agent was stopped -- the transcript is kept; re-create the workspace to resume",
+                            null, null, acked: true);
+                    }
+                    forgottenLanes.Add(l.Id);
+                }
+                _brainLo.Clear();
+                _brainHi.Clear();
+                _routerLo = -1;
+                _store.Event("workspace_forgotten", null,
+                    $"stopped {forgottenLanes.Count} lane(s) and this daemon; store kept at {Paths.Store(_instanceId)}");
+                Announce($"[dodona] workspace {_wsName} was forgotten: stopped {forgottenLanes.Count} agent(s) and this daemon. " +
+                         $"Nothing was deleted -- the store is still at {Paths.Store(_instanceId)}, so re-creating the workspace brings it all back.");
+                w.WriteLine($"workspace {_wsName} forgotten: stopped {forgottenLanes.Count} lane(s), stopping this daemon");
+                return true;
+            }
         }
         return false;
     }
@@ -2470,11 +2784,16 @@ sealed class Daemon
     /// <summary>Spawn a lane: shim → child, detached, pumped, recorded. Shared by
     /// lane-start (fake/test agents), router-start (warm utility session), and
     /// ticket-agent (real claude in a gated worktree).</summary>
-    async Task<(long Id, string Msg)> SpawnLaneAsync(string title, string role, string workDir, string child, List<string> childArgs)
+    /// <param name="scope">Which project this lane is FOR, when that is not the same question as
+    /// where it runs (P5.1). A management lane runs in the neutral directory and is scoped to a
+    /// project; a work lane's folder IS its project, so it passes nothing and the scope is
+    /// derived below. Optional so no other spawn site had to change.</param>
+    async Task<(long Id, string Msg)> SpawnLaneAsync(string title, string role, string workDir, string child, List<string> childArgs,
+                                                    string? scope = null)
     {
         var id = _store.LaneCreate(title);
         _store.LaneRole(id, role);
-        return await AttachShimAsync(id, title, role, workDir, child, childArgs);
+        return await AttachShimAsync(id, title, role, workDir, child, childArgs, scope);
     }
 
     /// <summary>Respawn an agent into an EXISTING lane row — the thread survives its
@@ -2497,7 +2816,8 @@ sealed class Daemon
         return AttachShimAsync(laneId, title, role, cwd, child, childArgs);
     }
 
-    async Task<(long Id, string Msg)> AttachShimAsync(long id, string title, string role, string workDir, string child, List<string> childArgs)
+    async Task<(long Id, string Msg)> AttachShimAsync(long id, string title, string role, string workDir, string child, List<string> childArgs,
+                                                     string? scope = null)
     {
         // TRAP T1, ENFORCED AT THE ONE PLACE BOTH FACTS EXIST (docs/LOCATIONS-PLAN.md Phase 2).
         // The prompt says "your working directory is X"; the ProcessStartInfo below sets the real
@@ -2521,6 +2841,16 @@ sealed class Daemon
         var pipe = Instance.LanePipe(_instanceId, id);
         _store.LanePipe(id, pipe);
         _store.LaneCwd(id, workDir);      // so a respawn lands here too, not in _primary (M5.1)
+        // ...AND WHICH PROJECT IT IS FOR (P5.1). Two different questions, written down separately
+        // because for a management lane they have two different answers: a brain is scoped to a
+        // project while running in the neutral directory (P5.8). For a work lane the folder IS
+        // the project, so it is derived rather than passed, and a re-homed lane re-derives it.
+        // The management fallback to the first project exists so a spawn that somehow reaches
+        // here with no scope still has a registration -- an empty one reads as "unregistered",
+        // which the reaper acts on.
+        _store.LaneProject(id, scope
+                               ?? Projects.Of(ProjectPaths(), workDir)
+                               ?? (Projects.IsManagementRole(role) ? _primary : ""));
 
         var shimExe = Environment.GetEnvironmentVariable("DODONA_SHIM")
                       ?? Path.Combine(AppContext.BaseDirectory, "DodonaShim.exe");
@@ -2632,7 +2962,7 @@ sealed class Daemon
         // whose pipe is live but unreachable is invisible here and gets a replacement started
         // beside it -- one leaked `claude -p` per restart, the brain leak in a third costume.
         // Closing the class rather than the two instances the plan happened to list.
-        if (!await ClearOfLivePredecessorsAsync("compressor"))
+        if (!await ClearOfLivePredecessorsAsync(null, "compressor"))
             return "compressor pool left as it is: a previous pool member is still holding its pipe " +
                    "(`dodona ps` shows it; `dodona stop-all --lanes` clears it)";
         var started = new List<long>();
@@ -2812,7 +3142,7 @@ sealed class Daemon
         // startup warm-up use, so all three agree on what "don't start things" means).
         if (Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1") return -1;
         // LAST of the cheap refusals, because it is the only one that does I/O (P3.5).
-        if (!await ClearOfLivePredecessorsAsync("router")) return -1;
+        if (!await ClearOfLivePredecessorsAsync(null, "router")) return -1;
         return (await SpawnRouterAsync(_config.Agent, _config.RouterModel, _config.RouterEffort)).Id;
     }
 
@@ -2831,10 +3161,19 @@ sealed class Daemon
     /// there is a live process. Tell it to go and wait for the name to leave. Only then is the
     /// road clear. If it will not go, REFUSE to spawn and say so -- one degraded call that
     /// announces itself is cheaper than a second orphan, and the next call retries.</summary>
-    async Task<bool> ClearOfLivePredecessorsAsync(params string[] roles)
+    /// <param name="project">The registration being cleared, or null for "this role is
+    /// per-workspace, so any lane of it is a predecessor". WITHOUT THIS FILTER ONE WEDGED BRAIN
+    /// BLOCKED EVERY PROJECT (P5.4): the roles all share the name `brain`, so a shim in project A
+    /// that would not let go of its pipe made this return false for project B, project C and
+    /// every project after them, for the life of the daemon — and B never had a predecessor at
+    /// all. A refusal that is correct for one project and nonsense for the next is worse than no
+    /// refusal, because it announces itself as a safety measure.</param>
+    async Task<bool> ClearOfLivePredecessorsAsync(string? project, params string[] roles)
     {
+        var projects = ProjectPaths();
         var candidates = _store.LanesAll()
             .Where(l => roles.Contains(l.Role) && l.State is "alive" or "unreachable")
+            .Where(l => project is null || string.Equals(RegistrationKey(l, projects), project, StringComparison.OrdinalIgnoreCase))
             .Where(l => !(_lanes.TryGetValue(l.Id, out var rt) && rt.Connected))
             .Where(l => l.Pipe is { Length: > 0 })
             .ToList();
@@ -2844,11 +3183,24 @@ sealed class Daemon
         var clear = true;
         foreach (var l in candidates.Where(l => live.Contains(l.Id)))
         {
-            // ONCE PER LANE. This runs from EnsureRouterAsync, which is on the path of every
-            // routed sentence the operator types -- a poke plus a wait on each of them would be
-            // seconds of latency per keystroke-to-lane, paid forever, for a message the shim has
-            // already declined once.
-            if (!_shutdownAsked.Add(l.Id)) { clear = false; continue; }
+            // BOUNDED, NOT ONCE (P5.4). This runs from EnsureRouterAsync, which is on the path of
+            // every routed sentence the operator types -- a poke plus a wait on each of them
+            // would be seconds of latency per keystroke-to-lane, paid forever, for a message the
+            // shim has already declined. So it is not asked on every call.
+            //
+            // But it used to be asked exactly ONCE, ever: `_shutdownAsked` was a HashSet with an
+            // Add and no Remove and no Clear anywhere in the file (verified -- two references in
+            // the whole tree, the Add and the declaration). So a shim that declined the first
+            // `##shutdown` and would have accepted the second was never asked again, and the
+            // refusal below stood for the life of the daemon with nothing but an operator running
+            // `stop-all --lanes` to un-stick it. A wait has to name the thing that clears it
+            // (CLAUDE.md §0.1) and "a person notices" is not that thing.
+            //
+            // Three attempts per lane per daemon: still nowhere near per-sentence cost, and now
+            // self-healing for the ordinary case of a shim that was mid-handover.
+            var asked = _shutdownAttempts.TryGetValue(l.Id, out var prev) ? prev : 0;
+            if (asked >= ShutdownAttemptLimit) { clear = false; continue; }
+            _shutdownAttempts[l.Id] = asked + 1;
             var told = await LaneRuntime.ShutdownShimAsync(l.Pipe!);
             var gone = told && await LaneRuntime.WaitPipeGoneAsync(l.Pipe!);
             _lanes.Remove(l.Id);           // whatever we had, it is not usable
@@ -2863,8 +3215,11 @@ sealed class Daemon
         return clear;
     }
 
-    /// <summary>Lanes already told to go. See the loop above for why asking twice is not free.</summary>
-    readonly HashSet<long> _shutdownAsked = new();
+    /// <summary>How many times each lane has been told to go. See the loop above for why asking
+    /// on every call is not free, and why asking exactly once was a wait with nothing to
+    /// un-stick it.</summary>
+    readonly Dictionary<long, int> _shutdownAttempts = new();
+    const int ShutdownAttemptLimit = 3;
 
     /// <summary>The middle rung of the escalation ladder: management judgement between
     /// code-that-checks-facts and the operator-who-decides-intent. Two warm sessions —
@@ -2872,12 +3227,83 @@ sealed class Daemon
     /// sure (operator's rule). It is deliberately kept AWAY from code: neutral cwd, no
     /// project CLAUDE.md, no skills, no tools it could run — its whole world is the
     /// management question in front of it.</summary>
-    async Task<long> EnsureBrainAsync(bool hi)
+    /// <summary>The `<project-leaf>=<lane>` list `reconcile_done` and `status` print for one
+    /// tier. The LEAF, not the whole path, because this is a line a person reads and the lane id
+    /// beside it is already unambiguous; `-` for a tier with none.</summary>
+    static string BrainList(IReadOnlyDictionary<string, long> tier) =>
+        tier.Count == 0 ? "-"
+        : string.Join(",", tier.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                               .Select(kv => $"{Path.GetFileName(kv.Key.TrimEnd('\\', '/'))}={kv.Value}"));
+
+    /// <summary>
+    /// Which project a brain request is FOR (P5.3). Nothing requested means the workspace's
+    /// first project, which is byte-for-byte what "the brain" meant before this phase and is
+    /// what keeps a one-project workspace identical. A folder inside a project resolves up to
+    /// the project, so a caller passing an agent's cwd gets the right registration.
+    ///
+    /// An unowned folder falls back to the first project rather than refusing, deliberately, and
+    /// this is the one place in Phase 5 that substitutes instead of refusing: the brain is an
+    /// improver and never a gate, so "I could not tell which project, so you get no judgement at
+    /// all" is a worse answer than "you get the workspace's default brain". `lane-start` refuses
+    /// in the same situation because it would put an ungated AGENT in a folder nothing tracks
+    /// (trap T7); a brain runs in the neutral directory and touches no project's files at all.
+    /// </summary>
+    string BrainProject(string? requested)
     {
-        var current = hi ? _brainHi : _brainLo;
-        if (current > 0 && _lanes.TryGetValue(current, out var live) && live.Connected) return current;
-        if (!_config.Brain) return -1;
-        if (!await ClearOfLivePredecessorsAsync(hi ? "brain-hi" : "brain")) return -1;
+        if (string.IsNullOrWhiteSpace(requested)) return _primary;
+        return Projects.Of(ProjectPaths(), Instance.Canonical(requested!)) ?? _primary;
+    }
+
+    /// <summary>How many brain sessions exist right now, across every project and both tiers —
+    /// the number the cap is measured against (P5.7). Counting ROWS and not pointers: a lane
+    /// this daemon failed to adopt is still two OS processes, and a cap that could not see them
+    /// would be a cap on bookkeeping rather than on the machine.</summary>
+    int BrainLaneCount() =>
+        _store.LanesAll().Count(l => l.State is "alive" or "unreachable" && l.Role is "brain" or "brain-hi");
+
+    /// <summary>The lock for one brain session, created on demand. On demand rather than only at
+    /// spawn because an ADOPTED brain arrives without one, and a brain with no lock would run
+    /// two questions down one `claude -p` stdin at once — which is not a slow answer, it is two
+    /// interleaved ones.</summary>
+    SemaphoreSlim BrainLock(long id) => _brainLocks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
+
+    async Task<long> EnsureBrainAsync(bool hi, string? project = null)
+    {
+        // ONE PROJECT'S TIER, NOT "THE" TIER (P5.3). These were two scalars, so once a project
+        // parameter existed at all, `EnsureBrainAsync` for project A would have returned project
+        // B's session -- whichever had been created last -- and B's brain would then be asked A's
+        // questions about A's lanes. Verified against the source before it was changed: the
+        // adoption loop assigned `_brainLo = l.Id` unconditionally for every brain row it
+        // adopted, so with two brains the scalar held the last one iterated and both projects
+        // resolved to it.
+        var key = BrainProject(project);
+        var tier = hi ? _brainHi : _brainLo;
+        if (tier.TryGetValue(key, out var current) && _lanes.TryGetValue(current, out var live) && live.Connected) return current;
+        // Config from THE PROJECT (T2/P2.3's reasoning, applied to judgement): a project may
+        // switch its brain off, or point it at a different model or a different agent binary.
+        // For a one-project workspace this reads the same file `_config` came from, so nothing
+        // about that case moves.
+        var pcfg = ConfigForProject(key);
+        if (!pcfg.Brain) return -1;
+        // THE CAP REFUSES; IT NEVER EVICTS (P5.7). Making room by shutting an existing brain
+        // down is the count-and-kill loop growing back somewhere else, and it would stop a
+        // session that is mid-question to start one that is not. And it is not silent: a
+        // project with no judgement says so once and names the setting that lifts it, because a
+        // silent degrade is a bug (CLAUDE.md §3's two dead routing days).
+        if (BrainLaneCount() >= Math.Max(1, _config.MaxBrains))
+        {
+            _store.Event("brain_cap_reached", null,
+                $"maxBrains={_config.MaxBrains} reached ({BrainLaneCount()} brain lane(s) live); no {(hi ? "brain-hi" : "brain")} for {key}");
+            if (!_saidBrainCap)
+            {
+                _saidBrainCap = true;
+                Announce($"[dodona] the brain cap is reached (maxBrains={_config.MaxBrains}): {key} gets no judgement agent, so its " +
+                         "routing and naming fall back to code. Raise `maxBrains` in dodona.json, or stop a brain you are not using " +
+                         "(`dodona status` lists them per project).");
+            }
+            return -1;
+        }
+        if (!await ClearOfLivePredecessorsAsync(key, hi ? "brain-hi" : "brain")) return -1;
 
         var sys = "You are Dodona's dispatcher brain. You make MANAGEMENT decisions for a multi-agent " +
                   "orchestrator: what a piece of work should be called, which lane an input belongs to, whether work " +
@@ -2885,26 +3311,34 @@ sealed class Daemon
                   "never run tools, and never do the work yourself — you are the coordinator's judgement, not a worker. " +
                   "Answer ONLY in the single-line JSON schema each request specifies: no prose, no markdown, no code fences. " +
                   "State your confidence honestly — saying low is how hard questions reach someone with more budget than you.";
-        var model = hi ? _config.Model : _config.BrainModel;
-        var effort = hi ? _config.Effort : _config.BrainEffort;
-        var args = IsClaude(_config.Agent) ? ClaudeArgs(_config, model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
-        var (id, msg) = await SpawnLaneAsync(hi ? "BRAIN-HI" : "BRAIN", hi ? "brain-hi" : "brain", NeutralCwd(), _config.Agent, args);
+        var model = hi ? pcfg.Model : pcfg.BrainModel;
+        var effort = hi ? pcfg.Effort : pcfg.BrainEffort;
+        var args = IsClaude(pcfg.Agent) ? ClaudeArgs(pcfg, model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
+        // NeutralCwd, and `key` as the SCOPE -- P5.8, and the distinction the whole phase rests
+        // on. Per-project means SCOPED TO a project, never RUNNING IN one: a manager started
+        // inside a project loads that project's CLAUDE.md and skills, i.e. a judgement agent
+        // that can end up running `/ship` (commit 19dad3d). Do not "fix" this by passing `key`
+        // as the working directory -- they are two arguments because they are two facts.
+        var (id, msg) = await SpawnLaneAsync(hi ? "BRAIN-HI" : "BRAIN", hi ? "brain-hi" : "brain",
+                                             NeutralCwd(), pcfg.Agent, args, scope: key);
         if (id < 0) { _store.Event("brain_failed", null, msg); return -1; }
-        if (hi) _brainHi = id; else _brainLo = id;
+        tier[key] = id;
+        BrainLock(id);
         return id;
     }
 
     /// <summary>Ask the expensive tier (spawning it on first use). Null when the brain is
     /// off, failed to start, or timed out — callers treat null as "the status quo stands",
     /// because the brain is an improver, never a gate.</summary>
-    async Task<JsonElement?> AskBrainHiAsync(string question)
+    async Task<JsonElement?> AskBrainHiAsync(string question, string? project = null)
     {
-        var id = await EnsureBrainAsync(hi: true);
+        var id = await EnsureBrainAsync(hi: true, project);
         if (id < 0) return null;
-        await _brainHiLock.WaitAsync();
+        var gate = BrainLock(id);
+        await gate.WaitAsync();
         string? reply;
         try { reply = await _lanes[id].AskAsync(question, 30000); }
-        finally { _brainHiLock.Release(); }
+        finally { gate.Release(); }
         if (reply is null) { _store.Event("brain_timeout", id, Truncate(question, 120)); return null; }
         try
         {
@@ -2926,7 +3360,14 @@ sealed class Daemon
         {
             try
             {
-                var loId = await EnsureBrainAsync(hi: false);
+                // THE LANE'S OWN PROJECT ASKS ITS OWN PROJECT'S BRAIN (P5.3). The review names
+                // the lane, its siblings and the workspace's repositories, so sending it to
+                // another project's session would be asking a manager about work it does not
+                // manage. A lane with no recorded project resolves to the first one, which is
+                // what every lane was before this phase.
+                var reviewProject = _store.LanesAll().FirstOrDefault(l => l.Id == laneId) is Store.LaneRow lr
+                    ? RegistrationKey(lr, ProjectPaths()) : _primary;
+                var loId = await EnsureBrainAsync(hi: false, reviewProject);
                 if (loId < 0) return;
                 var lanes = string.Join(", ", _store.LanesAll().Where(l => l.Role == "work" && l.State == "alive").Select(l => l.Title));
                 var repos = string.Join(", ", Repositories().Select(r => r.Name));
@@ -2938,10 +3379,11 @@ sealed class Daemon
                         "\"ticket\":{\"title\":\"<name>\",\"claims\":[\"subtree:<path>\"]} (only if this work should be isolated on a branch)," +
                         "\"reason\":\"<=60 chars\"}";
 
-                await _brainLoLock.WaitAsync();
+                var loGate = BrainLock(loId);
+                await loGate.WaitAsync();
                 string? reply;
                 try { reply = await _lanes[loId].AskAsync(q, 25000); }
-                finally { _brainLoLock.Release(); }
+                finally { loGate.Release(); }
                 if (reply is null) { _store.Event("brain_timeout", loId, $"review lane {laneId}"); return; }
 
                 JsonElement v;
@@ -2953,7 +3395,7 @@ sealed class Daemon
                 if (conf == "low")
                 {
                     _store.Event("brain_escalated", loId, $"review lane {laneId}");
-                    var hiV = await AskBrainHiAsync(q);
+                    var hiV = await AskBrainHiAsync(q, reviewProject);
                     if (hiV is not null) v = hiV.Value;
                 }
 
