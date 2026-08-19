@@ -321,6 +321,73 @@ try {
         (Rows "SELECT id, title, role, state FROM lanes WHERE role='router'")
     $env:DODONA_NO_AUTOSTART = "1"
 
+    # ---- P3.5: ADOPTION FAILURE IS NOT A SPAWN TRIGGER ----------------------------------
+    # The two checks above prove the daemon reuses a brain it CAN adopt. This one is the case
+    # that actually leaked: a predecessor that is unmistakably alive -- its pipe is in the OS
+    # namespace -- but which this daemon cannot adopt. "I could not adopt it" and "it is not
+    # there" were the same branch, and only the second justifies a spawn.
+    #
+    # Measured on the operator's own instance: 14 BRAIN lanes, one per daemon start across a
+    # morning of auto-publish swaps, each an idle `claude -p` nobody could reach. Reconcile
+    # declared the predecessor unreachable after one 500 ms knock, wrote `utility_lane_reaped
+    # ... "shim gone"` over a process that was still running, and the warm-up then started a
+    # replacement beside it -- 160 ms later, in the store rows.
+    #
+    # HOW THE FAILURE IS FORCED: a shim serves ONE client at a time, so a test holding the
+    # brain's pipe makes the next daemon's connect fail while the process is provably alive.
+    # That is the exact shape of the incident, and it needs no timing luck to reproduce.
+    $brainLane = (Rows "SELECT id FROM lanes WHERE role='brain' AND state='alive' LIMIT 1").Trim()
+    $brainPipe = "dodona-$($ws.Id)-lane$brainLane"
+    Dodona @("stop-daemon") | Out-Null
+    Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down' | Out-Null
+    $hold = New-Object System.IO.Pipes.NamedPipeClientStream('.', $brainPipe,
+        [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+    try {
+        $hold.Connect(10000)
+        $holdReader = New-Object System.IO.StreamReader($hold)
+        $holdHello = $holdReader.ReadLine()      # drain the greeting; now the shim is ours
+        # A PRECONDITION, not a claim about the fix -- `dev prove` reports it VACUOUS and that is
+        # correct, because HEAD has a live predecessor here too. It is kept deliberately: it is
+        # what stops the next check passing for the wrong reason. If the hold ever fails to
+        # connect, `no_second_brain_beside_a_live_one` would go green against no predecessor at
+        # all, and nothing else in the suite would notice.
+        Check 'the_predecessor_brain_is_provably_alive' ($holdHello -match '^!hello') $holdHello
+
+        # COUNT THE SPAWNS, not the pipes. Counting live lane pipes here was this check's first
+        # form and it was WRONG for a reason worth keeping: a lane pipe blinks out of the
+        # namespace while the shim swaps server instances, and every shim in a workspace
+        # disconnects the instant its daemon stops -- which is exactly when this measurement is
+        # taken. It read 4 live pipes where 7 shims were running, so the "before" was too low and
+        # the check failed while the product was behaving perfectly. A `shim_spawned` row cannot
+        # blink: a second brain is a spawn, and a spawn is written down.
+        $spawnsBefore = [int](Rows "SELECT COUNT(*) FROM events WHERE kind='shim_spawned'").Trim()
+        $brainRowsBefore = [int](Rows "SELECT COUNT(*) FROM lanes WHERE role='brain'").Trim()
+        $daemon = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws.Id -PassThru -NoNewWindow `
+            -RedirectStandardOutput "$out\daemon5.out" -RedirectStandardError "$out\daemon5.err"
+        Wait-Daemon $ws.CtlPipe | Out-Null
+        Dodona @("brain-start") | Out-Null       # force the decision rather than waiting on a warm-up
+        $spawnsAfter = [int](Rows "SELECT COUNT(*) FROM events WHERE kind='shim_spawned'").Trim()
+        $brainRowsAfter = [int](Rows "SELECT COUNT(*) FROM lanes WHERE role='brain'").Trim()
+        Check 'no_second_brain_beside_a_live_one' `
+            (($spawnsAfter -eq $spawnsBefore) -and ($brainRowsAfter -eq $brainRowsBefore)) `
+            "shim_spawned before=$spawnsBefore after=$spawnsAfter; brain rows before=$brainRowsBefore after=$brainRowsAfter"
+        # ...and it is in the causal chain, not merely absent. A silent degrade is a bug
+        # (CLAUDE.md 0.1): the only evidence of two dead routing days was a status-line suffix.
+        Check 'the_refusal_is_recorded' `
+            (([int](Rows "SELECT COUNT(*) FROM events WHERE kind='utility_predecessor_live'").Trim()) -ge 1) `
+            (Rows "SELECT kind, detail FROM events WHERE kind IN ('utility_predecessor_live','utility_lane_stubborn','utility_lane_reaped') ORDER BY id DESC LIMIT 4")
+        # And reconcile must NOT have called a live process gone. That one line is what dropped
+        # the only reference capable of stopping it.
+        # `lane_id`, NOT `lane`. The first version of this check used a column that does not
+        # exist, so sqlite errored, Rows returned nothing, the count parsed as 0 and the check
+        # PASSED -- against everything, forever. `dev prove` called it vacuous and that is why.
+        # A check written against the wrong column is indistinguishable from a check that works.
+        Check 'a_live_pipe_is_never_called_shim_gone' `
+            (([int](Rows "SELECT COUNT(*) FROM events WHERE kind='utility_lane_reaped' AND lane_id=$brainLane").Trim()) -eq 0) `
+            (Rows "SELECT kind, lane_id, detail FROM events WHERE lane_id=$brainLane ORDER BY id DESC LIMIT 5")
+    }
+    finally { try { $hold.Dispose() } catch { } }
+
     Dodona @("stop-daemon") | Out-Null
 }
 finally {
@@ -332,6 +399,10 @@ finally {
         foreach ($p in @($si.shimPid, $si.childPid)) { try { Stop-Process -Id $p -Force -ErrorAction Stop } catch { } }
     }
     Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
+    # ...and the shim exit log beside it. A suite's DODONA_HOME is deleted with the run, so
+    # without this the one record of WHY a wrapper process ended dies with it -- and "it was
+    # simply gone" is the diagnosis this whole phase exists to stop accepting.
+    Copy-Item "$wsDir\shim-exits.log" "$out\shim-exits.log" -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     # Did this suite leak a process into the build output? (RECOVERY-PHASES P1.3) Last in the

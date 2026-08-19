@@ -242,9 +242,25 @@ sealed class Daemon
 
         // Reconcile (design §12): rows are the claim; the pipe is the proof. A successor
         // is adopting shims the predecessor only just let go of, so give them room.
+        //
+        // P3.4 -- ASK THE OS FIRST, and ask it BOTH ways. A lane that is neither in the pipe
+        // namespace nor holding a live shim process does not exist, and there is nothing to
+        // connect to however patiently you try. Read once, before the loop.
+        //
+        // The two-answer part is not caution, it is a bug this very phase shipped and caught:
+        // a lane pipe blinks out while the shim swaps server instances between clients, and
+        // every shim in a workspace disconnects at the same instant its daemon exits -- which
+        // is one reconcile away. Pipes alone declared four to seven live lanes "gone" per
+        // restart. LaneLiveness carries the measurement.
+        var liveLanes = LaneLiveness.Live(_instanceId, Paths.WorkspaceDir(_instanceId));
         foreach (var l in _store.LanesAll().Where(l => l.State == "alive" && l.Role != "dispatcher"))
         {
-            var rt = new LaneRuntime(l.Id, l.Pipe, _store);
+            // The stored pipe name, hoisted once. `LaneRow.Pipe` is declared non-nullable, but
+            // testing it for emptiness below is enough for the compiler to treat every earlier
+            // read of it as a maybe -- and a new CS8604 in a tree that builds with zero warnings
+            // is a real signal, not noise to wave through.
+            var lanePipe = l.Pipe ?? "";
+            var rt = new LaneRuntime(l.Id, lanePipe, _store);
             HookCompression(rt, l.Role);
             // A WORK lane gets the patient retry: it may hold a real agent mid-turn, and a
             // successor is adopting shims the predecessor only just let go of. A UTILITY lane
@@ -256,10 +272,42 @@ sealed class Daemon
             // a copy of the operator's store, carrying 14 leaked brain lanes with dead pipes:
             // ~2.4s each, about 35 seconds of a daemon that looked hung and refused
             // `stop-daemon` because it had not started listening yet.
+            //
+            // ...and `attempts: 1` for a utility lane was the assertion "a brain whose pipe does
+            // not answer immediately is simply gone" -- an assertion nothing ever checked. It was
+            // false on the operator's own store: lane 20 was declared unreachable after ONE 500 ms
+            // knock, reaped as "shim gone", and replaced 160 ms later, while its shim, its child
+            // and its pipe were all still alive. That is how an immortal orphan is manufactured.
+            //
+            // So the OS decides how hard to try, not the role:
+            //   pipe ABSENT  -> zero attempts. Faster than the old one-knock path, which is what
+            //                   the 35-second reconcile hang actually wanted (14 dead brains x
+            //                   ~2.4 s of connect attempts, all of it before the control pipe was
+            //                   even listening).
+            //   pipe PRESENT -> be patient whatever the role, because there is definitely a
+            //                   process there and adopting it is always better than leaving it.
             var patient = l.Role == "work";
-            var attempts = patient ? (predecessorPid > 0 ? 20 : 3) : 1;
-            if (await rt.ConnectAndPumpAsync(attempts)) _lanes[l.Id] = rt;
-            else { _store.LaneState(l.Id, "unreachable"); _store.Event("lane_unreachable", l.Id, $"reconcile: pipe did not answer in {attempts} attempt(s)"); }
+            var pipeLive = liveLanes.Contains(l.Id);
+            var attempts = !pipeLive ? 0 : patient ? (predecessorPid > 0 ? 20 : 3) : 3;
+            if (attempts > 0 && await rt.ConnectAndPumpAsync(attempts)) _lanes[l.Id] = rt;
+            else
+            {
+                _store.LaneState(l.Id, "unreachable");
+                if (!pipeLive)
+                    _store.Event("lane_unreachable", l.Id,
+                        $"reconcile: no pipe and no live shim process for {(lanePipe.Length > 0 ? lanePipe : "(no pipe recorded)")} -- the shim is gone");
+                else
+                {
+                    // Live pipe, will not converse. Do NOT walk away: walking away is what left
+                    // three unkillable shims running out of the compiler's output directory. Tell
+                    // it to go, and say whether the message landed.
+                    var told = await LaneRuntime.ShutdownShimAsync(lanePipe);
+                    var gone = told && await LaneRuntime.WaitPipeGoneAsync(lanePipe);
+                    _store.Event("lane_unreachable", l.Id,
+                        $"reconcile: {lanePipe} is LIVE but did not answer in {attempts} attempt(s); " +
+                        (gone ? "sent ##shutdown, pipe gone" : told ? "sent ##shutdown, pipe still there" : "##shutdown could not be delivered either"));
+                }
+            }
             // An adopted pool member needs its lock back, or its turns would never gate.
             if (l.Role == "compressor" && _lanes.ContainsKey(l.Id)) _compressorLocks[l.Id] = new SemaphoreSlim(1, 1);
 
@@ -294,12 +342,27 @@ sealed class Daemon
         // WORK lanes are deliberately untouched. An unreachable work lane stays visible
         // because that one is a problem to notice, and `lane-respawn` can bring its session
         // back (LANE-LIFECYCLE §1: agents are disposable, the lane is the thread).
+        //
+        // ...but ONLY when the shim really is gone, which is a question for the OS (P3.4). Writing
+        // "shim gone" over a live pipe is not a cosmetic inaccuracy: marking the row `dead` drops
+        // the last reference to that process, and the very next thing the warm-up does is start a
+        // replacement beside it. That pair of lines is the entire mechanism behind 14 leaked BRAIN
+        // lanes on the operator's instance, one per daemon start. Leaving the row `unreachable`
+        // instead is what lets ClearOfLivePredecessorsAsync (P3.5) still see it and refuse.
+        var stillLive = LaneLiveness.Live(_instanceId, Paths.WorkspaceDir(_instanceId));
         foreach (var l in _store.LanesAll()
                      .Where(l => l.State == "unreachable" && l.Role is "brain" or "brain-hi" or "router" or "compressor")
                      .ToList())
         {
+            if (stillLive.Contains(l.Id))
+            {
+                _store.Event("utility_lane_stubborn", l.Id,
+                    $"role={l.Role}: pipe {l.Pipe} is STILL LIVE, so it was not reaped -- and no " +
+                    "replacement will be started while it is (`dodona stop-all --lanes` clears it)");
+                continue;
+            }
             _store.LaneState(l.Id, "dead");
-            _store.Event("utility_lane_reaped", l.Id, $"role={l.Role}: shim gone, nothing to resume");
+            _store.Event("utility_lane_reaped", l.Id, $"role={l.Role}: shim gone or shut down, nothing to resume");
         }
 
         // Retire brain lanes the old bug already leaked. Adopting one is what stops NEW ones
@@ -1785,6 +1848,14 @@ sealed class Daemon
 
         var alive = _store.LanesAll().Count(l => l.Role == "compressor" && l.State == "alive" && _lanes.ContainsKey(l.Id));
         if (alive >= count) return $"compressor pool already warm ({alive})";
+        // P3.5 applies to the POOL too, and the plan named only the brain and the router. The
+        // arithmetic above counts a compressor as present only if it is ADOPTED, so a pool member
+        // whose pipe is live but unreachable is invisible here and gets a replacement started
+        // beside it -- one leaked `claude -p` per restart, the brain leak in a third costume.
+        // Closing the class rather than the two instances the plan happened to list.
+        if (!await ClearOfLivePredecessorsAsync("compressor"))
+            return "compressor pool left as it is: a previous pool member is still holding its pipe " +
+                   "(`dodona ps` shows it; `dodona stop-all --lanes` clears it)";
         var started = new List<long>();
         for (int i = alive; i < count; i++)
         {
@@ -1947,10 +2018,60 @@ sealed class Daemon
         // start-on-demand must not join in (the same guard the drift watcher and the
         // startup warm-up use, so all three agree on what "don't start things" means).
         if (Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1") return -1;
+        // LAST of the cheap refusals, because it is the only one that does I/O (P3.5).
+        if (!await ClearOfLivePredecessorsAsync("router")) return -1;
         return (await SpawnRouterAsync(_config.Agent, _config.RouterModel, _config.RouterEffort)).Id;
     }
 
     // ------------------------------------------------------------- the dispatcher brain (§3)
+
+    /// <summary>P3.5 -- ADOPTION FAILURE IS NOT A SPAWN TRIGGER.
+    ///
+    /// Every Ensure* above asks "is my lane in _lanes and connected?" and treats no as permission
+    /// to start another one. But "I could not adopt it" and "it is not there" were the same
+    /// branch, and only the second one justifies a spawn. Measured on the operator's own
+    /// instance: 14 BRAIN lanes, one per daemon start across a morning of auto-publish swaps,
+    /// each an idle `claude -p` process nobody could reach -- the predecessor sat there
+    /// connected-to-nothing while its replacement was started beside it, fourteen times.
+    ///
+    /// So before spawning: if a lane of this role has a pipe that is still in the OS namespace,
+    /// there is a live process. Tell it to go and wait for the name to leave. Only then is the
+    /// road clear. If it will not go, REFUSE to spawn and say so -- one degraded call that
+    /// announces itself is cheaper than a second orphan, and the next call retries.</summary>
+    async Task<bool> ClearOfLivePredecessorsAsync(params string[] roles)
+    {
+        var candidates = _store.LanesAll()
+            .Where(l => roles.Contains(l.Role) && l.State is "alive" or "unreachable")
+            .Where(l => !(_lanes.TryGetValue(l.Id, out var rt) && rt.Connected))
+            .Where(l => l.Pipe is { Length: > 0 })
+            .ToList();
+        if (candidates.Count == 0) return true;
+
+        var live = LaneLiveness.Live(_instanceId, Paths.WorkspaceDir(_instanceId));
+        var clear = true;
+        foreach (var l in candidates.Where(l => live.Contains(l.Id)))
+        {
+            // ONCE PER LANE. This runs from EnsureRouterAsync, which is on the path of every
+            // routed sentence the operator types -- a poke plus a wait on each of them would be
+            // seconds of latency per keystroke-to-lane, paid forever, for a message the shim has
+            // already declined once.
+            if (!_shutdownAsked.Add(l.Id)) { clear = false; continue; }
+            var told = await LaneRuntime.ShutdownShimAsync(l.Pipe!);
+            var gone = told && await LaneRuntime.WaitPipeGoneAsync(l.Pipe!);
+            _lanes.Remove(l.Id);           // whatever we had, it is not usable
+            if (gone) { _store.LaneState(l.Id, "dead"); }
+            else clear = false;
+            _store.Event("utility_predecessor_live", l.Id,
+                $"role={l.Role}: pipe {l.Pipe} was still live, so a replacement would have been a " +
+                $"second orphan; " + (gone ? "shut it down, spawning now" : told ? "sent ##shutdown, pipe still there -- refusing to spawn this time" : "##shutdown could not be delivered -- refusing to spawn this time"));
+        }
+        if (!clear) Announce("[dodona] a previous utility agent will not let go of its pipe; not starting a second one. " +
+                             "`dodona ps` shows it; `dodona stop-all --lanes` clears it.");
+        return clear;
+    }
+
+    /// <summary>Lanes already told to go. See the loop above for why asking twice is not free.</summary>
+    readonly HashSet<long> _shutdownAsked = new();
 
     /// <summary>The middle rung of the escalation ladder: management judgement between
     /// code-that-checks-facts and the operator-who-decides-intent. Two warm sessions —
@@ -1963,6 +2084,7 @@ sealed class Daemon
         var current = hi ? _brainHi : _brainLo;
         if (current > 0 && _lanes.TryGetValue(current, out var live) && live.Connected) return current;
         if (!_config.Brain) return -1;
+        if (!await ClearOfLivePredecessorsAsync(hi ? "brain-hi" : "brain")) return -1;
 
         var sys = "You are Dodona's dispatcher brain. You make MANAGEMENT decisions for a multi-agent " +
                   "orchestrator: what a piece of work should be called, which lane an input belongs to, whether work " +

@@ -194,6 +194,67 @@ sealed class LaneRuntime
         Connected = false;
     }
 
+    /// <summary>Tell a shim to go, over its OWN pipe, with no LaneRuntime and no recorded pid
+    /// -- the only way to stop an agent whose `shim-lane*.json` was never written or has been
+    /// reaped, which is exactly the four-agents-nothing-can-see case in RC2.
+    ///
+    /// This is the missing half of the orphan story. The daemon used to ABANDON a lane it could
+    /// not adopt: it dropped the only reference that could ever stop the process and then spawned
+    /// a replacement beside it (measured: `lane_unreachable 20`, `utility_lane_reaped 20`, then
+    /// `shim_spawned 25` 160 ms later, while lane 20's shim, child and pipe were all still
+    /// alive). A live pipe is a live process you can still reach; reaching it is strictly better
+    /// than walking away from it.</summary>
+    public static async Task<bool> ShutdownShimAsync(string pipeName, int connectMs = 1500)
+    {
+        if (pipeName is null or "") return false;
+        try
+        {
+            using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            await pipe.ConnectAsync(connectMs);
+            var w = new StreamWriter(pipe) { AutoFlush = true };
+            var r = new StreamReader(pipe);
+            // Take the greeting first. The shim writes `!hello` before it reads anything, so a
+            // client that never drains it is a client the shim is still talking to. Bounded,
+            // because ReadLineAsync has no timeout of its own and a wedged shim must not wedge
+            // the daemon's startup with it.
+            var hello = r.ReadLineAsync();
+            if (await Task.WhenAny(hello, Task.Delay(connectMs)) != hello) return false;
+            w.WriteLine("##shutdown");
+            await pipe.FlushAsync();
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Wait for a lane pipe to actually LEAVE the namespace. The poke above is a
+    /// request; this is the confirmation, and it has a deadline because a wait with no
+    /// deadline is the standing directive in CLAUDE.md 0.1 violated in a new costume.
+    ///
+    /// TWO CONSECUTIVE absences, 150 ms apart, and that is the whole subtlety here. A shim's
+    /// pipe name blinks out of the namespace for a few milliseconds while the serve loop swaps
+    /// server instances (LaneLiveness carries the measurement), so a single absent reading is
+    /// exactly as likely to mean "mid-reconnect" as "gone". Believing it here would be the worse
+    /// direction of the two: the caller marks the lane dead and starts a replacement beside a
+    /// live agent, which is the leak this whole phase exists to close. Two readings that far
+    /// apart cannot both land in the same gap.</summary>
+    public static async Task<bool> WaitPipeGoneAsync(string pipeName, int timeoutMs = 3000)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            if (!Live(pipeName))
+            {
+                await Task.Delay(150);
+                if (!Live(pipeName)) return true;
+            }
+            await Task.Delay(100);
+        }
+        return false;
+
+        static bool Live(string name) =>
+            Instance.LiveLanePipes().Contains(name, StringComparer.OrdinalIgnoreCase);
+    }
+
     /// <summary>One request/response turn: send, await this lane's next result event.
     /// Used for utility lanes (the router). Returns null on timeout.</summary>
     public async Task<string?> AskAsync(string text, int timeoutMs)

@@ -3,6 +3,7 @@ using System.Linq;               // whose implicit usings are narrower than the 
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Dodona;
 
@@ -106,6 +107,50 @@ static class Instance
     public static string UiHandoffPipe(string id) => $"dodona-{id}-uihandoff";
     public static string LanePipe(string id, long laneId) => $"dodona-{id}-lane{laneId}";
 
+    /// <summary>The inverse of <see cref="LanePipe"/>. GREEDY on the id, because a workspace
+    /// slug is `&lt;name&gt;-&lt;4 hex&gt;` and a name may itself contain dashes or even the word
+    /// "lane" -- only the LAST `-lane&lt;digits&gt;` is the suffix.</summary>
+    static readonly Regex LaneRe = new(@"^dodona-(?<id>.+)-lane(?<n>\d+)$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>Every LANE that is actually running, read off the OS the same way daemons and
+    /// windows already are -- as (instance id, lane id).
+    ///
+    /// Lanes were the ONE thing whose liveness was still STORED rather than observed, and the
+    /// stored answer was wrong in both directions (docs/INVESTIGATION-2026-08-18.md RC2).
+    /// Measured on the operator's machine 2026-08-18: eleven live lane pipes across four
+    /// workspace ids against seven `shim-lane*.json` records -- so FOUR live agents `dodona ps`
+    /// could not count and `stop-all --lanes` could not reach, three of them running out of the
+    /// compiler's own output directory, which is how they blocked every build invisibly. In the
+    /// other direction the same file set had accumulated eighteen records for lanes that had
+    /// already died, so `ps` printed "24 lanes" with six processes alive -- and that number is
+    /// the one in the sentence offering `--lanes`, so it argued for killing real work to tidy
+    /// up files.
+    ///
+    /// A pipe cannot go stale: the OS deletes the name when the last handle closes. That is the
+    /// whole reason this is the authority and a file is not.</summary>
+    public static List<(string Id, long Lane)> LiveLanes()
+    {
+        var list = new List<(string, long)>();
+        foreach (var n in AllPipes())
+        {
+            var m = LaneRe.Match(n);
+            if (m.Success && long.TryParse(m.Groups["n"].Value, out var lane))
+                list.Add((m.Groups["id"].Value, lane));
+        }
+        return list;
+    }
+
+    /// <summary>The lanes of ONE instance that are running right now.</summary>
+    public static List<long> LiveLanes(string id) =>
+        LiveLanes().Where(t => string.Equals(t.Id, id, StringComparison.OrdinalIgnoreCase))
+                   .Select(t => t.Lane).Distinct().OrderBy(x => x).ToList();
+
+    /// <summary>The live lane PIPE NAMES -- what reconcile and the Ensure* guards check a
+    /// stored `lanes.pipe` against before concluding a shim is gone (P3.4 / P3.5).</summary>
+    public static List<string> LiveLanePipes() =>
+        AllPipes().Where(n => LaneRe.IsMatch(n)).ToList();
+
     /// <summary>Every instance running right now, found the way Windows lets you: the
     /// pipe namespace is a directory. No shared registry, no lock file, nothing global
     /// (§14) — liveness is read off the OS instead of stored.</summary>
@@ -117,15 +162,21 @@ static class Instance
     /// combination that looks like nothing happened.</summary>
     public static List<string> LiveUiPipes() => LivePipes("-ui");
 
-    static List<string> LivePipes(string suffix)
+    static List<string> LivePipes(string suffix) =>
+        AllPipes().Where(n => n.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)).ToList();
+
+    /// <summary>Every `dodona-*` pipe on the machine, enumerated ONCE so that a caller asking
+    /// three questions (daemons, windows, lanes) walks the namespace three times at most rather
+    /// than once per lane row it is checking.</summary>
+    static List<string> AllPipes()
     {
         try
         {
             return Directory.GetFiles(@"\\.\pipe\")
                 .Select(Path.GetFileName)
-                .Where(n => n is not null && n.StartsWith("dodona-") && n.EndsWith(suffix))
+                .Where(n => n is not null && n.StartsWith("dodona-", StringComparison.OrdinalIgnoreCase))
                 .Select(n => n!)
-                .Distinct()
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
         catch { return new List<string>(); }

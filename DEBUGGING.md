@@ -28,6 +28,7 @@ out by looking at a folder.
 |---|---|
 | The store (all state, all history) | `%LOCALAPPDATA%\Dodona\workspaces\<id>\store.db` |
 | Shim identity per lane | `%LOCALAPPDATA%\Dodona\workspaces\<id>\shim-lane<N>.json` → `{shimPid, childPid, pipeName}` |
+| Why a wrapper exited | `%LOCALAPPDATA%\Dodona\workspaces\<id>\shim-exits.log` — one line per shim: `up`, then `exiting -- <reason>` and `gone`. Reasons are `##shutdown from a client`, `child <pid> exited and all N buffered line(s) were delivered`, `lease expired`, or `CRASHED: <type>`. **Read this first when a lane vanished.** It is a file and not stderr because a shim inherits its DAEMON's stderr handle, and every interesting exit happens after that daemon is gone — so the one reason worth having was the one that could never be captured. |
 | The workspace registry (names, ids, aliases, members) | `%LOCALAPPDATA%\Dodona\concierge\registry.db` |
 | Ticket worktrees — **still beside the repo** | `<member>\.dodona\wt\t<N>` |
 | Control pipe (daemon alive only) | `dodona-<instance>-ctl`, instance = the workspace id slug |
@@ -347,7 +348,13 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   about. If you are reading an OLD store, `autopublish_started` rows detailed
   `sources <t> > built-from <t>`, and identical timestamps in consecutive rows are the
   64-iteration loop of 2026-08-18 — the failure the SHA comparison replaced.
-  Lifecycle: `utility_lane_reaped` (a brain/router/compressor whose shim is gone).
+  Lifecycle: `utility_lane_reaped` (a brain/router/compressor whose shim is gone — written only
+  after the OS has been asked, both ways; see `LaneLiveness`).
+  `utility_lane_stubborn` (its pipe or shim process is STILL LIVE, so it was NOT reaped: marking
+  the row dead would drop the last reference capable of stopping that process, which is exactly
+  how 14 orphaned BRAIN lanes were manufactured, one per daemon start).
+  `utility_predecessor_live` (a spawn was REFUSED because the predecessor is still running;
+  routing degrades loudly for that one call and retries on the next — never a second orphan).
   Swap kinds: `swap_blocked`, `swap_armed`, `swap_held`, `swap_spawned`,
   `swap_forced`, `swap_refused`, `swap_failed`, `daemon_handoff`, `binary_gc`,
   `binary_gc_skipped`. **If a state change happened with no event row naming why, that

@@ -117,6 +117,17 @@ nothing while looking installed).
   dashes become `ΓÇö`.
 - **`Microsoft.Data.Sqlite`**: `INSERT …; SELECT last_insert_rowid();` in one command
   returns nothing without `NextResult()` — use a separate command.
+- **A NAMED PIPE'S NAME BLINKS OUT while its server swaps instances.** `\\.\pipe\` is a
+  directory and enumerating it is the right way to ask what is live (`Instance.LivePipes`) —
+  but a server that disposes one `NamedPipeServerStream` and constructs the next is, for a few
+  milliseconds, not in the namespace at all. Measured: **8 of 192 reads over 1.5 s saw no pipe**
+  while the shim was alive and instantly connectable. And the gap is *synchronised*, which is
+  what makes it dangerous: every shim in a workspace disconnects the instant its daemon exits,
+  and the next daemon's reconcile runs milliseconds later. **A single instantaneous read is not
+  a liveness test.** Lane liveness is therefore the UNION of two OS answers — the pipe, or a
+  recorded shim pid that is alive (`LaneLiveness`, which carries the measurement) — and
+  `stop-all` picks its targets BEFORE stopping any daemon, because an attached pipe is a steady
+  one. This nearly shipped as "reconcile declares every lane dead on restart".
 
 ## 0.3 Problems are not allowed to exist (operator directive, 2026-08-18)
 
@@ -166,9 +177,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | `build` | Builds. Only *real* compile errors reach you; a locked output is named, never mistaken for one. |
 | `test <suite>...` | One or more named suites, run concurrently. `--sequential` for one at a time. |
 | `test unit` | The pure logic — no daemon, no store, no window. **~1 second**; run it while you edit. |
-| `suites` | All twelve, five at a time. **~54–72 s**, so it is a gate before committing rather than the twenty-minute event this table used to claim. |
+| `suites` | All twelve, **three at a time** (69e8003 lowered it from five; `ui-use` went intermittently red at five). Measured on this machine 2026-08-19: **93 s** at 69e8003 and **100 s** with Phase 3's fifteen extra checks, not the 54–72 s this row claimed — the range predates both the concurrency change and Phase 3's eleven extra m0 checks. Still a gate before committing rather than the twenty-minute event the table claimed before that. |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. |
-| `gate` | The pre-commit gate: runs the suites, then **asserts** seven invariants — nothing left running in the build output, a suite run that dirtied nothing, the commit guard deployed and unoverridden, the live build’s commit resolvable in `git log`, and the full run inside its time budget (I7). Prints the two rows of `RECOVERY-PHASES` §2 it does not cover yet, so it can never be mistaken for a full pass. `dev gate <suite>` runs the same machinery over less, in ~20 s, and says PARTIAL on every line. |
+| `gate` | The pre-commit gate: runs the suites, then **asserts** eight invariants — nothing left running in the build output, a suite run that dirtied nothing, **no wrapper or agent process that outlived the run** (I3), the commit guard deployed and unoverridden, the live build’s commit resolvable in `git log`, and the full run inside its time budget (I7). Prints the one row of `RECOVERY-PHASES` §2 it does not cover yet, so it can never be mistaken for a full pass. `dev gate <suite>` runs the same machinery over less, in ~20 s, and says PARTIAL on every line. |
 | `ship` | build + suites + publish. |
 | `worktree <name>` | a tree of your own under `.claude\worktrees\`. All work goes in one (§0.0). |
 
@@ -219,7 +230,7 @@ Where it stands now, all measured on this machine:
 
 | | before | after |
 |---|---|---|
-| full run, all suites | 5 min 20 s (and it could **hang forever**, see below) | **54–72 s** |
+| full run, all suites | 5 min 20 s (and it could **hang forever**, see below) | **54–72 s** at the time, **100 s** today — concurrency dropped 5→3 (69e8003) and Phase 3 added fifteen checks; the gate's budget is 120 s |
 | the same run, sequential | ~320 s | ~200 s |
 | fixed `Start-Sleep` across the suites | 214 s | ~4 s |
 | the narrowest useful check | ~7 s (a daemon must start) | **~1 s** (`dev test unit`) |
@@ -425,7 +436,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 | suite | what it covers | alone |
 |---|---|---|
 | `unit` | the pure logic: claim algebra, policy table, repo resolution, canonical paths, the code-only routing decisions | ~1 s |
-| `m0` | daemon death mid-turn | ~7 s |
+| `m0` | daemon death mid-turn, and Phase 3's whole invariant: a wrapper that outlives its agent, a lane with no shim record, the lease, reconcile asking the OS | ~16 s |
 | `m1` | claims, the gate, the merge token | ~8 s |
 | `m2` | routing, the backstop, presence | ~8 s |
 | `m3` | the UI as a view over the store | ~17 s |
@@ -433,7 +444,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 | `workspace` | identity, repo-exclusivity, multi-repo | ~14 s |
 | `ui-use` | the UI driven like a person | ~43 s |
 | `compression` | selective compression (§5) | ~12 s |
-| `brain` | the dispatcher brain and its routing ladder | ~23 s |
+| `brain` | the dispatcher brain, its routing ladder, and the no-second-brain-beside-a-live-one guard | ~35 s |
 | `concierge` | the group-scope ladder, the fence, the review-behind | ~11 s |
 | `publish` | publish targeting: `--all` spares foreign instances | ~30 s |
 
@@ -568,6 +579,14 @@ what is actually running, and `dodona stop-all [--lanes]` is how you stop it. Th
 operator a surprise: they closed the window, believed the machine was idle, and a daemon plus
 seventeen shims had been up for hours.
 
+**But nothing outlives its REASON any more** (Phase 3). A shim exits when its agent dies and the
+buffer has been handed over; and if no daemon connects for `DODONA_SHIM_LEASE_SEC` — 30 minutes
+by default — it exits anyway and takes the agent with it. Both say why, in
+`<DODONA_HOME>\workspaces\<id>\shim-exits.log`, because stderr belongs to a daemon that is
+usually already gone. So a deliberate `stop-all` (daemons only, lanes keep running on purpose)
+costs you those agents after the lease: the lane ROW survives and `dodona lane-respawn <lane>`
+resumes the session, which is bounded and recoverable where an immortal process was neither.
+
 **Routing waits now.** A distinct task gets its own lane (WORKSPACES-CONCIERGE.md §5.1), so
 input is no longer delivered optimistically to the focused lane: a wrong continuation cannot be
 undone, and correcting it is exactly what is impossible. Only `LANE: text` and unmistakable
@@ -618,6 +637,13 @@ test and which is the human's work. Resolve pids from the specific workspace's
 `shim-lane*.json` instead — `dodona where` prints the directory they live in (they moved
 out of `<root>/.dodona/` when workspaces landed; see §5). Tests collide with nothing (§17),
 *including the instance the operator is using right now*.
+
+**A pid is now the FALLBACK, not the first move.** `stop-all --lanes` asks each shim to go over
+its own pipe (`##shutdown`), which needs no bookkeeping at all, kills the child TREE rather than
+orphaning it, and lets the shim exit cleanly. That is what finally made an agent whose
+`shim-lane*.json` was never written — or had already been reaped — stoppable: four such were
+running on 2026-08-18, three of them out of the compiler's own output directory, and no `dodona`
+command could reach any of them. The pid sweep remains, for a shim too wedged to converse.
 
 ## 5. Dodona's own state is never repo content — and now lives outside the repo entirely
 

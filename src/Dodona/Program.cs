@@ -365,6 +365,20 @@ int Ps()
 {
     var live = Instance.LiveCtlPipes();
     var ui = Instance.LiveUiPipes();
+    // LANES COME FROM THE OS NOW (P3.1), not from `shim-lane*.json`. Read once: a pipe cannot
+    // be stale, where the file set was monotonic for the life of a workspace and nothing in the
+    // tree ever deleted a record on any exit path. That file set said 24 lanes with six
+    // processes alive, AND missed four live agents at the same time -- wrong in both
+    // directions, from one source (docs/INVESTIGATION-2026-08-18.md RC2).
+    var liveLanes = Instance.LiveLanes();
+    // ...crossed with live shim PROCESSES, because a lane pipe blinks out of the namespace
+    // between clients (LaneLiveness has the measurement). Counting pipes alone made `ps`
+    // under-report by however many lanes happened to be mid-reconnect.
+    // Pipes only, and deliberately: this counts lanes for instances whose STATE DIRECTORY this
+    // process cannot know -- another DODONA_HOME's, or a workspace that no longer exists. Their
+    // pipe is the only evidence there is, which is precisely why they were invisible before.
+    int LaneCount(string id) => liveLanes.Count(t => string.Equals(t.Id, id, StringComparison.OrdinalIgnoreCase));
+    var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var rows = new List<object>();
     int running = 0;
 
@@ -378,9 +392,10 @@ int Ps()
     {
         var isLive = live.Contains(Instance.CtlPipe(w.Id), StringComparer.OrdinalIgnoreCase);
         var hasUi = ui.Contains(Instance.UiPipe(w.Id), StringComparer.OrdinalIgnoreCase);
-        var reaped = ReapShimInfo(Paths.WorkspaceDir(w.Id));
+        var reaped = LaneLiveness.Reap(Paths.WorkspaceDir(w.Id));
         if (reaped > 0) stale += reaped;
-        var shims = LiveShimPids(Paths.WorkspaceDir(w.Id)).Count;
+        named.Add(w.Id);
+        var shims = LaneLiveness.Live(w.Id, Paths.WorkspaceDir(w.Id)).Count;
         if (!isLive && !hasUi && shims == 0) continue;      // asleep and idle: not "running"
         running++;
         Console.WriteLine($"ws    {Trim(w.Name, 20),-20} {(isLive ? "yes   " : "no    ")}  " +
@@ -391,8 +406,12 @@ int Ps()
     if (live.Contains(Instance.CtlPipe(Instance.ConciergeId), StringComparer.OrdinalIgnoreCase))
     {
         running++;
-        Console.WriteLine($"cx    {Trim("concierge", 20),-20} yes     -       -      {Paths.ConciergeDir}");
-        rows.Add(new { kind = "concierge", id = Instance.ConciergeId, name = "concierge", daemon = true, window = false, lanes = 0 });
+        // The concierge runs lanes too (its two judgement tiers), and this row printed `-` for
+        // them -- so the one instance most likely to be forgotten reported no agents by design.
+        var cxLanes = LaneLiveness.Live(Instance.ConciergeId, Paths.ConciergeDir).Count;
+        named.Add(Instance.ConciergeId);
+        Console.WriteLine($"cx    {Trim("concierge", 20),-20} yes     -       {cxLanes,-5}  {Paths.ConciergeDir}");
+        rows.Add(new { kind = "concierge", id = Instance.ConciergeId, name = "concierge", daemon = true, window = false, lanes = cxLanes });
     }
     if (ui.Contains(Instance.UiPipe(Instance.ShellId), StringComparer.OrdinalIgnoreCase))
     {
@@ -409,8 +428,30 @@ int Ps()
     foreach (var orphan in live.Where(p => !accounted.Contains(p)))
     {
         running++;
-        Console.WriteLine($"?     {Trim(orphan, 20),-20} yes     ?       ?      unregistered — pre-workspace, or another DODONA_HOME");
-        rows.Add(new { kind = "unregistered", id = orphan, name = orphan, daemon = true, window = false, lanes = 0 });
+        // Its lanes are countable too: the id is inside the pipe name. `?` was the honest answer
+        // when lanes came from a file only this instance could read; it is not any more.
+        var oid = orphan.StartsWith("dodona-", StringComparison.OrdinalIgnoreCase) && orphan.EndsWith("-ctl", StringComparison.OrdinalIgnoreCase)
+            ? orphan["dodona-".Length..^"-ctl".Length] : orphan;
+        named.Add(oid);
+        var oLanes = LaneCount(oid);
+        Console.WriteLine($"?     {Trim(orphan, 20),-20} yes     ?       {oLanes,-5}  unregistered — pre-workspace, or another DODONA_HOME");
+        rows.Add(new { kind = "unregistered", id = oid, name = orphan, daemon = true, window = false, lanes = oLanes });
+    }
+
+    // ---- LIVE LANES BELONGING TO NO LIVE DAEMON AND NO WORKSPACE ------------------------
+    // The four-agents-nothing-can-see rows. On 2026-08-18 eleven lane pipes were live across
+    // FOUR workspace ids, of which two were in the registry; the other two were ad-hoc
+    // DODONA_HOME temp dirs that had since been deleted, so their agents had no record, no
+    // daemon, no name and no way to be stopped -- and three of them were running out of
+    // src\Dodona\bin\Release, holding the file every build had to overwrite. `ps` inspected
+    // `-ctl` pipes only, so it never enumerated a lane pipe at all and showed none of this.
+    foreach (var g in liveLanes.Select(t => t.Id).Distinct(StringComparer.OrdinalIgnoreCase)
+                               .Where(i => !named.Contains(i)).OrderBy(i => i, StringComparer.OrdinalIgnoreCase))
+    {
+        running++;
+        var n = LaneCount(g);
+        Console.WriteLine($"?     {Trim(g, 20),-20} no      -       {n,-5}  AGENTS WITH NO DAEMON — `stop-all --lanes --orphans`");
+        rows.Add(new { kind = "orphan-lanes", id = g, name = g, daemon = false, window = false, lanes = n });
     }
 
     if (opts.ContainsKey("json")) { Console.WriteLine(JsonSerializer.Serialize(rows)); return 0; }
@@ -418,8 +459,9 @@ int Ps()
     else
     {
         Console.WriteLine($"\n{running} running. `dodona stop-all` stops the daemons; add --lanes to take the agents down too.");
-        // LANES is live processes now, not files. Say when leftovers were cleared, so the
-        // number changing between two runs is never a mystery.
+        // LANES is what is RUNNING now -- a live pipe or a live shim process -- never the file
+        // set. Say when leftovers were cleared, so the number changing between two runs is
+        // never a mystery.
         if (stale > 0)
             Console.WriteLine($"cleared {stale} stale shim record(s) for agents that had already exited.");
     }
@@ -428,73 +470,10 @@ int Ps()
 
 static string Trim(string s, int n) => s.Length <= n ? s : s[..(n - 1)] + "…";
 
-/// <summary>Shim pids recorded for a workspace, from its own `shim-lane<N>.json` files —
-/// never by process name (CLAUDE.md §4: killing by name once murdered the operator's live
-/// session mid-trial).</summary>
-/// <summary>Is this pid a LIVE process of the expected kind? The name check is not
-/// decoration: pids are reused, and a recycled pid would otherwise resurrect a lane that
-/// died days ago.</summary>
-static bool PidAlive(int pid, string expectNamePrefix)
-{
-    if (pid <= 0) return false;
-    try
-    {
-        using var p = System.Diagnostics.Process.GetProcessById(pid);
-        return !p.HasExited &&
-               p.ProcessName.StartsWith(expectNamePrefix, StringComparison.OrdinalIgnoreCase);
-    }
-    catch { return false; }          // no such process, or it exited between the two calls
-}
-
-/// <summary>The shims that are actually RUNNING — which is the only number `ps` was ever
-/// supposed to print.
-///
-/// Found 2026-08-18, by the operator: `dodona ps` said "24 lanes" and `stop-all` said "24
-/// lane agent(s) are still up" while exactly SIX processes existed, of which one was doing
-/// their work and five were Dodona's own machinery. The count came from
-/// <see cref="ShimPids"/>, which reads `shim-lane*.json` FILES and never asks whether the
-/// pid in them is alive; eighteen were leftovers from lanes that had already died. That is
-/// not a cosmetic bug: the number appears in the sentence offering `stop-all --lanes`, so it
-/// pushes someone toward killing real work to clean up files.</summary>
-static List<(long Lane, int Shim, int Child)> LiveShimPids(string dir) =>
-    ShimPids(dir).Where(t => PidAlive(t.Shim, "DodonaShim")).ToList();
-
-/// <summary>Delete shim-info files whose shim is gone. Dodona's own bookkeeping, never repo
-/// content (CLAUDE.md §5), so self-healing on read is right: the standing directive is that
-/// nothing is allowed to go quietly stale, and eighteen dead files had accumulated
-/// unnoticed. Announced by the caller, never silent.</summary>
-static int ReapShimInfo(string dir)
-{
-    var reaped = 0;
-    foreach (var (lane, shim, _) in ShimPids(dir))
-    {
-        if (PidAlive(shim, "DodonaShim")) continue;
-        try { File.Delete(Path.Combine(dir, $"shim-lane{lane}.json")); reaped++; }
-        catch { /* in use or already gone: a failed reap must never fail the listing */ }
-    }
-    return reaped;
-}
-
-static List<(long Lane, int Shim, int Child)> ShimPids(string dir)
-{
-    var list = new List<(long, int, int)>();
-    try
-    {
-        foreach (var f in Directory.EnumerateFiles(dir, "shim-lane*.json"))
-        {
-            try
-            {
-                using var d = JsonDocument.Parse(File.ReadAllText(f));
-                var lane = long.TryParse(Path.GetFileNameWithoutExtension(f)["shim-lane".Length..], out var n) ? n : 0;
-                int Pid(string k) => d.RootElement.TryGetProperty(k, out var v) && v.TryGetInt32(out var i) ? i : 0;
-                list.Add((lane, Pid("shimPid"), Pid("childPid")));
-            }
-            catch { /* half-written or stale: skip it rather than fail the listing */ }
-        }
-    }
-    catch (DirectoryNotFoundException) { }
-    return list;
-}
+/// Lane liveness, shim records and their reaping all live in LaneLiveness now -- Program, the
+/// daemon and the concierge all need the same answer, and the version that lived here as four
+/// local functions could only be asked from the CLI. See that class for why liveness is asked
+/// of the OS TWICE; a single instantaneous read of the pipe namespace is not sound.
 
 /// <summary>
 /// Stop everything Dodona is running, gracefully.
@@ -511,6 +490,29 @@ int StopAll()
     List<Workspace> all;
     try { using var reg = new Registry(); all = reg.All(); }
     catch { all = new List<Workspace>(); }
+
+    // ---- WHAT TO STOP IS DECIDED NOW, BEFORE ANYTHING IS TOUCHED -----------------------
+    // Not tidiness -- ordering. Stopping a daemon disconnects every shim it held, and a lane
+    // pipe blinks out of the namespace while its shim swaps server instances (LaneLiveness
+    // carries the measurement). Enumerating lanes AFTER the daemons went down therefore looked
+    // at the namespace at the one instant every pipe in the workspace was flickering: m0's
+    // `stopall_stops_a_lane_whose_record_is_gone` caught it, and the lane it missed was a live
+    // agent no dodona command could ever find again -- the exact bug P3.1 exists to end.
+    //
+    // While a daemon is attached the pipe is steady, so this is also the most reliable moment
+    // the command has. The settle sample covers the recordless orphan, whose pipe is the only
+    // evidence there is.
+    var laneTargets = new List<(string Id, long Lane)>();
+    var laneStrangers = new List<(string Id, long Lane)>();
+    if (opts.ContainsKey("lanes"))
+    {
+        foreach (var w in all)
+            foreach (var lane in LaneLiveness.Live(w.Id, Paths.WorkspaceDir(w.Id), settleMs: 250))
+                laneTargets.Add((w.Id, lane));
+        laneStrangers = Instance.LiveLanes()
+            .Where(t => !all.Any(w => string.Equals(w.Id, t.Id, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+    }
 
     int stopped = 0;
     foreach (var w in all.Where(w => live.Contains(Instance.CtlPipe(w.Id), StringComparer.OrdinalIgnoreCase)))
@@ -565,9 +567,10 @@ int StopAll()
 
     if (!opts.ContainsKey("lanes"))
     {
-        // LIVE shims, not shim FILES: this number is printed next to the offer of
-        // `--lanes`, so over-counting it argues for killing work that does not exist.
-        var leftovers = all.Sum(w => LiveShimPids(Paths.WorkspaceDir(w.Id)).Count);
+        // LIVE PIPES, not shim FILES and not recorded pids: this number is printed next to the
+        // offer of `--lanes`, so over-counting it argues for killing work that does not exist,
+        // and under-counting it hides work `--lanes` is about to kill.
+        var leftovers = all.Sum(w => LaneLiveness.Live(w.Id, Paths.WorkspaceDir(w.Id)).Count);
         Console.WriteLine(stopped == 0 ? "nothing was running" : $"stopped {stopped} daemon(s); lanes keep running");
         if (leftovers > 0)
             Console.WriteLine($"{leftovers} lane agent(s) are still up — they survive their daemon on purpose. " +
@@ -575,9 +578,48 @@ int StopAll()
         return 0;
     }
 
+    // ---- stopping lanes: ASK THE SHIM FIRST, then fall back to the recorded pid ----------
+    // A shim's own pipe is a door that needs no bookkeeping at all, which is the whole point:
+    // `stop-all --lanes` used to iterate `shim-lane*.json`, so an agent whose record was never
+    // written or had been reaped was unstoppable by any dodona command -- and three such were
+    // running out of the compiler's output directory, blocking every build. `##shutdown` also
+    // kills the child TREE and lets the shim exit cleanly, where a pid kill orphans the child.
+    //
+    // Registry scope, exactly like the daemon half above and like `publish --all` (invariant
+    // I6): a lane belonging to no registered workspace is NAMED, not stopped, unless --orphans.
     int agents = 0;
+    // Captured above, before the daemons went down. Strangers are known only by their pipes,
+    // which is all we know about them and all that is needed in order to NAME them.
+    var targets = laneTargets;
+    var strangers = laneStrangers;
+    if (strangers.Count > 0)
+    {
+        if (opts.ContainsKey("orphans")) targets.AddRange(strangers);
+        else
+        {
+            Console.WriteLine($"{strangers.Count} live lane(s) belong to no workspace in this registry and were LEFT ALONE:");
+            foreach (var g in strangers.Select(t => t.Id).Distinct(StringComparer.OrdinalIgnoreCase))
+                Console.WriteLine($"    {g} ({strangers.Count(t => string.Equals(t.Id, g, StringComparison.OrdinalIgnoreCase))} lane(s))");
+            Console.WriteLine("  `dodona stop-all --lanes --orphans` stops them too, if you are sure they are yours.");
+        }
+    }
+    foreach (var (wsid, lane) in targets)
+    {
+        var pipe = Instance.LanePipe(wsid, lane);
+        if (LaneRuntime.ShutdownShimAsync(pipe).GetAwaiter().GetResult() &&
+            LaneRuntime.WaitPipeGoneAsync(pipe).GetAwaiter().GetResult())
+        {
+            agents++;
+            continue;
+        }
+        Console.WriteLine($"  lane {lane} of {wsid} did not answer ##shutdown — falling back to its recorded pid");
+    }
+
+    // The pid sweep, for anything the pipe could not reach: a wedged shim, or a child that
+    // outlived one. Shim-info is DEMOTED to exactly this -- a pid lookup for killing, never a
+    // count of what is running.
     foreach (var w in all)
-        foreach (var (lane, shim, child) in LiveShimPids(Paths.WorkspaceDir(w.Id)))
+        foreach (var (lane, shim, child) in LaneLiveness.LiveRecords(Paths.WorkspaceDir(w.Id)))
             foreach (var pid in new[] { shim, child })
             {
                 if (pid <= 0) continue;
@@ -1183,7 +1225,13 @@ static (string? cmd, string root, Dictionary<string, List<string>> opts, List<st
 {
     // Valueless flags must be declared: otherwise `--json` at the end of a line is
     // indistinguishable from a positional argument, and silently becomes one.
-    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk", "shell", "concierge", "lanes" };
+    // `orphans` was MISSING here, so `stop-all --orphans` did nothing at all: a `--flag` that is
+    // not in this set only registers when another argument follows it, and as the last word on
+    // the line it fell through to the positional list instead. So the escape hatch 69e8003
+    // added -- the one the LEFT ALONE message tells you to use -- has never once worked. Found
+    // by running it (`stop-all --lanes --orphans` named two ghost lanes, then left them);
+    // reading the code that prints the message would never have shown it.
+    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk", "shell", "concierge", "lanes", "orphans" };
 
     string? cmd = null;
     string root = Environment.CurrentDirectory;

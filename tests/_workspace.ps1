@@ -21,11 +21,22 @@
 # EVERY temporary thing a suite makes lives under here: its DODONA_HOME, its fake project
 # roots, its scratch bin roots. One directory per suite run, and the RUNNER owns it.
 #
-# Why it exists (2026-08-19). The suites leak processes -- publish-acceptance leaves four
-# DodonaShim behind every run, because a shim's only exit is a message from a daemon that is
-# already gone. Leaked shims are not idle: measured with 78 alive, a full run took 300 s
-# instead of 87 s, m3 crashed outright and brain went red on nine timing checks. So the runner
-# has to be able to clean up after itself.
+# Why it exists (2026-08-19). Leaked processes are not idle: measured with 78 alive, a full run
+# took 300 s instead of 87 s, m3 crashed outright and brain went red on nine timing checks. So
+# the runner has to be able to clean up after itself.
+#
+# This comment used to say publish-acceptance leaves four DodonaShim behind every run. IT DOES
+# NOT, and never did: that suite starts no lanes at all, so it cannot leak a wrapper. Measured
+# at 69e8003 -- 0 reaped alone, 1 in a parallel wave, and the 1 is a `dodona` DAEMON still
+# winding down from `stop-daemon` when the reaper looks. A race, not an orphan. The claim was
+# repeated in three places and sent Phase 3's session hunting for the wrong bug; the runner
+# names what it reaped now, so the two can never be confused again (RECOVERY-PHASES Phase 3,
+# "what this plan got wrong").
+#
+# A shim can no longer outlive its agent (Phase 3), so this is no longer the only thing
+# standing between a suite and an immortal process -- but it stays: a .ps1 that fails to PARSE
+# never reaches its `finally` at all, and the suites kill daemons with -Force on purpose,
+# which reaches no cleanup either.
 #
 # AND THAT IS WHY THE PATH MATTERS RATHER THAN THE PROCESS NAME. Cleaning "every DodonaShim
 # under %TEMP%" would kill a CONCURRENT session's suite run stone dead -- this repo already

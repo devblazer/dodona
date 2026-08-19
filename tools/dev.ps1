@@ -112,12 +112,29 @@ function LiveApp {
 # failure text blamed a returning Start-Sleep, sending the reader at the wrong file entirely.
 # A number here is what stops that misdiagnosis. Stopping them is Phase 3's job (a shim
 # should exit when its child does); this only ever REPORTS.
+# Phase 3 SHIPPED that, so a wrapper can no longer outlive its agent -- and Do-Gate now asserts
+# it (I3) instead of merely printing a number. This still only reports, because what it reports
+# BEFORE a run is a machine another session dirtied, which is not this run's failure to own.
+# BOTH PREFIXES. This matched only `$env:TEMP\dodona-*`, which was every suite temp directory
+# until the per-suite sandbox arrived and became `$env:TEMP\dsb-<6hex>` -- deliberately short,
+# for MAX_PATH. Everything a suite makes now nests inside THAT, so from the day the sandbox
+# landed this function matched almost nothing, and `dev gate` opened by reporting "leaked test
+# processes before: 0" on a machine that had them. A counter that cannot see the thing it
+# counts is worse than no counter: it is a green light.
 function LeakedTestProcesses {
     @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
             $p = $null
             try { $p = $_.Path } catch { }
-            $p -and $p -like "$env:TEMP\dodona-*"
+            $p -and (($p -like "$env:TEMP\dodona-*") -or ($p -like "$env:TEMP\dsb-*"))
         })
+}
+
+# The wrappers and agents specifically -- what I3 is about. A `dodona` daemon still winding down
+# from `stop-daemon` when we look is a RACE, not an orphan, and lumping the two together is what
+# made "publish-acceptance leaks four DodonaShim every run" a fact everybody repeated: publish-
+# acceptance starts no lanes at all, so it has never leaked a wrapper.
+function LeakedAgentProcesses {
+    @(LeakedTestProcesses | Where-Object { $_.ProcessName -in @('DodonaShim', 'DodonaFakeAgent', 'claude') })
 }
 
 function ReportBlockers {
@@ -455,7 +472,17 @@ function Complete-Suite($h, [int]$timeoutSec = 420) {
         })
     foreach ($lp in $leaked) { try { Stop-Process -Id $lp.Id -Force -ErrorAction Stop } catch { } }
     if ($leaked.Count -gt 0) {
+        # NAMED, not just counted. A bare integer sent this phase's session hunting for leaked
+        # DodonaShim wrappers in publish-acceptance -- a suite that starts no lanes at all, so it
+        # has never leaked one. What it actually leaves is a `dodona` DAEMON still winding down
+        # from `stop-daemon` when the reaper looks: a race, not an orphan. Two unrelated bugs
+        # behind one number, and the number was the only evidence anybody had.
         Add-Content -Path $log -Value "$($h.Name): reaped $($leaked.Count) leaked process(es) from its sandbox" -Encoding utf8
+        foreach ($lp in $leaked) {
+            $lpath = '?'
+            try { $lpath = $lp.Path } catch { }
+            Add-Content -Path $log -Value "    leaked: $($lp.ProcessName) pid $($lp.Id) -- $lpath" -Encoding utf8
+        }
     }
     Remove-Item $h.Sandbox -Recurse -Force -ErrorAction SilentlyContinue
 
@@ -1125,9 +1152,39 @@ function Do-Gate {
         $bad++
     }
 
+    # I3: NOTHING DODONA STARTED SURVIVED THE RUN. Phase 3's invariant, asserted where it can be
+    # measured independently of the product's own counting code -- straight off the process table,
+    # scoped by PATH to the directories this runner made (CLAUDE.md 4: never by name alone).
+    #
+    # The suites deliberately murder daemons with -Force, so every wrapper here had to end itself:
+    # by seeing its child exit, or by its lease running out. Before Phase 3 a shim's only exit was
+    # a message from a daemon that was usually already dead, and 78 of them accumulated in one
+    # session -- which turned an 87 s run into 300 s, crashed m3 and reddened nine of brain's
+    # timing checks. A verification tool whose answer depends on how many corpses are on the
+    # machine is not a verification tool.
+    #
+    # A short settle wait, because a `finally` that has just called Stop-Process on eight pids may
+    # still have one of them exiting. It is a condition with a deadline, never a sleep.
+    $sw3 = [System.Diagnostics.Stopwatch]::StartNew()
+    while ((@(LeakedAgentProcesses)).Count -gt 0 -and $sw3.ElapsedMilliseconds -lt 3000) { Start-Sleep -Milliseconds 200 }
+    $survivors = @(LeakedAgentProcesses)
+    if ($partial) {
+        Say "  PARTIAL I3 $($survivors.Count) wrapper/agent process(es) survived -- only $($suites -join ', ') ran"
+        if ($survivors.Count -gt 0) { $bad++ }
+    }
+    elseif ($survivors.Count -eq 0) {
+        Say "  PASS  I3  no wrapper or agent process survived the suites"
+    }
+    else {
+        Say "  FAIL  I3  $($survivors.Count) wrapper/agent process(es) outlived the run:"
+        foreach ($sv in $survivors) { Say "          pid $($sv.Id)  $($sv.ProcessName)  $($sv.Path)" }
+        Say "          Stop them BY PATH, never by name, and read tests\m0-acceptance.ps1's"
+        Say "          Phase 3 section -- one of P3.2 (child exited) or P3.3 (lease) has regressed."
+        $bad++
+    }
+
     Say ""
     Say "-- not covered yet (RECOVERY-PHASES section 2), so this gate does NOT mean these hold --"
-    Say "  not yet -- phase 3   live lane pipes == the lane count dodona ps reports           (I3)"
     Say "  not yet -- phase 5   repo lint clean: no control bytes, every named test path real (I8)"
 
     Say ""
@@ -1136,7 +1193,7 @@ function Do-Gate {
               else { "GATE SELF-TEST FAILED -- $bad problem(s)" })
     }
     else {
-        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 7 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
+        Say $(if ($bad -eq 0) { "GATE PASSED -- on the 8 assertions above, and only those." } else { "GATE FAILED -- $bad problem(s)" })
     }
     Say "log: $log"
     if ($bad -gt 0) { exit 1 }

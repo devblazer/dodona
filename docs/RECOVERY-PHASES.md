@@ -168,38 +168,85 @@ the build), and with `dev gate` required before commit this is **safer** than to
 
 ---
 
-## Phase 3 — Processes can die on their own  *(I3, I4, I6)*
+## Phase 3 — Processes can die on their own  *(I3, I4, I6)* — **DONE 2026-08-19**
 
-**Effort: ~1 day. P3.1 → P3.2 → P3.3/P3.4/P3.5 is one causal unit, in that order, by one agent.**
+**Shipped. P3.1 → P3.2 → P3.3/P3.4/P3.5 in that order, one agent, as required.** What follows is
+what was built and — more usefully — the four things this plan had wrong, each of which would
+have shipped a silent regression if the checks had been trusted instead of proved.
 
-| item | what |
+| item | what shipped |
 |---|---|
-| P3.1 | Lane liveness from `Instance.LivePipes()` ([Instance.cs:127](../src/Dodona/Instance.cs#L127)) in `ps` and `stop-all --lanes`. Shim-info is demoted to a pid lookup for killing — never the count. Today: 11 live lane pipes, 7 records, 4 agents nothing can see or stop. |
-| P3.2 | The shim **exits when its child exits**, once the buffer is drained. The flag is already computed at [DodonaShim/Program.cs:71](../src/DodonaShim/Program.cs#L71) and then ignored. |
-| P3.3 | **Lane lease.** No daemon contact for N minutes → the shim exits itself. This names the condition that un-sticks it rather than a person (CLAUDE.md §0.1), and closes the orphan class even when a daemon is killed with `-Force`. |
-| P3.4 | Reconcile asks the OS before writing `utility_lane_reaped … "shim gone"` ([Daemon.cs:300](../src/Dodona/Daemon.cs#L300)). Delete `attempts: 1` ([Daemon.cs:257-258](../src/Dodona/Daemon.cs#L257-L258)): pipe absent → zero attempts (**faster** than today, which is what the 35-second reconcile hang actually wanted); pipe present → be patient, and if it will not converse, send `##shutdown` rather than abandoning it. |
-| P3.5 | `EnsureBrainAsync`/`EnsureRouterAsync` ([Daemon.cs:1864-1901](../src/Dodona/Daemon.cs#L1864-L1901)) never spawn a replacement while the predecessor's pipe is live. Adoption failure must not be a spawn trigger. |
-| P3.6 | `stop-all` gets `publish`'s scoping: `--workspace <name>…` / `--all` = every live workspace **in the registry**. It currently stops every unregistered `dodona-*-ctl` pipe on the machine ([Program.cs:528-536](../src/Dodona/Program.cs#L528-L536)), which includes another agent's `DODONA_HOME`-isolated suite daemons. |
-| P3.7 | Checks in `m0` and `m4` for P3.1–P3.5, each `dev prove`d against `cd53389` **before** being believed. |
+| P3.1 | Lane liveness comes from the OS: `Instance.LiveLanes()` reads the pipe namespace, `LaneLiveness.Live()` crosses it with live shim PROCESSES. `ps` counts lanes that way (workspaces, the concierge — which used to print `-` for its own two judgement tiers — and unregistered instances), and now prints a row for **live lanes belonging to no daemon and no workspace**: the four-agents-nothing-can-see case. `stop-all --lanes` stops a lane over its own pipe with `##shutdown`, so a lane whose `shim-lane*.json` was never written or has been reaped is reachable at last; shim-info is demoted to a pid sweep for whatever the pipe could not reach. |
+| P3.2 | The shim exits when its child exits, once the buffer is DRAINED (`delivered >= buffer.Count`) — drained, not merely dead, or the daemon would lose the last turn m0 exists to protect. It also deletes its own `shim-lane*.json`, so the record dies with the process; nothing in the tree deleted one on any exit path before, which is why "24 lanes" was every lane a workspace had ever spawned. |
+| P3.3 | The lease: no client connected for `DODONA_SHIM_LEASE_SEC` (default 1800) and the shim exits, taking the child with it. Closes the orphan class P3.2 cannot — a live agent whose daemon was killed with `-Force` and never came back. Names the condition that un-sticks it, never a person (CLAUDE.md §0.1). |
+| P3.4 | Reconcile asks the OS before declaring a lane dead. `attempts: 1` for utility lanes is gone: **no pipe and no live shim → zero attempts** (faster than the one 500 ms knock this plan wanted to remove), **alive → be patient whatever the role**, and if it will not converse it is sent `##shutdown` rather than abandoned. Abandoning was the manufacturing step for an immortal orphan: the row was marked dead, which dropped the only reference that could stop the process, and a replacement started 160 ms later. |
+| P3.5 | `EnsureBrainAsync`/`EnsureRouterAsync` never spawn beside a live predecessor. A lane whose pipe or shim process is still there is told to go, once (`_shutdownAsked` — the guard is on the path of every routed sentence, so asking twice is latency paid forever); if it will not go, the spawn is REFUSED and announced. The reap loop no longer writes `utility_lane_reaped … "shim gone"` over a live pipe either — that lie is what let the guard be bypassed. **Extended past what this row asked for:** the COMPRESSOR pool has the same hole — its arithmetic counts a member only if it is adopted, so a live-but-unreachable one is invisible and gets a replacement started beside it. Same bug, third costume; the guard closes the class rather than the two call sites the plan happened to list. |
+| P3.6 | **Was already done before this phase started, by 69e8003.** `stop-all` is registry-scoped and NAMES daemons the registry does not own instead of stopping them. This row was stale; `--lanes` now follows the same rule, so a lane belonging to no registered workspace is named, and `--orphans` is how you mean it. |
+| P3.7 | 15 new checks: 11 in `m0` (P3.1–P3.4, taking it from 8 checks to 19) and 4 in `brain` (P3.5, 41 to 45 — `brain` owns router/brain lifetime and already stops and restarts the classifier, so the incident's own shape lives there; m4 would have paid for a real build to assert nothing about hot swap). Every one `dev prove`d red against 69e8003 before being believed. |
 
-**Becomes impossible:** an orphan; an unkillable agent; a count that lies in either direction;
-a cleanup that reaches someone else's work.
+**Becomes impossible:** an orphan; an unkillable agent; a count that lies in either direction; a
+cleanup that reaches someone else's work.
 
-**Verify (<30 s):**
+### What this plan got wrong
+
+**1. "A lane pipe in the namespace" is NOT a sound liveness test, and this phase nearly shipped
+on it.** P3.1/P3.4 as written say to read `Instance.LivePipes()` and believe it. Measured: **a
+shim's pipe name blinks OUT of the namespace between clients** — the serve loop disposes its
+`NamedPipeServerStream` and constructs the next one, and in that gap the name is simply not
+there. Probed directly: 8 of 192 reads over 1.5 s saw no pipe while the shim was alive and
+instantly connectable. The window is not rare, it is *synchronised* — every shim in a workspace
+disconnects the instant its daemon exits, and the next daemon's reconcile runs milliseconds
+later. A single read there declared four to seven live lanes "gone" per restart and orphaned
+every agent in the workspace. It was caught only because `brain-acceptance` noticed a restart
+had stopped adopting anything, and because the shim was made to say why it exits. So liveness is
+the UNION of two OS answers (pipe, or a recorded shim pid that is alive) — see `LaneLiveness`,
+which carries the measurement — and `stop-all` captures its lane targets BEFORE it stops any
+daemon, because that is the one moment every pipe is steady. **Do not narrow this back to one
+answer.**
+
+**2. `publish-acceptance` does not leak four `DodonaShim` processes, and never has.** Phase 4 and
+Phase 6 both state it as measured fact, and `tests/_workspace.ps1` repeats it in a comment. The
+suite starts **no lanes at all** — so it cannot leak a wrapper. Measured at 69e8003: 0 reaped
+running alone, 1 in a parallel wave, and the one is a `dodona` DAEMON still winding down from
+`stop-daemon` when the reaper looks. That is a race, not an orphan, and P3.2/P3.3 do not touch
+it. `reaped 0` was therefore the wrong acceptance signal for this phase; the runner now NAMES
+what it reaped, so the two can never be confused again, and `dev gate` asserts the invariant
+that actually belongs to Phase 3: no wrapper or agent process survives the suites.
+
+**3. `dev gate`'s own leak counter could not see the leak.** `LeakedTestProcesses` matched
+`$env:TEMP\dodona-*`, which was every suite temp directory until the per-suite sandbox landed
+as `$env:TEMP\dsb-<6hex>` (short, for MAX_PATH). Everything a suite makes now nests inside that,
+so the counter matched almost nothing and the gate opened by reporting "0 leaked" on a machine
+that had them. Fixed to match both.
+
+**4. The verify snippet in this row was itself unsound.** It compared an instantaneous lane-pipe
+count against `dodona ps` — the exact read that blinks. Both sides can be wrong at once, and a
+flaky verification is how a real regression gets re-run instead of read. Replaced below.
+
+**Verify:**
 ```powershell
-$pipes = @([IO.Directory]::GetFiles("\\.\pipe\") | ? { $_ -match 'dodona-.*-lane\d+$' }).Count
-$ps    = (dodona ps --json | ConvertFrom-Json | % { $_.lanes } | measure -Sum).Sum
-"$pipes / $ps"                                   # must be equal — today 11 / 7
-dodona stop-all --lanes
-@([IO.Directory]::GetFiles("\\.\pipe\") | ? { $_ -match 'lane\d+$' }).Count   # must be 0
+# Nothing Dodona started may outlive the run. Asserted by `dev gate` as I3, so this is the
+# by-hand form: PROCESSES (which do not blink), scoped by PATH, never by name (CLAUDE.md 4).
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 gate     # I3 row must say PASS
+
+# And the counts must agree. `dodona ps` is the union of both OS answers; so is this.
+dodona ps                      # LANES column, per workspace
+dodona stop-all --lanes        # then it must report what it stopped, and ps must go to zero
 ```
 
-**Cost / breaks:** P3.2 means `lane-respawn` can no longer reattach to a shim whose agent
-crashed — correct, since there is nothing to reattach to, but it changes `unreachable` handling
-for work lanes and needs a check. P3.4 makes reconcile faster, not slower.
+**Cost / breaks:** `lane-respawn` can no longer reattach to a shim whose agent crashed — correct,
+there is nothing to reattach to, and m0 covers the respawn path. A `stop-all` that leaves lanes
+running now loses those agents after the lease (30 min) rather than never; the lane ROW survives
+and `lane-respawn` resumes the session, so the loss is bounded and recoverable, where an
+immortal process is neither.
+
+**Still open, and deliberately not done here:** make the lane pipe stop blinking at all, by
+keeping a listening server instance alive across the swap. That is the root fix and it would
+retire the union — but `maxNumberOfServerInstances: 2` lets a second client connect while the
+first is still being pumped, and `LaneRuntime.ConnectAndPumpAsync` then waits on a `!hello` with
+no timeout, which is a hang. Fixing the hang first is the prerequisite; see Phase 6.
 
 ---
-
 ## Phase 4 — Verification costs seconds  *(I7)*
 
 **Effort: ~1–2 days.** Order within the phase matters: de-sleep before parallel, and fix the
@@ -309,58 +356,34 @@ last.
 
 ---
 
-## Phase 6 — Nothing Dodona starts is allowed to outlive its reason  *(operator directive, 2026-08-19)*
+## Phase 6 — What is left after Phase 3  *(operator directive, 2026-08-19; rewritten 2026-08-19)*
 
-**Run this LAST, and treat it as an investigation rather than a fix list.** The operator's words:
-*"the fact that you have strays is very alarming."* They are right, and the alarming part is not
-the wasted memory — it is what the strays imply about whether Dodona knows what it is running.
+**This phase was written during Phase 4 and its first three questions were already Phase 3's
+job — P3.2, P3.4 and P3.1, named in that plan since it was written.** The Phase 4 author did not
+notice, so two phases described one fix, and the duplication is recorded here rather than
+quietly deleted because "write a new phase" is this project's reflex and the reflex is the bug
+(D-3, D-6). Those questions are answered: read Phase 3.
 
-**What is measured, not suspected.** During Phase 4, on a machine with no app open and no
-daemon running:
+The operator's words stand and are what earned Phase 3 its I3 gate row: *"the fact that you have
+strays is very alarming."* The alarming part was never the memory — it was what strays implied
+about whether Dodona knows what it is running.
 
-- `publish-acceptance` leaks **four `DodonaShim` processes on every successful run**. Over one
-  session **78** accumulated, from six different suite runs, all still holding pipes.
-- They are **not idle**. With 78 alive, a full suite run took **300 s instead of 87 s**, `m3`
-  crashed outright with no tally, `brain` went red on **nine** timing checks, `ui-use` on two
-  and `m4` on two. A verification tool whose answer depends on how many corpses are on the
-  machine is not a verification tool.
-- They **held the runner's own redirect files open** — every `.publish.out` from that session
-  was undeletable, `Device or resource busy`. With the older stdout *pipe* those same handles
-  held `dev suites` hostage for **eight minutes**, and `dev prove` for **24**.
-- The investigation of 2026-08-18 already recorded the mechanism (RC2): a shim's only exit is
-  `##shutdown` from a client, it detects its child's death and does nothing, and the daemon
-  abandons a lane after ONE 500 ms connect attempt without ever asking the OS whether the shim
-  is alive. Four live agents had no shim-info record at all, so `dodona ps` could not see them
-  and `stop-all --lanes` could not reach them.
+**Question 4 — should the suites still need a reaper? YES. Do not delete it.**
+A shim can no longer outlive its agent, so the sandbox is no longer the only thing standing
+between a suite and an immortal process. It is still load-bearing for two cases the shim cannot
+reach: a `.ps1` that fails to PARSE never runs its `finally` at all (CLAUDE.md §0.2), and the
+suites deliberately kill daemons with `-Force`, which reaches no cleanup either. The leak counter
+stays for the same reason it was built: a silent leak is how this went unnoticed for two days.
 
-**Phase 4 did NOT fix this. It fixed being poisoned by it**, which is a different thing and the
-distinction matters:
+**What actually remains, and it is small:**
 
-- the runner gives each suite a sandbox directory and reaps anything still running under it,
-  reporting the count (`reaped N leaked`) rather than tidying silently;
-- suite output goes to files, so an inherited handle can no longer hang the runner;
-- `dev gate` counts pre-existing strays before the run and names them first when I7 fails.
-
-So the leak is now **contained and visible**. It is still a leak.
-
-**What this phase has to answer, in order:**
-
-1. Why does a shim survive its own agent? (RC2 names the code: `childExited` is computed and
-   discarded — `DodonaShim/Program.cs`.) Exit when the child exits, once the buffer is drained.
-2. Why does the daemon declare a live lane dead after one attempt, and then spawn a
-   replacement? Ask the OS — `Instance.LivePipes()` is already the authority for daemons and
-   UIs, and lanes are the one thing still counted from files.
-3. Why can `dodona ps` and `stop-all --lanes` see fewer lanes than exist? Same answer.
-4. **Only then**: should the suites need a reaper at all? If a shim cannot outlive its agent,
-   the Phase 4 sandbox becomes a belt-and-braces measure rather than a load-bearing one. Do not
-   delete it — it also catches a suite that fails to PARSE and so never reaches its `finally`.
-
-**Do not start here by deleting the reaper or the leak counter.** They are the only reason the
-numbers above are visible at all, and a silent leak is how this went unnoticed for two days
-before.
+| item | what | why it is not Phase 3 |
+|---|---|---|
+| P6.1 | Stop the lane pipe blinking: keep a listening server instance across the swap, so the pipe namespace alone is a sound liveness test and `LaneLiveness`' second answer can retire. **Prerequisite:** `LaneRuntime.ConnectAndPumpAsync` awaits `!hello` with no timeout, so a client that connects to a not-yet-pumped instance would hang the daemon's reconcile — that must be bounded first. | Phase 3 shipped the union instead, because a hang is worse than a race and the standing directive forbids adding one (CLAUDE.md §0.1). |
+| P6.2 | The suites' own daemon shutdowns are fire-and-forget: `stop-daemon` returns before the process has exited, so the runner's reaper intermittently catches a `dodona` mid-exit and reports it as a leak. Wait for the pid, or stop reporting a race as a leak. | It is a suite-hygiene race, not an orphan. It is the ONLY thing `reaped N` has ever reported for `publish-acceptance` — see Phase 3's "what this plan got wrong" #2. |
+| P6.3 | An ad-hoc script spawning real Claude lanes outside `DODONA_HOME` (§6). The lease now bounds the damage to 30 minutes instead of forever, which is what produced the `mlroot` and `freeze-repro` orphans; preventing the spawn needs a hook refusing `lane-start` outside a test home. Design it, do not bolt it on. | Carried from §6 unchanged. Phase 3 bounded it; it did not prevent it. |
 
 ---
-
 ## Phase 5 — Prose shrinks to what code cannot hold  *(I8)*
 
 **Effort: ~half a day. Depends on P0.2, Phase 4, P5.1.**
@@ -388,7 +411,7 @@ is believed — a check that has not been seen red is worth nothing, and that is
 |---|---|---|
 | `dev check` → "in the build output: nothing" | I1 | 3 pids |
 | `git status --porcelain` empty after a full suite run | I5 | 48 dirty |
-| lane pipes == `ps` lanes | I3 | 11 vs 7 |
+| no wrapper or agent process survives a suite run | I3 | **earned 3** — asserted off the process table, scoped by path, with a 3 s settle for a `finally` still killing pids. NOT "lane pipes == `ps` lanes" as this row used to read: both sides of that comparison come from a read that blinks (Phase 3, "what this plan got wrong" #1), so it was a flaky assertion about a real invariant |
 | two agents `dev build` concurrently, both succeed | I2 | **earned 2a** — but weaker than it reads: two concurrent builds of one *shared* tree were measured and both succeeded, so this row is regression protection for worktree builds, not proof of the fix |
 | `dev suites` green while the live app runs, app untouched | I1, I2 | **earned 2a** — asserts the live app's pids survive the suites; prints `n/a` rather than a green line when no app is running |
 | `dev suites` wall clock inside its budget | I7 | **earned 4** — the runner measures and prints its own wall clock and the gate asserts it. Budget is **90 s**, not the 35–45 s P4.3 projected: measured across six full runs the same code gave 53.7 s and 71.7 s, and a 60 s line would be red on half of green runs. `ui-use` is the long pole (42.5 s alone, up to 69 s in a parallel wave) and is really four suites wearing one name |
