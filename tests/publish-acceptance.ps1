@@ -1,4 +1,4 @@
-# PUBLISH SCOPING acceptance (docs/WORKSPACES-CONCIERGE.md §7).
+﻿# PUBLISH SCOPING acceptance (docs/WORKSPACES-CONCIERGE.md §7).
 #
 # **This suite could not exist before.** `publish --all` broadcast a swap to every
 # `dodona-*-ctl` pipe it could find in the OS pipe namespace, so a test that exercised it
@@ -206,13 +206,37 @@ try {
     $apDaemon = Start-Process -FilePath $dodona -ArgumentList @('daemon', '--workspace', 'apnoprov') `
         -PassThru -NoNewWindow -RedirectStandardOutput "$outp-noprov.out" -RedirectStandardError "$outp-noprov.err"
     try {
-        $seen = ''
-        foreach ($i in 1..40) {
-            Start-Sleep -Milliseconds 250
-            $seen = Dx @('feed', '--workspace', 'apnoprov')
-            if ($seen -match 'no commit provenance') { break }
-        }
-        Check 'no_provenance_daemon_refuses_to_guess' ($seen -match 'no commit provenance' -and $seen -match 'NOT watching') $seen
+        # ASKED OF THE STORE, and asserting what the code ACTUALLY DOES. This check was stale
+        # twice over and so had never once run: it invoked `dodona feed`, which is not a command
+        # (only `concierge-feed` exists), and it grepped for "NOT watching" -- wording from a
+        # design that was deliberately replaced. Parking with auto-publish silently off was
+        # judged a violation of the never-stuck directive, so an unstamped build now ARMS
+        # itself: it announces that it cannot tell whether main moved, publishes main once, and
+        # only surrenders if the result is still unstamped (Daemon.StartDriftWatcher).
+        #
+        # So the assertion is that it neither guesses nor goes quiet: an
+        # `autopublish_no_provenance` event exists, and the operator was told in the feed.
+        # Nothing is actually published here -- $apRoot is not a git repository, so the
+        # bootstrap's own Git.IsRepo guard stops it.
+        $ev = ''
+        $ann = ''
+        Wait-Until {
+            $script:ev = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$($apWs.store)')
+print(db.execute('''SELECT COUNT(*) FROM events WHERE kind='autopublish_no_provenance' ''').fetchone()[0])
+") | Out-String
+            $script:ann = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$($apWs.store)')
+r = db.execute('''SELECT body FROM pane_events WHERE kind='announcement' AND body LIKE '%commit stamp%' ORDER BY id DESC LIMIT 1''').fetchone()
+print(r[0] if r else '')
+") | Out-String
+            $script:ev.Trim() -ne '0' -and $script:ann -match 'commit stamp'
+        } 25000 'the unstamped build records that it has no provenance and says so' | Out-Null
+        Check 'no_provenance_daemon_refuses_to_guess' `
+            ($ev.Trim() -ne '0' -and $ann -match 'no commit stamp' -and $ann -match 'arm itself') `
+            "event_count=$($ev.Trim()) announcement=$($ann.Trim())"
     }
     finally {
         $env:DODONA_NO_AUTOSTART = "1"          # the rest of the suite owns daemon lifetime again

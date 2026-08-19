@@ -219,8 +219,28 @@ try {
     $wt = (Sql "SELECT worktree FROM tickets WHERE id=1").Trim()
     $runningExe = ''
     if (((Dodona @("swaps")) -join ' ') -match 'exe (\S+)') { $runningExe = $Matches[1] }
-    $gateBody = if (Test-Path "$wt\dodona-gate.ps1") { Get-Content "$wt\dodona-gate.ps1" -Raw } else { '' }
-    Check 'gate_points_at_running_build' ($runningExe -ne '' -and $gateBody.Contains($runningExe)) "exe=$runningExe wt=$wt"
+    # THE HOOK COMMAND OUT OF settings.local.json, not a generated dodona-gate.ps1. This check
+    # asserted on that script for months after it stopped existing: the gate became a compiled
+    # subcommand (`dodona gate-hook`) and DeployGate now DELETES any dodona-gate.ps1 it finds as
+    # stale, so Test-Path was always false, $gateBody was always '', and ''.Contains(<exe>) is
+    # always false. It could not pass, and what it exists to prove -- that after a hot swap the
+    # deployed gate points at the build that is actually RUNNING, rather than at an old build
+    # directory scheduled for deletion -- was silently unverified the whole time. m1 was updated
+    # for the same change and this was missed.
+    # PARSED, not string-matched, and the first attempt at this fix got it wrong in a way worth
+    # keeping: settings.local.json is JSON, so the command inside it has its backslashes doubled
+    # and its quotes written as \u0022. A raw Contains() against a Windows path with single
+    # backslashes can therefore NEVER match, and the check fails while the gate is perfectly
+    # well configured -- a false red, which is as damaging as a false green. `dev prove` caught
+    # it. Read the command the way m1 does, out of the object, where it is unescaped.
+    $gateSettings = Join-Path $wt '.claude\settings.local.json'
+    $gateHook = ''
+    if (Test-Path $gateSettings) {
+        try { $gateHook = ((Get-Content $gateSettings -Raw | ConvertFrom-Json).hooks.PreToolUse[0].hooks[0].command) } catch { $gateHook = '' }
+    }
+    Check 'gate_registration_survives_the_swap' ($gateHook -match 'gate-hook') "settings=$gateSettings hook=$gateHook"
+    Check 'gate_points_at_running_build' ($runningExe -ne '' -and $gateHook.Contains($runningExe)) `
+        "exe=$runningExe wt=$wt hook=$gateHook"
 
     # ================= old build directories are collected =================
     $dirs = @(Get-ChildItem -Directory $binRoot | Where-Object { $_.Name -ne 'bogus' })

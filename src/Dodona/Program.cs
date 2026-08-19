@@ -754,8 +754,12 @@ int Publish()
     // MAIN build rather than a trial, with no special case anywhere: a linked worktree shares
     // the ref store, so `rev-parse main` means the same thing inside it.
     var mainBranch = Config.Load(project).Main;
-    var head = Git.Sha(project, "HEAD");
-    var mainSha = Git.Sha(project, mainBranch);
+    // ShaOrEmpty, not Sha: `project` is not guaranteed to be a git repository -- `publish
+    // --exe` on a plain folder is a legitimate call, and it does not need provenance at all.
+    // Sha THREW here, so that call died with an unhandled InvalidOperationException six lines
+    // above the `haveProvenance` test written to handle exactly this.
+    var head = Git.ShaOrEmpty(project, "HEAD");
+    var mainSha = Git.ShaOrEmpty(project, mainBranch);
     var (bc, bout) = Git.Run(project, "rev-parse", "--abbrev-ref", "HEAD");
     var branch = bc == 0 ? bout.Trim() : "";
     if (branch is "HEAD" or "") branch = head == mainSha && mainSha.Length > 0 ? mainBranch : "detached";

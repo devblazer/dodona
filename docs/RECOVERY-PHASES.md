@@ -258,11 +258,42 @@ suite's questions and failed 21 checks; roots are GUID temp dirs; all four UI la
 - **All twelve at once is worse than five at a time.** On 22 cores, never CPU-bound: `ui-use`
   went 42.5 s → 70.6 s and went intermittently RED. The contention is windows, UIA and
   process starts. Cap is 5, `DODONA_TEST_CONCURRENCY` overrides.
-- **Still red, and out of this phase's scope:** `m4 gate_points_at_running_build`,
-  `publish default_target_is_the_owning_workspace` (an unhandled `Git.Sha` exception when the
-  project is not a git repo) and `publish no_provenance_daemon_refuses_to_guess` (the suite
-  calls `dodona feed`, which is not a command). All three predate this phase and are visible
-  now only because the tally rule and the hang fix made them visible.
+- **The three that were red are now FIXED** (2026-08-19, follow-up commit). Two were stale
+  TESTS that could never pass, so the behaviour each protected had been silently unverified:
+  `m4 gate_points_at_running_build` read `dodona-gate.ps1`, which DeployGate now deletes as
+  stale (m1's `gate_deployed` asserts its absence), and `publish
+  no_provenance_daemon_refuses_to_guess` called `dodona feed`, which is not a command, and
+  grepped for "NOT watching", wording replaced when the watcher was changed to arm itself.
+  The third, `publish default_target_is_the_owning_workspace`, was a REAL product bug:
+  `Git.Sha` threw on a folder that is not a repository, six lines above the `haveProvenance`
+  test and the "provenance: NONE" message written for exactly that case, so `publish --exe` on
+  a plain folder died with an unhandled exception. `Git.ShaOrEmpty` fixes it; `dev prove`
+  confirms the crash reproduces against HEAD.
+
+- **`dev prove` had the SAME HANG as `dev suites`, fixed in one place and missed in the other.**
+  It still read a suite through `& powershell ... 2>&1`, so proving anything against
+  publish-acceptance hung forever on the leaked shims' inherited pipe handle -- measured, 24
+  minutes on a suite that had finished, and being killed skipped its `finally`, leaving a
+  throwaway worktree of HEAD registered in `git worktree list`. Both call sites now go through
+  `Start-Suite`/`Complete-Suite`, so there is one code path, one verdict and one deadline.
+  CLAUDE.md 0.3's "working around the same snag twice" applied to the fix itself.
+
+- **THE SUITES' OWN LEAKS CHANGE THE ANSWER, and the gate now says so.** Accumulated leaked
+  shims are not idle: measured with 78 of them alive, the full run took **300 s instead of
+  87 s**, `m3` crashed outright with no tally, `brain` went red on nine timing checks, `ui-use`
+  on two, `m4` on two -- and I7's failure text blamed a returning `Start-Sleep`, which sent the
+  reader at entirely the wrong file. `dev gate` now counts them by PATH before the run and
+  names them first in the I7 failure. Stopping them is P3's; not misdiagnosing them is not.
+  Clean with `Get-Process | Where-Object { $_.Path -like "$env:TEMP\dodona-*" } | Stop-Process -Force`.
+
+- **The I7 budget is 120 s, and it was 90 s for one commit, which was too tight.** Clean-machine
+  green runs measured 54.6, 69.7, 74.4, 76.9 and **87.0 s** -- three seconds inside a 90 s line.
+  A threshold just above the worst observation is a coin flip, not a budget.
+
+- **Still red, and out of this phase's scope:** nothing. All twelve suites are green -- 416
+  checks, 0 failed, 87 s on a clean machine. What remains open is not a red check: the suites
+  leak shims (P3), and the claim gate has three paths that allow a write and leave no trace
+  (`GateHook`'s silent `return 0`s), which is a safety-model decision for the operator.
 
 **Becomes impossible:** skipping verification because it is expensive. This is the only durable
 fix for "believing a green check" — make checking cheaper than guessing.

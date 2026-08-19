@@ -32,6 +32,30 @@ static class Git
         return output;
     }
 
+    /// <summary>The same resolution, but "there is no answer" is a VALUE rather than an
+    /// exception: an empty string.
+    ///
+    /// This exists because <see cref="Sha"/>'s throw reached a caller that had already been
+    /// written to expect emptiness. `publish` resolves HEAD and main up front, then decides
+    /// `haveProvenance = head.Length == 40` and carries a message for the negative case
+    /// ("provenance: NONE -- ... is not a git repository"). That message was UNREACHABLE:
+    /// Sha threw first, so publishing from a folder that is not a repository died with a raw
+    /// InvalidOperationException stack trace instead of the sentence the author intended.
+    /// tests/publish-acceptance.ps1 had been red on it, which is how it was found.
+    ///
+    /// Sha keeps throwing, deliberately: a caller asking for the merge base of a ticket it is
+    /// about to land must not receive "" and carry on. The choice belongs at the call site,
+    /// so there are two functions rather than one with a flag.</summary>
+    public static string ShaOrEmpty(string repo, string @ref)
+    {
+        try
+        {
+            var (code, output) = Run(repo, "rev-parse", @ref);
+            return code == 0 ? output.Trim() : "";
+        }
+        catch { return ""; }
+    }
+
     /// <summary>Is this directory itself the top of a work tree? Asked of git rather than
     /// guessed from a `.git` entry, because a worktree checkout's `.git` is a file and a
     /// subdirectory of a repo would answer yes to any naive test.</summary>

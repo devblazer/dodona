@@ -101,6 +101,25 @@ function LiveApp {
         } | ForEach-Object { [pscustomobject]@{ Id = $_.Id; Name = $_.ProcessName; Path = $_.Path } })
 }
 
+# Test processes left behind by an earlier suite run, found by PATH under %TEMP%\dodona-*.
+# These are never the operator's: their app lives under %LOCALAPPDATA%\Dodona\bin (see
+# LiveApp), and a suite's DODONA_HOME is always a GUID temp directory.
+#
+# Why this is counted at all: they are not idle. Each one holds a pipe server, a fake agent
+# child, and the runner's own redirect files, and enough of them CHANGE THE ANSWER a timing
+# assertion gives. Measured 2026-08-19: with 78 of them alive the full suite run took 300 s
+# instead of 75 s, m3 crashed outright, and brain went red on nine timing checks -- and I7's
+# failure text blamed a returning Start-Sleep, sending the reader at the wrong file entirely.
+# A number here is what stops that misdiagnosis. Stopping them is Phase 3's job (a shim
+# should exit when its child does); this only ever REPORTS.
+function LeakedTestProcesses {
+    @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $p = $null
+            try { $p = $_.Path } catch { }
+            $p -and $p -like "$env:TEMP\dodona-*"
+        })
+}
+
 function ReportBlockers {
     $b = Blockers
     if ($b.Count -eq 0) { Say "blockers: none"; return }
@@ -352,8 +371,12 @@ function Do-Build {
 # Split into START and COMPLETE so the sequential and the parallel runner are the SAME code
 # reaching the SAME verdict. A second copy of "did this suite pass?" is a second answer, and
 # the one that gets read would be whichever happened to run.
-function Start-Suite([string]$name) {
-    $f = "$repo\tests\$name-acceptance.ps1"
+# $file overrides where the suite is read from. `dev prove` runs a suite out of a throwaway
+# worktree of HEAD, and it MUST come through here rather than invoking powershell itself --
+# see the note on the pipe below, which prove learned the hard way after Run-Suite was fixed
+# and prove was not.
+function Start-Suite([string]$name, [string]$file = '') {
+    $f = if ($file) { $file } else { "$repo\tests\$name-acceptance.ps1" }
     if (-not (Test-Path $f)) { Abort "no suite '$name'" "one of: $((AllSuites) -join ', ')" }
     $so = "$log.$name.out"; $se = "$log.$name.err"
     Remove-Item $so, $se -Force -ErrorAction SilentlyContinue
@@ -404,6 +427,9 @@ function Complete-Suite($h, [int]$timeoutSec = 420) {
         Seconds  = [math]::Round($elapsed.TotalSeconds, 1)
         Exit     = $code
         Tally    = if ($tally) { $tally.Line.Trim() } else { 'NO TALLY LINE' }
+        # The raw lines, for the one caller that needs a SPECIFIC check rather than a verdict:
+        # `dev prove` has to find "<check>: PASS|FAIL" and judge that one line.
+        Output   = $o
     }
 }
 
@@ -644,8 +670,19 @@ function Do-Prove {
         Add-Content -Path $log -Value $b -Encoding utf8
         if ($LASTEXITCODE -ne 0) { Abort "HEAD does not build, so it cannot be used as a baseline" "commit a buildable baseline first; see $log" }
 
-        $o = & powershell -NoProfile -ExecutionPolicy Bypass -File "$wt\tests\$suite-acceptance.ps1" 2>&1
-        Add-Content -Path $log -Value $o -Encoding utf8
+        # THROUGH Start-Suite/Complete-Suite, not `& powershell ... 2>&1`. This line was the
+        # SAME HANG that was fixed in Run-Suite and missed here, which is exactly the
+        # "working around the same snag twice" CLAUDE.md 0.3 forbids -- and it bit within the
+        # hour: `dev prove publish no_provenance_daemon_refuses_to_guess` sat for 24 minutes
+        # against a suite that had long since finished, because publish-acceptance leaks four
+        # DodonaShim processes and they inherit the write end of that pipe. Worse than the
+        # wait: being killed skipped this function's `finally`, so the throwaway worktree of
+        # HEAD was left registered in `git worktree list`.
+        #
+        # One code path now reaches one verdict, and it carries the deadline with it.
+        $r = Complete-Suite (Start-Suite $suite "$wt\tests\$suite-acceptance.ps1")
+        $o = $r.Output
+        foreach ($x in $r.Problems) { Say "  note: $x" }
         $line = @($o | Select-String -Pattern ([regex]::Escape($check) + ':') | Select-Object -First 1)
         if ($line.Count -eq 0) {
             Abort "check '$check' never ran against HEAD" "the check must exist in your working tests/ AND be reached on this code path; see $log"
@@ -712,6 +749,19 @@ function Do-Gate {
     $appBefore = @(LiveApp)
     $appPids = if ($appBefore.Count) { ' (pids ' + (($appBefore | ForEach-Object { $_.Id }) -join ', ') + ')' } else { '' }
     Say "live app before: $($appBefore.Count) process(es)$appPids"
+
+    # A dirty machine invalidates the timing row and skews every timing-sensitive check, so it
+    # is recorded BEFORE the run rather than guessed at afterwards.
+    $leakBefore = @(LeakedTestProcesses)
+    if ($leakBefore.Count -eq 0) { Say "leaked test processes before: none" }
+    else {
+        Say "leaked test processes before: $($leakBefore.Count) -- LEFT BY EARLIER SUITE RUNS, and they skew timing"
+        Say "  they hold pipes, fake agents and this runner's own files. Stop them by PATH, never by name:"
+        # SINGLE quotes. In a double-quoted PowerShell string `$_` expands against whatever
+        # pipeline happens to be current, and this line printed `\gate.Path -like \` -- a
+        # broken instruction is worse than none, because it is a command someone will paste.
+        Say '  Get-Process | Where-Object { $_.Path -like "$env:TEMP\dodona-*" } | Stop-Process -Force'
+    }
 
     Say ""
     Say "-- suites ($(@($suites).Count) of $((AllSuites).Count)) --"
@@ -948,31 +998,49 @@ function Do-Gate {
     # It asserts WALL CLOCK for the whole suite set, which is the number a person waits through
     # -- not the sum of the parts, because the parts now run at the same time.
     #
-    # THE BUDGET IS 90 s AND RECOVERY-PHASES P4.3 PROJECTED 35-45 s. That projection was not
-    # met and the number here is not quietly rounded up to hide it: measured across six full
-    # runs on this machine the same code produced 53.7 s and 71.7 s, and the variance is real
-    # -- ui-use ranges 42.5 s alone to 69.2 s under a parallel wave, because it makes about a
-    # hundred sequential dodona.exe calls and every one of them is slower with four other
-    # suites running. A threshold set at 60 s would be red on roughly half of GREEN runs, and a
-    # gate that is red for reasons unrelated to the change is a gate people learn to re-run
-    # instead of read -- which is the same disease as a gate that is always green. So: 90 s,
-    # which is above the observed spread and far below the 320 s this took sequentially, and it
-    # goes red the moment a fixed sleep creeps back in. The way to earn 45 s is to make ui-use
-    # stop being the long pole (it is four suites wearing one name); that is not this phase.
+    # THE BUDGET IS 120 s AND RECOVERY-PHASES P4.3 PROJECTED 35-45 s. That projection was not
+    # met, and the number here is not quietly rounded to hide it. Measured on this machine, all
+    # twelve suites green on a CLEAN machine: 54.6, 69.7, 74.4, 76.9, 87.0 s. The spread is
+    # real -- ui-use alone ranges 42.5 s to 72 s, because it makes about a hundred sequential
+    # dodona.exe calls and every one of them is slower with four other suites running.
+    #
+    # It was 90 s for one commit, which was wrong for the reason this comment exists to state:
+    # 87.0 s was then observed on a green run, three seconds inside the line. A threshold set
+    # just above the worst observation is not a budget, it is a coin flip -- and a gate that
+    # goes red for reasons unrelated to the change is one people learn to re-run instead of
+    # read, which is the same disease as a gate that is always green. 120 s sits clear of the
+    # spread, is still 2.7x better than the 320 s this took sequentially, and goes red the
+    # moment a fixed sleep creeps back in.
+    #
+    # A DIRTY MACHINE BREAKS IT ANYWAY, which is why the leak count is printed above: with 78
+    # shims left by earlier runs the same code took 300 s, m3 crashed and brain went red on
+    # nine timing checks. The way to earn 45 s is to stop ui-use being the long pole (it is
+    # four suites wearing one name) and to stop the suites leaking; neither is this phase.
     #
     # PARTIAL runs cannot judge it: three suites finishing quickly says nothing about twelve.
     # It says so rather than passing a row it did not earn (CLAUDE.md 0.3).
     if ($partial) {
         Say "  n/a   I7  only $(@($suites).Count) of $((AllSuites).Count) suites ran in $([math]::Round($suiteWall, 1))s, so the budget was NOT tested"
     }
-    elseif ($suiteWall -lt 90) {
-        Say ("  PASS  I7  the full suite run finished in {0:N1}s, inside the 90s budget (was 320s sequential)" -f $suiteWall)
+    elseif ($suiteWall -lt 120) {
+        Say ("  PASS  I7  the full suite run finished in {0:N1}s, inside the 120s budget (was 320s sequential)" -f $suiteWall)
     }
     else {
-        Say ("  FAIL  I7  the full suite run took {0:N1}s, over the 90s budget" -f $suiteWall)
+        Say ("  FAIL  I7  the full suite run took {0:N1}s, over the 120s budget" -f $suiteWall)
         Say ("            slowest: " + ((($results | Sort-Object Seconds -Descending | Select-Object -First 3 |
                     ForEach-Object { "$($_.Name) $($_.Seconds)s" }) -join ', ')))
-        Say "            a fixed Start-Sleep has probably come back -- grep tests\ for it (P4.1)"
+        # TWO causes, and the machine one is listed FIRST because it is the one that actually
+        # happened: a 300 s run was diagnosed as "a Start-Sleep came back" when it was 78
+        # leaked shims from earlier runs. A wrong hint is worse than no hint.
+        $leakNow = @(LeakedTestProcesses)
+        if ($leakNow.Count -gt 0) {
+            Say "            $($leakNow.Count) leaked test process(es) are on this machine -- that is very likely the cause."
+            Say "            Stop them by PATH and re-run before believing this row."
+        }
+        else {
+            Say "            the machine is clean, so this is the suites themselves: a fixed"
+            Say "            Start-Sleep has probably come back -- grep tests\ for it (P4.1)"
+        }
         $bad++
     }
 
