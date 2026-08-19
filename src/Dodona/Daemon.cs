@@ -140,6 +140,75 @@ sealed class Daemon
         return new List<Member> { new(_primary, _primary.ToLowerInvariant(), Registry.LooksLikeRepo(_primary), "") };
     }
 
+    /// <summary>This workspace's project folders, in attach order — <see cref="Members"/>
+    /// reduced to the one thing <see cref="Projects"/> takes. Re-read per call for the same
+    /// reason: a project attached while the daemon runs must be usable without a restart, and
+    /// a project DETACHED while it runs must stop being usable without one (T4).</summary>
+    List<string> ProjectPaths() => Members().Select(m => m.Path).ToList();
+
+    /// <summary>
+    /// WHERE A LANE MAY OPEN (docs/LOCATIONS-PLAN.md P2.1). Resolves a requested folder to a
+    /// project of THIS workspace, or refuses — loudly, naming the projects it does know and the
+    /// command that would add the one it does not.
+    ///
+    /// Three things make this the whole of P2.1:
+    ///
+    /// * **Nothing requested means the first project**, which is byte-for-byte what every spawn
+    ///   site did before this phase, and is what keeps a one-project workspace unchanged.
+    /// * **A requested folder must be a registered project or inside one.** Inside one resolves
+    ///   UP to the project — a lane opens in a project, not in whichever subdirectory a caller
+    ///   happened to name, so `lanes.cwd` stays a project path and `Projects.Field` keeps
+    ///   answering in the operator's units. (A TICKET lane is the deliberate exception and does
+    ///   not come through here: its folder is its worktree, `&lt;project&gt;\.dodona\wt\tN`,
+    ///   which resolves to the same project by ancestor.)
+    /// * **Anything else is refused, never substituted.** Substituting is how `LandOp` could
+    ///   fast-forward the wrong repository (P0.1) and how `ticket-agent --repo` could open a
+    ///   ticket against a repo it had never seen. An agent started in a folder no workspace owns
+    ///   is ungated (T7) in a tree nothing here is tracking.
+    ///
+    /// `Instance.Canonical` first, because the registry's paths are canonical and the requested
+    /// one arrives from a command line — 8.3 names, junctions and casing all otherwise read as
+    /// "no project owns this".
+    /// </summary>
+    bool TryProject(string? requested, out string project, out string? refusal)
+    {
+        refusal = null;
+        if (string.IsNullOrWhiteSpace(requested)) { project = _primary; return true; }
+
+        var projects = ProjectPaths();
+        var canonical = Instance.Canonical(requested!);
+        var owner = Projects.Of(projects, canonical);
+        if (owner is not null) { project = owner; return true; }
+
+        project = "";
+        refusal = $"refused: {canonical} is in no project of workspace {_wsName} " +
+                  $"(projects here: {(projects.Count == 0 ? "none" : string.Join(", ", projects))}) -- " +
+                  $"attach it with `dodona workspace-attach --member {canonical}`, or name one of those";
+        return false;
+    }
+
+    /// <summary>
+    /// WHICH PROJECT A COMMAND MEANT (trap T5, P2.4) — for the commands that ACT on one folder:
+    /// `repo-init` and `repo-status`. Two inputs, and the difference between them is the whole
+    /// point:
+    ///
+    /// * **`project`** is explicit: a person or an agent typed `--project`. It is validated, and
+    ///   an unowned one is REFUSED. `repo-init` runs `git init`, which nothing here can undo.
+    /// * **`cwd`** is the calling process's working directory, sent by every client. It is a
+    ///   HINT: if a project owns it, that is obviously the project meant — an agent in project B
+    ///   running `dodona repo-init` means B. If nothing owns it (the operator typed from
+    ///   `C:\`, or from a folder in another workspace), it falls back to the first project, which
+    ///   is byte-for-byte what this command always did. The fallback is not silent: both commands
+    ///   print the project path they acted on.
+    /// </summary>
+    bool TryCommandProject(JsonElement e, out string project, out string? refusal)
+    {
+        if (One(e, "project") is string explicitly) return TryProject(explicitly, out project, out refusal);
+        refusal = null;
+        project = One(e, "cwd") is string cwd ? Projects.Of(ProjectPaths(), Instance.Canonical(cwd)) ?? _primary : _primary;
+        return true;
+    }
+
     /// <summary>The workspace's repositories, rediscovered on demand — git is the truth,
     /// the registry is a cache of it (§12). A repo added to the workspace while the
     /// daemon runs must be usable without a restart.</summary>
@@ -337,7 +406,7 @@ sealed class Daemon
     {
         _store.Event("daemon_start", null,
             $"pid={Environment.ProcessId} build={Ver.Build} schema={Ver.Schema} exe={Ver.ExePath} " +
-            $"workspace={_wsName} ({_instanceId}) primary={_primary}" +
+            $"workspace={_wsName} ({_instanceId}) first-project={_primary}" +
             (predecessorPid > 0 ? $" successor_of={predecessorPid}" : ""));
         Console.WriteLine($"dodona daemon: workspace {_wsName} ({_instanceId}), ctl pipe {_ctlPipe}, " +
                           $"pid {Environment.ProcessId}, build {Ver.Build}, store {Paths.Store(_instanceId)}");
@@ -606,15 +675,32 @@ sealed class Daemon
                 var childArgs = e.TryGetProperty("childArgs", out var ca) && ca.ValueKind == JsonValueKind.Array
                     ? ca.EnumerateArray().Select(x => x.GetString()!).ToList() : new List<string>();
 
+                // WHICH PROJECT (P2.1). `--project` names one; nothing named is the first
+                // project, which is byte-for-byte what this site did before. Resolved BEFORE the
+                // lane row is created, so a refusal leaves no row behind -- a half-born lane
+                // pointing at a folder we just refused is worse than the refusal.
+                if (!TryProject(One(e, "project"), out var laneProject, out var laneRefusal))
+                { w.WriteLine(laneRefusal!); w.WriteLine("##exit 1"); break; }
+
                 // No --child means the real thing. A lane with no ticket has no claim and
                 // therefore no gate — it is plain Claude Code in the workspace, which is
-                // fine for one lane and is why isolated work wants a ticket instead.
+                // fine for one lane and is why isolated work wants a ticket instead. T7: this
+                // phase lets that ungated agent open in a SECOND repository. Not a regression
+                // -- an expansion of a surface that was already ungated.
+                var lcfg = ConfigForProject(laneProject);
                 if (child is null)
                 {
-                    w.WriteLine((await SpawnAgentLaneAsync(title, Pick(e, "model", _config.Model), Pick(e, "effort", _config.Effort))).Msg);
+                    w.WriteLine((await SpawnAgentLaneAsync(title, laneProject, Pick(e, "model", lcfg.Model), Pick(e, "effort", lcfg.Effort))).Msg);
                     break;
                 }
-                w.WriteLine((await SpawnLaneAsync(title, "work", _primary, child, childArgs)).Msg);
+                // A --child lane is configured by its project too, and records it for the same
+                // reason -- `--child` chooses the BINARY, not the permissions. It is also the only
+                // spawn a suite can drive model-free, so without this the T2 fix would have no
+                // observable surface at all in any acceptance suite (IsClaude is false for the
+                // fake agent, so no claude argv is ever built for it to be read back from).
+                var lr = await SpawnLaneAsync(title, "work", laneProject, child, childArgs);
+                if (lr.Id > 0) RecordLaneConfig(lr.Id, laneProject, lcfg, childArgs);
+                w.WriteLine(lr.Msg);
                 break;
             }
             case "say":
@@ -651,7 +737,6 @@ sealed class Daemon
                 if (row is null) { w.WriteLine($"error: no lane {lane}"); break; }
                 if (_lanes.TryGetValue(lane, out var lrt2) && lrt2.Connected) { w.WriteLine($"lane {lane} is already connected"); break; }
 
-                var child2 = _config.Agent;
                 var args2 = new List<string>();
 
                 // WHERE it comes back, and WHAT it is told it is, were both wrong (M5.1).
@@ -661,20 +746,65 @@ sealed class Daemon
                 // gated agent, resumed, editing main's tree. The ticket is the authority on
                 // both answers; the recorded cwd covers every other kind of lane.
                 var t2 = _store.Tickets().FirstOrDefault(t => t.LaneId == lane && t.State == "open");
+
+                // RE-HOMING (P2.6): `--project` is the operator's answer to the refusal below.
+                // It is validated exactly like a fresh spawn, so re-homing cannot land a lane
+                // somewhere a fresh one could not have opened.
+                if (!TryProject(One(e, "project"), out var reProject, out var reRefusal))
+                { w.WriteLine(reRefusal!); w.WriteLine("##exit 1"); break; }
+                var reHomed = One(e, "project") is not null;
+                // A TICKET lane cannot be re-homed: its claim gate is deployed into its worktree
+                // and its prompt says "work only there", so moving the process out of the
+                // worktree is precisely the M5.1 incident performed on purpose.
+                if (reHomed && t2 is not null)
+                {
+                    w.WriteLine($"refused: lane {lane} works ticket {t2.Id}, so its directory is that ticket's worktree " +
+                                "-- a ticket lane cannot be re-homed. Land or abandon the ticket instead.");
+                    w.WriteLine("##exit 1");
+                    break;
+                }
+
                 // The rung ORDER lives in ResolveLaneCwd, on the unit loop (P1.3). What stays
                 // here is the I/O: a directory that has been deleted is not a candidate, and
                 // ruling it out is this site's business, not a pure function's.
                 var cwd2 = ResolveLaneCwd(
-                    t2?.Worktree is { Length: > 0 } twt && Directory.Exists(twt) ? twt : null,
+                    reHomed ? reProject
+                    : t2?.Worktree is { Length: > 0 } twt && Directory.Exists(twt) ? twt : null,
                     row.Cwd is { Length: > 0 } rcwd && Directory.Exists(rcwd) ? rcwd : null,
                     _primary);
+
+                // TRAP T4, REFUSED RATHER THAN RE-OPENED. `workspace-detach` and
+                // `workspace-move` change nothing about a lane row, and the only test this site
+                // ever applied was `Directory.Exists` -- which PASSES, because the folder is
+                // still there; it just belongs to another workspace now. Respawning into it puts
+                // an ungated agent (T7) into somebody else's repository, holding somebody else's
+                // merge token's tree. Re-homing to the first project instead would be worse in
+                // the other direction: an agent whose entire conversation is about project B,
+                // silently editing project A. So: refuse, and name the two commands that
+                // un-stick it (CLAUDE.md §0.1 -- a wait or a refusal must name the condition).
+                if (!Projects.IsOwned(ProjectPaths(), cwd2, NeutralCwd()))
+                {
+                    w.WriteLine($"refused: lane {lane}'s directory {cwd2} belongs to no project of workspace {_wsName} " +
+                                "-- it was detached or moved while this lane existed. " +
+                                $"Bring it back with `dodona workspace-attach --member {cwd2}`, " +
+                                $"or re-home the lane with `dodona lane-respawn {lane} --project <project>`.");
+                    _store.Event("lane_respawn_refused", lane, $"cwd={cwd2} owned=no");
+                    w.WriteLine("##exit 1");
+                    break;
+                }
+
+                // T2 again: a respawned lane is configured by the project it is going back INTO,
+                // not by the workspace's first one. This path read `_config` and so could hand a
+                // lane in project B project A's permission mode on every respawn.
+                var cfg2 = ConfigForProject(Projects.Of(ProjectPaths(), cwd2) ?? _primary);
+                var child2 = cfg2.Agent;
                 if (IsClaude(child2))
                 {
                     var sys2 = t2 is null
                         ? LaneSystemPrompt(row.Title, cwd2)
                         : TicketSystemPrompt(t2.Id, t2.Title,
                             string.Join(", ", _store.TicketClaims(t2.Id).Select(cl => $"{cl.Kind}:{cl.Value}")));
-                    args2 = ClaudeArgs(_config.Model, _config.Effort, sys2, acceptEdits: true);
+                    args2 = ClaudeArgs(cfg2, cfg2.Model, cfg2.Effort, sys2, acceptEdits: true);
                     if (row.Session is { Length: > 0 } sess && !sess.StartsWith("fake-"))
                     { args2.Add("--resume"); args2.Add(sess); }
                 }
@@ -813,18 +943,28 @@ sealed class Daemon
                 var tid = e.GetProperty("ticket").GetInt64();
                 var t = _store.Ticket(tid);
                 if (t is null || t.State != "open") { w.WriteLine($"error: ticket {tid} not open"); break; }
-                var child = e.TryGetProperty("child", out var tc) && tc.ValueKind == JsonValueKind.String ? tc.GetString()! : _config.Agent;
-                var model = Pick(e, "model", _config.Model);
-                var effort = Pick(e, "effort", _config.Effort);
+                // T2 FOR A GATED LANE (P2.3). This read `_config` -- the first project's -- while
+                // spawning into a worktree that may belong to a different project entirely, and a
+                // ticket lane has been able to do that since multi-repo landed. `ConfigFor` was
+                // already the right answer here and was already used two lines away for `Main`;
+                // the permission mode simply never went through it.
+                var tcfg = ConfigFor(t.Repo);
+                var child = e.TryGetProperty("child", out var tc) && tc.ValueKind == JsonValueKind.String ? tc.GetString()! : tcfg.Agent;
+                var model = Pick(e, "model", tcfg.Model);
+                var effort = Pick(e, "effort", tcfg.Effort);
                 var claims = string.Join(", ", _store.TicketClaims(tid).Select(cl => $"{cl.Kind}:{cl.Value}"));
 
                 // The lane-agent framing (§5, spike 3): declare the [DISPATCHER] channel or
                 // the model treats mid-turn instructions as a prompt-injection attempt.
                 var sys = TicketSystemPrompt(tid, t.Title, claims);
-                var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: true) : new List<string>();
+                var args = IsClaude(child) ? ClaudeArgs(tcfg, model, effort, sys, acceptEdits: true) : new List<string>();
                 var (laneId, msg) = await SpawnLaneAsync(t.Title, "work", t.Worktree, child, args);
                 // Link ticket ↔ lane: "waiting on you: merge" (§8) needs a pane to land in.
-                if (laneId > 0) _store.TicketSetLane(tid, laneId);
+                if (laneId > 0)
+                {
+                    _store.TicketSetLane(tid, laneId);
+                    RecordLaneConfig(laneId, Projects.Of(ProjectPaths(), t.Worktree) ?? _primary, tcfg, args);
+                }
                 w.WriteLine(msg);
                 break;
             }
@@ -974,19 +1114,48 @@ sealed class Daemon
                 var ticketRepo = RepoOf(t);
                 var prefix = ticketRepo?.ClaimPrefix ?? "";
                 var full = Path.GetFullPath(path, t.Worktree).Replace('\\', '/');
+
+                // TRAP T6, FIXED (docs/LOCATIONS-PLAN.md P2.5). The two bases here were the
+                // ticket's worktree and THE FIRST PROJECT -- so a write anywhere in a second
+                // project resolved to neither, and the gate denied it with "outside the worktree
+                // and the project root" while the agent was writing inside a repository the
+                // workspace owns. That was already broken before this phase; Phase 2 is what
+                // makes it NORMAL, so the latent hole starts firing on every lane that opens
+                // outside the first project.
+                //
+                // The rungs, longest base first so a repo nested under another wins:
+                //   1. the ticket's own WORKTREE, carrying the ticket's recorded claim prefix.
+                //      First, always: `m3:186-187` and `LaneCwdPrecedenceTests` both pin that a
+                //      ticket lane's folder is its worktree, and a worktree lives INSIDE its
+                //      project, so without this rung the project rung would swallow it and hand
+                //      back `.dodona/wt/t1/...` -- a path no claim can ever cover.
+                //   2. any REPOSITORY of the workspace, prefixed with ITS claim name. Claims are
+                //      workspace-relative and a repo's name IS its workspace-relative path, so
+                //      this is the general form of what rung 3 did by hand.
+                //   3. any PROJECT, unprefixed -- kept only because it is exactly what the old
+                //      `_primary` base was, and dropping it would change the ordinary
+                //      single-project message for a path inside the project but outside every
+                //      repo. It cannot produce a false COVER in a multi-project workspace: the
+                //      bare relative form it yields can only match a claim with no repo prefix,
+                //      and `Repos.Discover` prefixes every repo name the moment a second project
+                //      is attached, so no such claim can exist there.
                 string? rel = null;
-                foreach (var (baseDir, addPrefix) in new[] { (t.Worktree, true), (_primary, false) })
+                var bases = new List<(string Dir, string Prefix)> { (t.Worktree, prefix) };
+                bases.AddRange(Repositories().OrderByDescending(r => r.Path.Length).Select(r => (r.Path, r.ClaimPrefix)));
+                bases.AddRange(ProjectPaths().OrderByDescending(p => p.Length).Select(p => (p, "")));
+                foreach (var (baseDir, basePrefix) in bases)
                 {
+                    if (baseDir.Length == 0) continue;
                     var b = Path.GetFullPath(baseDir).Replace('\\', '/').TrimEnd('/') + "/";
                     if (full.StartsWith(b, StringComparison.OrdinalIgnoreCase))
                     {
-                        rel = (addPrefix ? prefix : "") + full[b.Length..];
+                        rel = basePrefix + full[b.Length..];
                         break;
                     }
                 }
                 if (rel is null)
                 {
-                    w.WriteLine($"denied: {path} is outside the worktree and the project root");
+                    w.WriteLine($"denied: {path} is outside the worktree and every project of workspace {_wsName}");
                     w.WriteLine("##exit 1");
                     break;
                 }
@@ -1257,39 +1426,51 @@ sealed class Daemon
             }
             case "repo-status":
             {
-                // What the picker (and anyone else) needs to know before offering a fix.
-                var isRepo = Git.IsRepo(_primary);
-                var nested = isRepo ? new List<string>() : Git.FindRepos(_primary);
-                var entries = Directory.Exists(_primary)
-                    ? Directory.EnumerateFileSystemEntries(_primary).Where(p => Path.GetFileName(p) is not ".dodona" and not ".git").Take(1).Count()
+                // What the picker (and anyone else) needs to know before offering a fix -- ABOUT
+                // THE PROJECT IT WAS ASKED ABOUT (trap T5, P2.4).
+                if (!TryCommandProject(e, out var statProj, out var statRefusal))
+                { w.WriteLine(statRefusal!); w.WriteLine("##exit 1"); break; }
+                var statCfg = ConfigForProject(statProj);
+                var isRepo = Git.IsRepo(statProj);
+                var nested = isRepo ? new List<string>() : Git.FindRepos(statProj);
+                var entries = Directory.Exists(statProj)
+                    ? Directory.EnumerateFileSystemEntries(statProj).Where(p => Path.GetFileName(p) is not ".dodona" and not ".git").Take(1).Count()
                     : 0;
                 w.WriteLine(JsonSerializer.Serialize(new
                 {
-                    root = _primary,
+                    root = statProj,
                     isRepo,
-                    hasCommit = isRepo && Git.HasCommit(_primary),
+                    hasCommit = isRepo && Git.HasCommit(statProj),
                     empty = entries == 0,
-                    nested = nested.Select(r => Path.GetRelativePath(_primary, r)).ToList(),
-                    main = _config.Main,
+                    nested = nested.Select(r => Path.GetRelativePath(statProj, r)).ToList(),
+                    main = statCfg.Main,
                 }));
                 break;
             }
             case "repo-init":
             {
-                if (Git.IsRepo(_primary) && Git.HasCommit(_primary)) { w.WriteLine($"error: {_primary} is already a git repository with commits"); break; }
+                // TRAP T5, FIXED (P2.4). This acted on the FIRST project unconditionally, so an
+                // agent working in project B that ran `dodona repo-init` ran `git init` in
+                // project A. Silently: every line it printed named A, and an agent that had
+                // never seen A's path had no way to notice. `git init` in the wrong folder is
+                // not reversible by anything Dodona knows how to do.
+                if (!TryCommandProject(e, out var initProj, out var initRefusal))
+                { w.WriteLine(initRefusal!); w.WriteLine("##exit 1"); break; }
+                var initCfg = ConfigForProject(initProj);
+                if (Git.IsRepo(initProj) && Git.HasCommit(initProj)) { w.WriteLine($"error: {initProj} is already a git repository with commits"); break; }
                 var adopt = e.TryGetProperty("adopt", out var ad) && ad.ValueKind == JsonValueKind.True;
 
-                if (!Git.IsRepo(_primary))
+                if (!Git.IsRepo(initProj))
                 {
-                    var (ic, io) = Git.Run(_primary, "init", "-b", _config.Main);
+                    var (ic, io) = Git.Run(initProj, "init", "-b", initCfg.Main);
                     if (ic != 0) { w.WriteLine($"error: git init failed: {io}"); w.WriteLine("##exit 1"); break; }
-                    w.WriteLine($"initialized empty repository on '{_config.Main}'");
+                    w.WriteLine($"initialized empty repository on '{initCfg.Main}'");
                 }
 
                 // Dodona's own state is never repo content: worktrees, the store and the
                 // deployed gate files all live under .dodona/ and would otherwise be
                 // committed by an agent's `git add -A` (the bug M1's test caught).
-                var ignore = Path.Combine(_primary, ".gitignore");
+                var ignore = Path.Combine(initProj, ".gitignore");
                 var ignoreText = File.Exists(ignore) ? File.ReadAllText(ignore) : "";
                 if (!ignoreText.Split('\n').Any(l => l.Trim() == ".dodona/"))
                 {
@@ -1297,22 +1478,60 @@ sealed class Daemon
                     w.WriteLine("added .dodona/ to .gitignore");
                 }
 
-                if (!Git.HasCommit(_primary))
+                if (!Git.HasCommit(initProj))
                 {
                     // An empty repo has no branch, so no worktree can be cut from it. What
                     // goes into the first commit is the user's call, not ours: adopt takes
                     // the files that are already here, otherwise the commit is empty and
                     // they stay untracked.
-                    if (adopt) Git.Run(_primary, "add", "-A");
+                    if (adopt) Git.Run(initProj, "add", "-A");
                     var args = new List<string> { "commit", "-m", adopt ? "Initial commit" : "Initial commit (empty)" };
                     if (!adopt) args.Insert(1, "--allow-empty");
-                    var (cc, co) = Git.Run(_primary, args.ToArray());
+                    var (cc, co) = Git.Run(initProj, args.ToArray());
                     if (cc != 0) { w.WriteLine($"error: initial commit failed: {co}"); w.WriteLine("##exit 1"); break; }
                     w.WriteLine(adopt ? "committed the existing files as the initial commit" : "made an empty initial commit; existing files left untracked");
                 }
-                _store.Event("repo_init", null, $"{_primary} main={_config.Main} adopt={adopt}");
-                Announce($"[dodona] git repository ready on '{_config.Main}' — tickets can branch now");
-                w.WriteLine($"ready: {_primary} is a git repository on '{_config.Main}'");
+                _store.Event("repo_init", null, $"{initProj} main={initCfg.Main} adopt={adopt}");
+                Announce($"[dodona] git repository ready on '{initCfg.Main}' — tickets can branch now");
+                w.WriteLine($"ready: {initProj} is a git repository on '{initCfg.Main}'");
+                break;
+            }
+            case "project-gone":
+            {
+                // P2.6 / trap T4: `workspace-detach` and `workspace-move` are REGISTRY edits made
+                // by the CLI, and they touched no lane row at all -- so a live agent kept working
+                // in a folder this workspace no longer owns, and `lane-respawn` would have put a
+                // fresh one there too (its only test was `Directory.Exists`, which passes: the
+                // folder is still there, it just belongs elsewhere now).
+                //
+                // The CLI sends this ONLY when the daemon is already live -- it must never summon
+                // one, because summoning runs the warm-up and a registry edit that starts four
+                // haiku processes is the §3.2 incident wearing a different hat.
+                var gonePath = Instance.Canonical(e.GetProperty("project").GetString()!);
+                var stopped = new List<long>();
+                foreach (var l in _store.LanesAll())
+                {
+                    if (l.State == "dead" || l.Cwd is not { Length: > 0 }) continue;
+                    if (Projects.Of(new[] { gonePath }, l.Cwd) is null) continue;
+                    // The AGENT goes; the lane ROW and its whole transcript stay (§12 -- nothing
+                    // here deletes history). `lane-respawn --project <p>` is the way back, and
+                    // the refusal in that handler names it.
+                    // Ask the SHIM to go, over its own pipe -- it takes the child tree with it and
+                    // exits cleanly, which needs no pid bookkeeping (CLAUDE.md §4). A lane this
+                    // daemon never connected to still has a recorded pipe, and a shim that has
+                    // been buffering for a predecessor is exactly the case worth covering.
+                    if (_lanes.TryGetValue(l.Id, out var grt)) { grt.Shutdown(); _lanes.Remove(l.Id); }
+                    else if (l.Pipe is { Length: > 0 }) await LaneRuntime.ShutdownShimAsync(l.Pipe);
+                    _store.LaneState(l.Id, "unreachable");
+                    _store.Event("lane_project_detached", l.Id, $"project={gonePath} cwd={l.Cwd}");
+                    _store.PaneEvent(l.Id, "announcement",
+                        $"this project left the workspace, so the agent was stopped -- re-home with `dodona lane-respawn {l.Id} --project <project>`",
+                        null, null, acked: true);
+                    stopped.Add(l.Id);
+                }
+                if (stopped.Count > 0)
+                    Announce($"[dodona] {gonePath} left this workspace: stopped {stopped.Count} lane(s) that were working in it ({string.Join(", ", stopped)})");
+                w.WriteLine($"project {gonePath}: stopped {stopped.Count} lane(s)");
                 break;
             }
 
@@ -1697,7 +1916,7 @@ sealed class Daemon
         if (string.IsNullOrWhiteSpace(project) || !Path.IsPathRooted(project))
         {
             _store.Event("autopublish_misconfigured", null,
-                $"no absolute project to watch (primary='{_primary}', autoPublishProject='{_config.AutoPublishProject}')");
+                $"no absolute project to watch (first project='{_primary}', autoPublishProject='{_config.AutoPublishProject}')");
             Announce("[dodona] autoPublish is on, but this workspace has no absolute source tree to watch " +
                      "(no member attached, and no autoPublishProject set) — nothing is being watched");
             return;
@@ -1861,7 +2080,20 @@ sealed class Daemon
     /// and their whole job description is their system prompt.</summary>
     static string NeutralCwd() => Paths.NeutralCwd();
 
-    List<string> ClaudeArgs(string model, string effort, string systemPrompt, bool acceptEdits, bool utility = false)
+    /// <summary>
+    /// STATIC, AND IT TAKES THE CONFIG (T2, docs/LOCATIONS-PLAN.md P2.3). It read `_config`
+    /// directly until Phase 2, i.e. the config loaded once from the workspace's FIRST project —
+    /// so a lane opening in project B would have run with project A's `permissionMode` and
+    /// `allowedTools`, and **a repo deliberately kept on a leash loses it** (CLAUDE.md §7: that
+    /// leash is the only thing a project gets to ask for). `Config.For` has existed since
+    /// multi-repo landed and had never once been used to configure a lane.
+    ///
+    /// Static is not tidiness either: with no `this` it is callable from `unit`, so "the
+    /// permission mode in the argv is the one this config asked for" costs a millisecond to
+    /// hold instead of eight seconds of daemon — and the fake agent takes no claude flags at
+    /// all (<see cref="IsClaude"/> is false for it), so no acceptance suite can see this argv.
+    /// </summary>
+    internal static List<string> ClaudeArgs(Config cfg, string model, string effort, string systemPrompt, bool acceptEdits, bool utility = false)
     {
         var args = new List<string> { "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                                       "--verbose", "--model", model };
@@ -1880,33 +2112,86 @@ sealed class Daemon
         // IS a PreToolUse hook, so a ticket lane is still bounded to its claim, and the
         // merge-time diff backstop still refuses anything that slips. The safety model
         // never rested on Claude's permission prompt — it rests on the gate and the fence.
-        if (acceptEdits) { args.Add("--permission-mode"); args.Add(_config.PermissionMode); }
-        if (acceptEdits && _config.Allowed.Length > 0)
+        if (acceptEdits) { args.Add("--permission-mode"); args.Add(cfg.PermissionMode); }
+        if (acceptEdits && cfg.Allowed.Length > 0)
         {
             // Work lanes get the project's allowlist; the router never does — it has no
             // business running anything.
             args.Add("--allowedTools");
-            args.Add(string.Join(",", _config.Allowed));
+            args.Add(string.Join(",", cfg.Allowed));
         }
         args.Add("--append-system-prompt");
         args.Add(systemPrompt);
         return args;
     }
 
+    /// <summary>An optional string a request carried, or null. Distinct from <see cref="Pick"/>
+    /// because "the caller said nothing" and "the caller said the default" are different facts
+    /// for a project: one means the first project, the other has to be validated.</summary>
+    static string? One(JsonElement e, string prop) =>
+        e.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is { Length: > 0 } s ? s : null;
+
     /// <summary>What a request asked for, else what the project settled on.</summary>
     static string Pick(JsonElement e, string prop, string fallback) =>
         e.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is { Length: > 0 } s ? s : fallback;
 
-    /// <summary>Spawn a plain agent lane in the workspace — no ticket, no claim, no gate.
-    /// The binary is `agent` from dodona.json (default `claude`), which is also how the
-    /// acceptance suite exercises the paths where the daemon starts an agent itself.</summary>
-    Task<(long Id, string Msg)> SpawnAgentLaneAsync(string title, string? model = null, string? effort = null)
+    /// <summary>
+    /// Spawn a plain agent lane IN A PROJECT — no ticket, no claim, no gate. The binary is
+    /// `agent` from that project's dodona.json (default `claude`), which is also how the
+    /// acceptance suite exercises the paths where the daemon starts an agent itself.
+    ///
+    /// **`project` is ONE parameter and it is used three times** (docs/LOCATIONS-PLAN.md P2.2,
+    /// trap T1): it picks the config, it is written into the system prompt, and it is the
+    /// process's working directory. It used to be `_primary` written out three times in two
+    /// places, and the M5.1 incident is what a divergence between the second and third looks
+    /// like — an agent told a folder it is not in, which compiles clean. There is no overload
+    /// that defaults it: a caller must say where, because "wherever the workspace happens to
+    /// start" is the answer this phase exists to delete.
+    ///
+    /// The caller has already validated the project through <see cref="TryProject"/>; nothing
+    /// here re-derives it, because two places deciding where a lane goes is the shape of the
+    /// bug rather than a safety net.
+    /// </summary>
+    async Task<(long Id, string Msg)> SpawnAgentLaneAsync(string title, string project, string? model = null, string? effort = null)
     {
-        var child = _config.Agent;
+        var cfg = ConfigForProject(project);
+        var child = cfg.Agent;
         var args = IsClaude(child)
-            ? ClaudeArgs(model ?? _config.Model, effort ?? _config.Effort, LaneSystemPrompt(title, _primary), acceptEdits: true)
+            ? ClaudeArgs(cfg, model ?? cfg.Model, effort ?? cfg.Effort, LaneSystemPrompt(title, project), acceptEdits: true)
             : new List<string>();                       // a stand-in agent takes no claude flags
-        return SpawnLaneAsync(title, "work", _primary, child, args);
+        var r = await SpawnLaneAsync(title, "work", project, child, args);
+        if (r.Id > 0) RecordLaneConfig(r.Id, project, cfg, args);
+        return r;
+    }
+
+    /// <summary>Which dodona.json configures a lane in this project — the project's own, falling
+    /// back to the workspace's first project (<see cref="Config.For"/>). For a ONE-project
+    /// workspace `project` IS the first project, so this returns exactly `_config` and the case
+    /// is byte-for-byte unchanged, which is the property the whole workspace migration rested
+    /// on.
+    ///
+    /// The sharp edge, stated because it will surprise someone: `Config.For` picks a WHOLE FILE,
+    /// it does not merge two. A project with a `dodona.json` that sets only `permissionMode`
+    /// therefore gets the built-in default for `agent`, `model` and everything else — not the
+    /// workspace's. That is the same rule per-repo config has always had.</summary>
+    Config ConfigForProject(string project) => Config.For(_primary, project);
+
+    /// <summary>
+    /// WHICH PROJECT CONFIGURED THIS LANE, as a row (T2's only observable surface). A lane's
+    /// permission mode was previously unanswerable from outside the process: it lands in a
+    /// claude argv nobody reads back, and `IsClaude` is false for the acceptance suites' fake
+    /// agent, so no suite could ever see the flag at all.
+    ///
+    /// It reports the argv when there IS one and the config otherwise, and says which — so a
+    /// fake-agent lane still proves *which project's config was resolved* without the event
+    /// pretending to be evidence of an argv that was never built.
+    /// </summary>
+    void RecordLaneConfig(long laneId, string project, Config cfg, List<string> args)
+    {
+        var fromArgv = Projects.ArgValue(args, "--permission-mode");
+        _store.Event("lane_config", laneId,
+            $"project={project} agent={cfg.Agent} permissionMode={fromArgv ?? cfg.PermissionMode} " +
+            $"source={(fromArgv is null ? "config" : "argv")} allowedTools={cfg.Allowed.Length}");
     }
 
     static bool IsClaude(string child) =>
@@ -1946,9 +2231,13 @@ sealed class Daemon
     /// own — which is exactly what a project whose own CLAUDE.md ends in "check out a branch"
     /// will make it do (docs/M5-DELIVERY-PLAN.md §4). Until a plain lane gets a worktree of its
     /// own, the honest instruction is: do not touch which branch is checked out, at all.</summary>
-    static string LaneSystemPrompt(string title, string workDir) =>
-        $"You are the agent for lane \"{title}\", operated by the Dodona orchestrator. Your working directory is " +
-        $"{workDir} — work there. " +
+    /// <summary>...and the folder sentence is built by <see cref="Projects.DirSentence"/>, which
+    /// <see cref="Projects.PromptDirMismatch"/> also reads back — so the prompt's idea of where
+    /// the agent is and the process's actual working directory are checked against each other at
+    /// every spawn (trap T1). One definition, written in one place and parsed in one place.</summary>
+    internal static string LaneSystemPrompt(string title, string workDir) =>
+        $"You are the agent for lane \"{title}\", operated by the Dodona orchestrator. " +
+        Projects.DirSentence(workDir) + " " +
         "IMPORTANT: that directory is a SHARED checkout. Other lanes and your human operator are working in it at the " +
         "same time, so it is not yours to reconfigure: never run `git checkout`, `git switch`, `git stash`, or anything " +
         "else that changes which branch is checked out or moves uncommitted work aside. Doing so silently reassigns " +
@@ -2002,6 +2291,25 @@ sealed class Daemon
 
     async Task<(long Id, string Msg)> AttachShimAsync(long id, string title, string role, string workDir, string child, List<string> childArgs)
     {
+        // TRAP T1, ENFORCED AT THE ONE PLACE BOTH FACTS EXIST (docs/LOCATIONS-PLAN.md Phase 2).
+        // The prompt says "your working directory is X"; the ProcessStartInfo below sets the real
+        // one. Every spawn in the product funnels through here, so this is the only place that
+        // can compare them -- and comparing them is the difference between "one parameter, used
+        // twice" as an instruction and as a fact. The M5.1 incident was exactly this divergence,
+        // it compiled clean, and no acceptance suite could see it because the prompt lives in an
+        // argv nobody reads back.
+        //
+        // It REFUSES rather than correcting, and the row is left `unreachable` like any other
+        // failed spawn. This can only fire on a code defect (no configuration reaches it), so it
+        // fires in a suite and never on the operator's machine -- and an agent working in a
+        // folder it was told it is not in is not a lane worth starting.
+        if (Projects.PromptDirMismatch(childArgs, workDir) is string mismatch)
+        {
+            _store.LaneState(id, "unreachable");
+            _store.Event("shim_spawn_refused", id, mismatch);
+            return (-1, $"error: lane {id} not started -- {mismatch} (docs/LOCATIONS-PLAN.md Phase 2, trap T1)");
+        }
+
         var pipe = Instance.LanePipe(_instanceId, id);
         _store.LanePipe(id, pipe);
         _store.LaneCwd(id, workDir);      // so a respawn lands here too, not in _primary (M5.1)
@@ -2107,7 +2415,7 @@ sealed class Daemon
                   "never mention 'the user', never restate the question. " +
                   "needs_you is true only when the work cannot continue without a human decision. " +
                   "options lists those choices, at most three, and is [] whenever needs_you is false.";
-        var args = IsClaude(child) ? ClaudeArgs(model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
+        var args = IsClaude(child) ? ClaudeArgs(_config, model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
 
         var alive = _store.LanesAll().Count(l => l.Role == "compressor" && l.State == "alive" && _lanes.ContainsKey(l.Id));
         if (alive >= count) return $"compressor pool already warm ({alive})";
@@ -2249,7 +2557,7 @@ sealed class Daemon
     /// `router-start` can force a fresh one with a different child or model.</summary>
     async Task<(long Id, string Msg)> SpawnRouterAsync(string child, string model, string effort)
     {
-        var args = IsClaude(child) ? ClaudeArgs(model, effort, RouterPrompt, acceptEdits: false, utility: true) : new List<string>();
+        var args = IsClaude(child) ? ClaudeArgs(_config, model, effort, RouterPrompt, acceptEdits: false, utility: true) : new List<string>();
         var (id, msg) = await SpawnLaneAsync("ROUTER", "router", NeutralCwd(), child, args);
         if (id < 0) { _store.Event("router_failed", null, msg); return (-1, msg); }
         _routerLo = id;
@@ -2357,7 +2665,7 @@ sealed class Daemon
                   "State your confidence honestly — saying low is how hard questions reach someone with more budget than you.";
         var model = hi ? _config.Model : _config.BrainModel;
         var effort = hi ? _config.Effort : _config.BrainEffort;
-        var args = IsClaude(_config.Agent) ? ClaudeArgs(model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
+        var args = IsClaude(_config.Agent) ? ClaudeArgs(_config, model, effort, sys, acceptEdits: false, utility: true) : new List<string>();
         var (id, msg) = await SpawnLaneAsync(hi ? "BRAIN-HI" : "BRAIN", hi ? "brain-hi" : "brain", NeutralCwd(), _config.Agent, args);
         if (id < 0) { _store.Event("brain_failed", null, msg); return -1; }
         if (hi) _brainHi = id; else _brainLo = id;
@@ -2842,7 +3150,12 @@ sealed class Daemon
     {
         var name = NameFromText(text);
         var choice = Policy.Resolve(text, _config.Rules, _config.Model, _config.Effort, ovModel, ovEffort);
-        var (newId, msg) = await SpawnAgentLaneAsync(name, choice.Model, choice.Effort);
+        // THE FIRST PROJECT, STILL, AND DELIBERATELY. Typed input has no project in it yet:
+        // deciding which project a sentence means is Phase 3's four rungs (an open lane's
+        // project, then a remembered one, then asking), and guessing here would be the wrong
+        // guess made instantly. So this site keeps today's answer and is now the only one that
+        // does -- `lane-start` takes `--project`, and Phase 3 changes exactly this line.
+        var (newId, msg) = await SpawnAgentLaneAsync(name, _primary, choice.Model, choice.Effort);
         if (newId < 0) return (-1, $"error: could not start a lane for this: {msg}", choice);
 
         _store.Event("policy_choice", newId, $"{choice.Model}/{choice.Effort} why={choice.Why} overridden={choice.Overridden} text={text}");

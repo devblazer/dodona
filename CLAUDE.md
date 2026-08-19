@@ -766,11 +766,17 @@ each one is a way to lose someone's work silently.
   the shim's `WorkingDirectory`, and `RespawnLaneAsync` prefers the recorded value, falling
   back to `_primary` only for a lane older than the column. Landed by `f9aaf25` — which is
   itself the cross-session carry that D-7 now prevents.
-  **What is still true:** `SpawnAgentLaneAsync` passes `_primary` (Daemon.cs:1554), and so
-  does the plain `lane-start` path, so a fresh agent lane *does* run in the operator's live
-  tree. Assume that, and do not add anything that checks out a branch on that path. The
-  difference matters for scoping: handing each lane its own tree is now a **spawn-site
-  change**, not a schema change — the column and the plumbing are already there.
+  **Corrected again 2026-08-19 (LOCATIONS-PLAN Phase 2).** This used to end "`SpawnAgentLaneAsync`
+  passes `_primary`, and so does the plain `lane-start` path, so a fresh agent lane *does* run in
+  the operator's live tree". Half of that is now wrong: **a lane opens in a project it is given**
+  — `SpawnAgentLaneAsync(title, project, …)` has no default, `dodona lane-start --project <path>`
+  chooses one, a folder no project owns is refused, and the project picks the lane's
+  `permissionMode`/`allowedTools` (`Config.For`) and is written into its system prompt from the
+  same single parameter. What is **still true and still the danger**: with no `--project`, and for
+  every sentence the operator TYPES, the project is the workspace's first one, which for them is
+  their live tree — so a plain lane is still in a SHARED checkout and **must still never check out
+  a branch**. Choosing per-sentence is Phase 3; giving each lane a tree of its own is still
+  unbuilt, and is still a spawn-site change rather than a schema one.
 
 ## 6. Where things are written down
 

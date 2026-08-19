@@ -155,8 +155,8 @@ async Task<int> Dispatch() => cmd switch
     "workspaces" => WorkspaceList(),
     "workspace-create" => WorkspaceCreate(),
     "workspace-attach" => WorkspaceAttach(),
-    "workspace-detach" => WorkspaceEdit((r, id) => r.Detach(id, RequireMember(), out var e) ? null : e, "detached"),
-    "workspace-move" => WorkspaceEdit((r, id) => r.Move(id, RequireMember(), out var e) ? null : e, "moved"),
+    "workspace-detach" => WorkspaceEdit((r, id) => r.Detach(id, RequireMember(), out var e) ? null : e, "detached", RequireMember()),
+    "workspace-move" => WorkspaceEdit((r, id) => r.Move(id, RequireMember(), out var e) ? null : e, "moved", RequireMember()),
     "workspace-rename" => WorkspaceEdit((r, id) => r.Rename(id, pos[0], out var e) ? null : e, "renamed"),
     "workspace-alias" => WorkspaceEdit((r, id) => r.AddAlias(id, pos[0], out var e) ? null : e, "aliased"),
     "workspace-forget" => WorkspaceEdit((r, id) => r.Forget(id, out var e) ? null : e, "forgotten"),
@@ -180,9 +180,9 @@ async Task<int> Dispatch() => cmd switch
     "concierge-review" => Cx(new { cmd = "review", text = string.Join(" ", pos), workspace = One("workspace-id") ?? One("from") }),
     "concierge-focus" => Cx(new { cmd = "focus", workspace = One("workspace-id") ?? (pos.Count > 0 ? pos[0] : "") }),
     "concierge-stop" => Cx(new { cmd = "stop" }),
-    "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), model = One("model"), effort = One("effort"), childArgs = Many("child-arg") }),
+    "lane-start" => Client(new { cmd = "lane-start", title = One("title") ?? "LANE", child = One("child"), model = One("model"), effort = One("effort"), project = One("project"), childArgs = Many("child-arg") }),
     "lane-stop" => Client(new { cmd = "lane-stop", lane = long.Parse(pos[0]) }),
-    "lane-respawn" => Client(new { cmd = "lane-respawn", lane = long.Parse(pos[0]) }),
+    "lane-respawn" => Client(new { cmd = "lane-respawn", lane = long.Parse(pos[0]), project = One("project") }),
     "lane-rename" => Client(new { cmd = "lane-rename", lane = long.Parse(pos[0]), title = pos[1] }),
     "brain-start" => Client(new { cmd = "brain-start", hi = opts.ContainsKey("hi") }),
     "say" => Client(new { cmd = "say", lane = long.Parse(pos[0]), text = pos[1] }),
@@ -214,8 +214,8 @@ async Task<int> Dispatch() => cmd switch
     "undo-route" => Client(new { cmd = "undo-route", id = long.Parse(pos[0]) }),
     "ui" => Ui(),
     "policy" => Client(new { cmd = "policy", text = string.Join(" ", pos) }),
-    "repo-status" => Client(new { cmd = "repo-status" }),
-    "repo-init" => Client(new { cmd = "repo-init", adopt = opts.ContainsKey("adopt") }),
+    "repo-status" => Client(new { cmd = "repo-status", project = One("project"), cwd = Environment.CurrentDirectory }),
+    "repo-init" => Client(new { cmd = "repo-init", adopt = opts.ContainsKey("adopt"), project = One("project"), cwd = Environment.CurrentDirectory }),
     "publish" => Publish(),
     "swap" => Client(new { cmd = "swap", exe = Path.GetFullPath(pos[0]), mode = One("mode") ?? "ask" }),
     "swap-answer" => Client(new { cmd = "swap-answer", answer = pos[0] }),
@@ -342,7 +342,7 @@ int AttachOne(Registry reg, string wsId, string path)
 
 string RequireMember() => One("member") ?? (pos.Count > 0 ? pos[0] : throw new ArgumentOutOfRangeException(nameof(opts), "--member <path> required"));
 
-int WorkspaceEdit(Func<Registry, string, string?> op, string verb)
+int WorkspaceEdit(Func<Registry, string, string?> op, string verb, string? tellDaemonProjectGone = null)
 {
     // Ws() BEFORE the registry opens, so the name we report is the one before a rename.
     var was = Ws();
@@ -350,7 +350,42 @@ int WorkspaceEdit(Func<Registry, string, string?> op, string verb)
     var err = op(reg, was.Id);
     if (err is not null) return Fail($"error: {err}");
     Console.WriteLine($"{verb}: workspace {was.Name} ({was.Id})");
+    // P2.6 / trap T4: a registry edit that removes a project must reach the LANES in it. These
+    // are registry writes made here in the CLI, and until now they touched no lane row at all --
+    // so a live agent kept working in a folder this workspace no longer owns, and the daemon had
+    // no idea. The registry is already changed by the time this runs, which is the right order:
+    // the daemon re-reads `Members()` per call, so it sees the new truth when it reconciles.
+    if (tellDaemonProjectGone is not null) TellIfLive(was.Id, new { cmd = "project-gone", project = tellDaemonProjectGone });
     return 0;
+}
+
+/// <summary>
+/// Say something to a workspace daemon ONLY IF ONE IS ALREADY RUNNING — never summoning, never
+/// failing.
+///
+/// Both halves matter. **Never summon**: a summoned daemon runs its warm-up, which is four real
+/// `claude -p --model haiku` processes, and a registry edit that starts four model-backed agents
+/// on a machine the operator believes is idle is the §3.2 incident in a new costume. **Never
+/// fail**: the registry edit has already succeeded and is the operator's actual request, so a
+/// daemon that died between the liveness check and the connect must not turn a completed edit
+/// into an error. A sleeping workspace needs no message anyway — it has no live lanes, and the
+/// `lane-respawn` refusal covers the rows when it wakes.
+/// </summary>
+void TellIfLive(string wsId, object request)
+{
+    if (!Instance.IsLive(wsId)) return;
+    try
+    {
+        using var pipe = new NamedPipeClientStream(".", Instance.CtlPipe(wsId), PipeDirection.InOut);
+        pipe.Connect(3000);
+        var w = new StreamWriter(pipe) { AutoFlush = true };
+        var r = new StreamReader(pipe);
+        w.WriteLine(JsonSerializer.Serialize(request));
+        string? line;
+        while ((line = r.ReadLine()) is not null && line != "##end")
+            if (!line.StartsWith("##")) Console.WriteLine(line);
+    }
+    catch { }
 }
 
 /// <summary>Where this workspace's state actually lives. Exists because the answer stopped
@@ -1350,7 +1385,7 @@ static void Help() => Console.WriteLine("""
               answering TEACHES an alias, so the next one resolves for free
       dodona concierge-review <text> --workspace-id <id> | concierge-stop
     lanes:
-      dodona lane-start --title <T> [--model sonnet] [--child <exe> [--child-arg <a>]...]
+      dodona lane-start --title <T> [--project <path>] [--model sonnet] [--child <exe> [--child-arg <a>]...]
               no --child means a real claude lane in the project (no ticket, no claim gate)
       dodona say <lane> <text> | tail <lane> [n] | status
     model & effort (§9):
@@ -1358,8 +1393,8 @@ static void Help() => Console.WriteLine("""
       dodona policy <text>                  (what that sentence would run as, and why)
               override in any prompt: @opus @max <text>
     project setup:
-      dodona repo-status                    (is this folder a repo? what is inside it?)
-      dodona repo-init [--adopt]            (--adopt commits the files already there)
+      dodona repo-status [--project <p>]    (is this project a repo? what is inside it?)
+      dodona repo-init [--adopt] [--project <p>]   (--adopt commits the files already there)
       dodona repos                          (the workspace's repositories, and their tokens)
     tickets & claims (§6/§11):
       dodona ticket-create --title <T> --claim <spec>... [--mode on-approval|auto] [--repo <name>]
@@ -1387,7 +1422,7 @@ static void Help() => Console.WriteLine("""
       dodona swap <new dodona.exe> [--mode now] | swap-answer <now|when-it-lands|hold>
       dodona swaps
     lanes & the brain (§3):
-      dodona lane-rename <lane> <TITLE> | lane-respawn <lane> | lane-stop <lane>
+      dodona lane-rename <lane> <TITLE> | lane-respawn <lane> [--project <path>] | lane-stop <lane>
       dodona lane-collapse <lane> | lane-expand <lane>
               the grid GROWS with the work; you collapse what you are not dealing with
       dodona brain-start [--hi]             (warm the dispatcher brain; hi = expensive tier)

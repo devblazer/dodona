@@ -163,12 +163,18 @@ try {
     $back = Dodona @("token-request", "4")
     Check 'backstop_uses_workspace_paths' ($DODONA_EXIT -eq 1 -and $back -match 'engine/other/sneaky.cs') $back
 
-    # ---- lanes are workspace-wide: an agent can run with no repository involved ----
+    # ---- a lane needs no repository: an agent can run with no git involved at all ----
+    # RENAMED FROM `lanes_are_workspace_wide` (docs/LOCATIONS-PLAN.md Phase 2). Its stated
+    # premise was that lanes belong to the workspace rather than to a place, and this phase
+    # contradicts that: a lane now opens in ONE project, chosen at the spawn site, and
+    # `lane-start --project` is how. What the assertion below actually tested survives
+    # unchanged and is still worth holding -- a lane needs no repository, only tickets do --
+    # so the name was the wrong half, not the check.
     $ls = Dodona @("lane-start", "--title", "DOCS", "--child", $fake)
     if ($ls -match 'lane (\d+)') { $lane = $Matches[1] } else { throw "lane-start failed: $ls" }
     Dodona @("say", "$lane", "say lanes span the workspace") | Out-Null
     Wait-Until { (Dodona @("tail", "$lane", "10")) -match 'lanes span the workspace' } 20000 'the lane answers' | Out-Null
-    Check 'lanes_are_workspace_wide' ((Dodona @("tail", "$lane", "5")) -match 'lanes span the workspace') ''
+    Check 'a_lane_needs_no_repository' ((Dodona @("tail", "$lane", "5")) -match 'lanes span the workspace') ''
 
     # ---- one store, one causal chain for the whole workspace ----
     $ev = (python -c "
@@ -756,6 +762,172 @@ PRAGMA user_version = 8;
         "ui='$($plainSlot[0].project)','$($betaSlot[0].project)' status='$plainProj','$betaProj'"
 
     Tp @("ui", "close") | Out-Null
+
+    # =====================================================================================
+    # PHASE 2: A LANE OPENS IN A PROJECT (docs/LOCATIONS-PLAN.md Phase 2)
+    #
+    # Everything above this line is Phase 1 -- the ability to SEE which project a lane is in.
+    # Everything below is the ability to CHOOSE it, and every check here was red against the
+    # commit that landed Phase 1.
+    #
+    # WHY THESE LIVE HERE AND NOT IN m3. m3 has the only two checks in the tree that assert a
+    # lane's working directory, and Phase 1 established by experiment that it CANNOT catch this
+    # phase: reversing the cwd rungs left m3 31/31 green (a normally-spawned ticket lane's two
+    # rungs name the same folder), and m3 covers the ticket-lane RESPAWN path but never the
+    # SPAWN path at all. A green m3 is therefore not evidence about a spawn site. Two projects
+    # in one workspace is the only fixture that can tell "the project it was given" from "the
+    # first project", which is why P1.1 built it.
+    # =====================================================================================
+
+    # ---- P2.1/P2.2: a lane opens in the project it was given ----
+    $lsB = Tp @("lane-start", "--title", "INB", "--project", $tp.B, "--child", $fake)
+    if ($lsB -notmatch 'lane (\d+)') { throw "lane-start --project failed in the two-project workspace: $lsB" }
+    $bLane = $Matches[1]
+    Check 'a_lane_opens_in_the_project_it_was_given' `
+        ((TpRows "SELECT cwd FROM lanes WHERE id=$bLane").Trim() -eq $tp.B) `
+        "cwd='$((TpRows "SELECT cwd FROM lanes WHERE id=$bLane").Trim())' want='$($tp.B)'"
+    # THE ROW IS NOT THE POINT: THE PROCESS HAS TO BE THERE. `lanes.cwd` is written BEFORE
+    # Process.Start, so a recorded path only proves what the daemon INTENDED -- and "the lane
+    # looks placed while the process is somewhere else" is exactly this phase's failure mode
+    # (trap T1). The fake agent's `cwd` directive answers with its own Environment.CurrentDirectory,
+    # so this is the OS's answer about the agent at the far end of the chain: daemon sets the
+    # shim's WorkingDirectory, shim hands its cwd to the child, child reports it back.
+    Tp @("say", "$bLane", "cwd") | Out-Null
+    # No `$` anchor: PS -match is single-line, so `$` would demand the path be the last thing in
+    # the whole tail. The path itself is unique to this project, which is the assertion.
+    Wait-Until { (Tp @("tail", "$bLane", "10")) -match [regex]::Escape($tp.B) } 20000 'the project-B agent reports its own cwd' | Out-Null
+    Check 'the_agent_process_really_runs_in_that_project' `
+        ((Tp @("tail", "$bLane", "5")) -match [regex]::Escape($tp.B)) `
+        "tail=$((Tp @("tail", "$bLane", "5")) -replace '\s+', ' ') want='$($tp.B)'"
+
+    # A folder INSIDE a project resolves up to the project. A lane opens in a project, not in
+    # whichever subdirectory a caller happened to name, so `lanes.cwd` stays in the operator's
+    # units and `Projects.Field` keeps answering with a project path.
+    $lsSub = Tp @("lane-start", "--title", "INSUB", "--project", (Join-Path $tp.B 'src'), "--child", $fake)
+    if ($lsSub -notmatch 'lane (\d+)') { throw "lane-start --project <subdir> failed: $lsSub" }
+    $subLane = $Matches[1]
+    Check 'a_folder_inside_a_project_opens_in_that_project' `
+        ((TpRows "SELECT cwd FROM lanes WHERE id=$subLane").Trim() -eq $tp.B) `
+        "cwd='$((TpRows "SELECT cwd FROM lanes WHERE id=$subLane").Trim())' want='$($tp.B)'"
+
+    # ---- P2.1: a folder no project owns is REFUSED, and leaves no row behind ----
+    # The negative half, and the one that matters: a plain lane is completely ungated (trap T7 --
+    # GateHook returns 0 with no --ticket), so an agent started in a folder no workspace owns is
+    # an unbounded agent in a tree nothing here is tracking. `brain:220`
+    # `held_input_invents_no_lane` is the same shape of assertion for the routing side.
+    $outsider = Join-Path (Use-SuiteTemp) ("dodona-outsider-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force "$outsider\src" | Out-Null
+    $lanesBefore = [int](TpRows "SELECT COUNT(*) FROM lanes").Trim()
+    $refused = Tp @("lane-start", "--title", "OUTSIDE", "--project", $outsider, "--child", $fake)
+    $lanesAfter = [int](TpRows "SELECT COUNT(*) FROM lanes").Trim()
+    # Captured native stderr is WRAPPED to the console width, so a newline can land mid-sentence
+    # (CLAUDE.md 0.2 -- it produced a false red once). Collapse before matching.
+    Check 'a_lane_in_a_folder_no_project_owns_is_refused' `
+        ($DODONA_EXIT -eq 1 -and (($refused -replace '\s+', ' ') -match 'is in no project of workspace')) `
+        "exit=$DODONA_EXIT out=$($refused -replace '\s+', ' ')"
+    Check 'a_refused_lane_leaves_no_row_behind' ($lanesAfter -eq $lanesBefore) "lanes went $lanesBefore -> $lanesAfter"
+
+    # ---- P2.3 / trap T2: a lane's permissions come from ITS project's dodona.json ----
+    # A repo deliberately kept on a leash loses it, otherwise. `permissionMode` plus
+    # `allowedTools` is the ONLY thing CLAUDE.md 7 lets a project ask for, and `Config.For` --
+    # which has existed since multi-repo landed -- had never once been used to configure a lane.
+    #
+    # Project A has no dodona.json, so it gets the built-in default (bypassPermissions). Project
+    # B asks for acceptEdits. One daemon, one command each, two answers.
+    #
+    # `agent` is restated in B's file on purpose: Config.For picks a WHOLE FILE, it does not
+    # merge two, so a project config that named only permissionMode would send this lane's agent
+    # back to the built-in default of the real `claude` -- i.e. quota, from a suite.
+    Set-Content "$($tp.B)\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0; permissionMode = 'acceptEdits' } | ConvertTo-Json)
+    $lsPa = Tp @("lane-start", "--title", "LEASHA", "--project", $tp.A, "--child", $fake)
+    if ($lsPa -notmatch 'lane (\d+)') { throw "lane-start in A failed: $lsPa" }
+    $paLane = $Matches[1]
+    $lsPb = Tp @("lane-start", "--title", "LEASHB", "--project", $tp.B, "--child", $fake)
+    if ($lsPb -notmatch 'lane (\d+)') { throw "lane-start in B failed: $lsPb" }
+    $pbLane = $Matches[1]
+    $cfgA = (TpRows "SELECT detail FROM events WHERE kind='lane_config' AND lane_id=$paLane").Trim()
+    $cfgB = (TpRows "SELECT detail FROM events WHERE kind='lane_config' AND lane_id=$pbLane").Trim()
+    Check 'a_lanes_permission_mode_comes_from_its_own_project' `
+        ($cfgB -match 'permissionMode=acceptEdits') "B: $cfgB"
+    Check 'a_lane_does_not_inherit_another_projects_permission_mode' `
+        ($cfgA -match 'permissionMode=bypassPermissions' -and $cfgA -notmatch 'acceptEdits') "A: $cfgA"
+    Check 'two_lanes_in_one_workspace_are_configured_by_different_projects' `
+        ($cfgA.Length -gt 0 -and $cfgB.Length -gt 0 -and $cfgA -ne $cfgB) "A: $cfgA  B: $cfgB"
+
+    # ---- P2.5 / trap T6: the claim gate resolves a write in the ticket's OWN project ----
+    # The two bases were the worktree and THE FIRST PROJECT, so a write anywhere in a second
+    # project resolved to neither and the gate denied it -- while the agent was writing inside a
+    # repository this workspace owns and its ticket claims. Broken before this phase; Phase 2 is
+    # what makes it normal, so the latent hole starts firing. Ticket 1 lives in project B and
+    # claims subtree:<bLeaf>/src.
+    $ccIn = Tp @("claim-check", "1", (Join-Path $tp.B 'src\main.cs'))
+    Check 'claim_check_covers_a_write_in_the_tickets_own_project' `
+        ((($ccIn -replace '\s+', ' ') -match "covered: $([regex]::Escape($tp.BLeaf))/src/main\.cs")) `
+        ($ccIn -replace '\s+', ' ')
+    # ...and still denies one no project owns. A base list that widened until everything resolved
+    # would pass the check above and be a hole, so this is the other half of the same assertion.
+    $ccOut = Tp @("claim-check", "1", (Join-Path $outsider 'src\x.cs'))
+    Check 'claim_check_still_denies_a_write_no_project_owns' `
+        ($DODONA_EXIT -eq 1 -and (($ccOut -replace '\s+', ' ') -match 'outside the worktree and every project')) `
+        "exit=$DODONA_EXIT out=$($ccOut -replace '\s+', ' ')"
+
+    # ---- P2.4 / trap T5: repo-status and repo-init act on the project they were given ----
+    $rsB = Tp @("repo-status", "--project", $tp.B) | ConvertFrom-Json
+    Check 'repo_status_reports_the_project_it_was_given' ($rsB.root -eq $tp.B) "root='$($rsB.root)' want='$($tp.B)'"
+
+    # repo-init needs a project that is NOT a repo, so attach a third. A bare folder is exempt
+    # from repo exclusivity (no merge token exists to split), which is why this is attachable.
+    $projC = Join-Path (Use-SuiteTemp) ("dodona-projc-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force "$projC\src" | Out-Null
+    Set-Content "$projC\src\x.cs" "// project c"
+    DodonaBare @("workspace-attach", "--member", $projC, "--workspace", $tp.Id) | Out-Null
+    $ri = Tp @("repo-init", "--project", $projC, "--adopt")
+    Check 'repo_init_initialises_the_project_it_was_given' `
+        ((($ri -replace '\s+', ' ') -match [regex]::Escape($projC)) -and (Test-Path "$projC\.git")) `
+        ($ri -replace '\s+', ' ')
+    # ...AND SAYS NOTHING ABOUT ANOTHER ONE. This is the harm signature, not a tidiness check:
+    # against the unfixed build the command was aimed at the FIRST project regardless, which is
+    # already a repository with commits, so the red printed `error: <project A> is already a git
+    # repository with commits` -- project A's path, in an answer about project C, to an agent
+    # that has never seen project A.
+    Check 'repo_init_does_not_answer_about_another_project' `
+        (($ri -replace '\s+', ' ') -notmatch [regex]::Escape($tp.A)) ($ri -replace '\s+', ' ')
+
+    # ---- P2.6 / trap T4: a detached project does not leave live lanes behind ----
+    # `workspace-detach` and `workspace-move` are registry edits made in the CLI and they touched
+    # no lane row at all, while respawn's only test was Directory.Exists -- which PASSES, because
+    # the folder is still there; it just belongs to another workspace now. So an ungated agent
+    # (T7) kept working in someone else's repository, and a respawn would have started a fresh
+    # one there.
+    $lsC = Tp @("lane-start", "--title", "GAMMA", "--project", $projC, "--child", $fake)
+    if ($lsC -notmatch 'lane (\d+)') { throw "lane-start in project C failed: $lsC" }
+    $cLane = $Matches[1]
+    Tp @("say", "$cLane", "say gamma up") | Out-Null
+    Wait-Until { (Tp @("tail", "$cLane", "10")) -match 'gamma up' } 20000 'the project-C lane answers' | Out-Null
+    $cShimPid = [int]((Get-Content "$($tp.Dir)\shim-lane$cLane.json" -Raw | ConvertFrom-Json).shimPid)
+    DodonaBare @("workspace-detach", "--member", $projC, "--workspace", $tp.Id) | Out-Null
+    # PROCESSES, NOT PIPES. A lane pipe blinks out of the namespace for milliseconds while its
+    # shim swaps server instances (8 of 192 reads over 1.5 s), so polling for a pipe's absence
+    # eventually catches the gap and calls a live agent stopped -- a false green
+    # (.claude/skills/check-authoring 2). A pid does not blink.
+    Wait-Until { -not (Get-Process -Id $cShimPid -ErrorAction SilentlyContinue) } 20000 'the detached project''s shim exits' | Out-Null
+    Check 'detaching_a_project_stops_the_lanes_that_were_in_it' `
+        (-not (Get-Process -Id $cShimPid -ErrorAction SilentlyContinue)) "shim pid $cShimPid is still alive"
+    Check 'a_detached_projects_lane_records_why_it_stopped' `
+        ((TpRows "SELECT detail FROM events WHERE kind='lane_project_detached' AND lane_id=$cLane").Trim() -match 'project=') `
+        (TpRows "SELECT detail FROM events WHERE kind='lane_project_detached' AND lane_id=$cLane")
+    # The lane ROW survives -- nothing here deletes a transcript (§12) -- but it must not be
+    # respawned back into a folder this workspace no longer owns.
+    $rr = Tp @("lane-respawn", "$cLane")
+    Check 'a_lane_is_not_respawned_into_a_project_that_left' `
+        ($DODONA_EXIT -eq 1 -and (($rr -replace '\s+', ' ') -match 'belongs to no project of workspace')) `
+        "exit=$DODONA_EXIT out=$($rr -replace '\s+', ' ')"
+    # And the refusal names something that un-sticks it, rather than parking (CLAUDE.md 0.1).
+    $rh = Tp @("lane-respawn", "$cLane", "--project", $tp.B)
+    Check 'a_stranded_lane_can_be_re_homed_to_a_project_that_is_still_here' `
+        (($rh -match "lane $cLane") -and (TpRows "SELECT cwd FROM lanes WHERE id=$cLane").Trim() -eq $tp.B) `
+        "out=$($rh -replace '\s+', ' ') cwd='$((TpRows "SELECT cwd FROM lanes WHERE id=$cLane").Trim())'"
+
     Stop-WorkspaceShims $tp.Dir
     DodonaBare @("stop-daemon", "--workspace", $tp.Id) | Out-Null
 
