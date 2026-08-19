@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Dodona;
 
 namespace DodonaUi;
 
@@ -30,6 +31,19 @@ sealed class Poller
     readonly StoreReader _reader;
     string _lastJson = "";
     public volatile string? OverlayTitle;               // set by the window; poller fills lines
+
+    /// <summary>This workspace's projects, newest registry answer, set by <see cref="Shell"/>
+    /// on every tick — the same treatment <see cref="OverlayTitle"/> gets, and for the same
+    /// reason: the poller reads the STORE, and a project list is registry state, which only
+    /// the Shell already has open. Re-set every tick rather than at construction because a
+    /// project attached while the window is up must appear without a restart (the doctrine
+    /// Daemon.Members() states one level down).
+    ///
+    /// Empty until the first Refresh, and empty is safe: Projects.Field then reports every
+    /// work lane as `none (cwd=…)` for one 250 ms tick at most, and never the wrong project.
+    /// Volatile array reference rather than a List, so the 250 ms read never sees a
+    /// half-populated collection.</summary>
+    public volatile string[] ProjectPaths = Array.Empty<string>();
 
     public Poller(StoreReader reader) => _reader = reader;
 
@@ -84,6 +98,11 @@ sealed class Poller
         // in the store, so `tail` and the overlay still hold the whole transcript. A lane that
         // went UNREACHABLE stays visible on purpose: that one is a problem to notice, not a
         // decision you made.
+        // Projects are captured ONCE per snapshot: the field is volatile and the Shell writes
+        // it from another thread, so re-reading it per lane could describe two different
+        // workspaces in one grid.
+        var projects = ProjectPaths;
+        var neutral = Paths.NeutralDir;
         var collapsed = _reader.CollapsedLanes();
         var tray = new List<string>();
         var shown = lanes.Where(l => l.Role == "work" && l.State != "dead").OrderBy(l => l.Id).ToList();
@@ -100,6 +119,10 @@ sealed class Poller
                 collapsed.Contains(l.Id) ? new List<LineSnap>() : _reader.Tail(l.Id, 40))
             {
                 Repo = multiRepo && ticketRepos.TryGetValue(l.Id, out var rp) && rp != "." ? rp : "",
+                // WHICH PROJECT (P1.2). Never computed here: the daemon answers `status` with
+                // the same function over the same three inputs, so the window and the CLI
+                // cannot disagree about where a lane is.
+                Project = Projects.Field(l.Role, l.Cwd, projects, neutral) ?? "",
                 LastInputId = lastInput.GetValueOrDefault(l.Id),
                 Collapsed = collapsed.Contains(l.Id),
             })

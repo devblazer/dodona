@@ -873,6 +873,40 @@ function Do-Prove {
     foreach ($n in $suiteNames) {
         if ($n -ne 'unit' -and -not (Test-Path "$repo\tests\$n-acceptance.ps1")) { Abort "no suite '$n'" "one of: $((AllSuites) -join ', ')" }
     }
+    # `unit` CANNOT BE PROVED HERE, and saying so is the whole fix (2026-08-19). It looked
+    # supported -- CLAUDE.md's table says `prove <suite> <check>` and the loop above lets the
+    # name through -- and it was broken three separate ways, each giving a WRONG answer rather
+    # than no answer:
+    #
+    #   1. the HEAD build compiled tests\Dodona.Tests, so a unit test naming a symbol this
+    #      change ADDS fails to compile and prove aborted with "HEAD does not build" -- which
+    #      reads as "your baseline is broken" and, worse, took every ACCEPTANCE check in the same
+    #      run down with it. That one is a real bug and is fixed below: an acceptance proof has no
+    #      business compiling the unit-test project.
+    #   2. Start-Suite would then Abort "no suite 'unit'" -- there is no tests\unit-acceptance.ps1.
+    #   3. and if it had got past both, Run-Unit builds and tests $repo -- the WORKING TREE --
+    #      so the verdict would have been the change measured against itself. A silently wrong
+    #      proof is worse than no proof; it is the believed-a-green-check disease with a
+    #      certificate.
+    #
+    # THE HONEST LIMIT: a NEW pure function cannot be failed by a HEAD that does not contain it.
+    # There is nothing to compile the test against. So the substitute is the one CLAUDE.md 0.3
+    # already prescribes for machine-state checks -- break the thing on purpose and watch the
+    # check go red -- and it is a stronger demonstration for a pure refactor anyway, because it
+    # pins the exact behaviour rather than the symbol's absence.
+    if ($suiteNames -contains 'unit') {
+        Abort "the unit suite cannot be proved against HEAD" (@(
+            "A unit test compiles AGAINST the code it tests, so a HEAD without your new symbol",
+            "cannot run it at all -- there is no red to see, only a compile error.",
+            "",
+            "Demonstrate it the other way round, in your own tree:",
+            "  1. break the function on purpose (reverse the rung order, drop a guard)",
+            "  2. dev test unit      -- the check must go RED, and you must read the failure",
+            "  3. revert the break, and record what the red said in the commit message",
+            "",
+            "Acceptance checks (.ps1 suites) prove normally: dev prove m3:check workspace:check"
+        ) -join "`n         ")
+    }
     Say $(if ($pairs.Count -eq 1) { "== prove: '$($pairs[0].Check)' must FAIL against HEAD ==" }
           else { "== prove: $($pairs.Count) check(s) across $($suiteNames.Count) suite(s) must FAIL against HEAD ==" })
 
@@ -926,10 +960,23 @@ function Do-Prove {
         # still be the one that runs. Also drops the previous proof's <suite>-output directories.
         Remove-Item "$wt\tests\*" -Recurse -Force -ErrorAction SilentlyContinue
         Copy-Item "$repo\tests\*" "$wt\tests\" -Recurse -Force
+        # THE FOUR PRODUCT PROJECTS, NOT THE SOLUTION (2026-08-19). `Dodona.sln` includes
+        # tests\Dodona.Tests, and an acceptance suite has no use for it: every suite runs the
+        # binaries that Use-TestBinaries copies out of src\*\bin\Release, and the unit suite
+        # compiles its own project itself. Building it here only ADDED a way to fail -- a unit
+        # test in your working tree that names a symbol your change adds does not compile against
+        # HEAD, and prove then reported "HEAD does not build" and refused to judge the eleven
+        # perfectly provable acceptance checks in the same run. The tests\ directory is copied
+        # from the working tree on purpose (that is the trick); compiling part of it against HEAD
+        # was never part of it.
         Say $(if ($reused) { "building HEAD (incremental) ..." } else { "building HEAD (cold, first proof at this commit) ..." })
-        $b = & dotnet build "$wt\Dodona.sln" -c Release 2>&1
-        Add-Content -Path $log -Value $b -Encoding utf8
-        if ($LASTEXITCODE -ne 0) { Abort "HEAD does not build, so it cannot be used as a baseline" "commit a buildable baseline first; see $log" }
+        $projects = @('src\Dodona\Dodona.csproj', 'src\DodonaShim\DodonaShim.csproj',
+                      'src\DodonaFakeAgent\DodonaFakeAgent.csproj', 'src\DodonaUi\DodonaUi.csproj')
+        foreach ($proj in $projects) {
+            $b = & dotnet build (Join-Path $wt $proj) -c Release 2>&1
+            Add-Content -Path $log -Value $b -Encoding utf8
+            if ($LASTEXITCODE -ne 0) { Abort "HEAD does not build ($proj), so it cannot be used as a baseline" "commit a buildable baseline first; see $log" }
+        }
 
         # THROUGH Start-Suite/Complete-Suite, not `& powershell ... 2>&1`. This line was the
         # SAME HANG that was fixed in Run-Suite and missed here, which is exactly the

@@ -545,9 +545,13 @@ sealed class Daemon
                 // gated agent, resumed, editing main's tree. The ticket is the authority on
                 // both answers; the recorded cwd covers every other kind of lane.
                 var t2 = _store.Tickets().FirstOrDefault(t => t.LaneId == lane && t.State == "open");
-                var cwd2 = t2?.Worktree is { Length: > 0 } twt && Directory.Exists(twt) ? twt
-                         : row.Cwd is { Length: > 0 } rcwd && Directory.Exists(rcwd) ? rcwd
-                         : _primary;
+                // The rung ORDER lives in ResolveLaneCwd, on the unit loop (P1.3). What stays
+                // here is the I/O: a directory that has been deleted is not a candidate, and
+                // ruling it out is this site's business, not a pure function's.
+                var cwd2 = ResolveLaneCwd(
+                    t2?.Worktree is { Length: > 0 } twt && Directory.Exists(twt) ? twt : null,
+                    row.Cwd is { Length: > 0 } rcwd && Directory.Exists(rcwd) ? rcwd : null,
+                    _primary);
                 if (IsClaude(child2))
                 {
                     var sys2 = t2 is null
@@ -606,10 +610,23 @@ sealed class Daemon
                             $"router: {(_routerLo > 0 && _lanes.TryGetValue(_routerLo, out var rrt) && rrt.Connected ? $"lane {_routerLo}" : "NOT RUNNING")} " +
                             $"model={_config.RouterModel} effort={(_config.RouterEffort is { Length: > 0 } ? _config.RouterEffort : "cli default")}  " +
                             $"agent={_config.Agent}");
+                // WHICH PROJECT EACH LANE IS IN (P1.2). Until this line `lanes.cwd` had no
+                // surface anywhere a person looks: not here, not in `ui dump`, only the
+                // `shim_spawned` event detail -- so a lane opening in the wrong project was
+                // invisible to the operator and to every check but two. Projects are read ONCE
+                // for the whole listing rather than per lane: Members() re-reads the registry
+                // on every call, and a status line is not worth N registry opens.
+                //
+                // Projects.Field returns null for "say nothing", which is what keeps a
+                // one-project workspace's output byte-for-byte what it has always been --
+                // read its doc comment before changing the shape of this line.
+                var projects = Members().Select(m => m.Path).ToList();
                 foreach (var l in _store.LanesAll())
                 {
                     var connected = _lanes.TryGetValue(l.Id, out var rt) && rt.Connected;
-                    w.WriteLine($"lane {l.Id}  {l.Title,-10}  role={l.Role,-6}  state={l.State}  connected={connected}  presence={l.Presence,-16}  session={l.Session ?? "-"}");
+                    var proj = Projects.Field(l.Role, l.Cwd, projects, Paths.NeutralDir);
+                    w.WriteLine($"lane {l.Id}  {l.Title,-10}  role={l.Role,-6}  state={l.State}  connected={connected}  presence={l.Presence,-16}  session={l.Session ?? "-"}" +
+                                (proj is null ? "" : $"  project={proj}"));
                 }
                 break;
 
@@ -1775,10 +1792,14 @@ sealed class Daemon
         var row = _store.LanesAll().FirstOrDefault(l => l.Id == laneId);
         var role = row?.Role ?? "work";
         // Never `_primary` by default any more (M5.1): the lane's own recorded directory is
-        // the answer, and only a lane predating the column falls back to the primary.
-        var cwd = workDir is { Length: > 0 } w ? w
-                : row?.Cwd is { Length: > 0 } rc && Directory.Exists(rc) ? rc
-                : _primary;
+        // the answer, and only a lane predating the column falls back to the primary. Same
+        // three rungs as the `lane-respawn` handler, same function, one order (P1.3) -- and
+        // `workDir` is UNCHECKED on purpose: a caller naming a directory is asserting it, and
+        // for `lane-respawn` it is an answer that handler has already vetted.
+        var cwd = ResolveLaneCwd(
+            workDir,
+            row?.Cwd is { Length: > 0 } rc && Directory.Exists(rc) ? rc : null,
+            _primary);
         return AttachShimAsync(laneId, title, role, cwd, child, childArgs);
     }
 
@@ -2492,6 +2513,37 @@ sealed class Daemon
             text, @"^([A-Za-z0-9_-]+):\s+(.+)$", System.Text.RegularExpressions.RegexOptions.Singleline);
         return m.Success ? (m.Groups[1].Value, m.Groups[2].Value) : null;
     }
+
+    /// <summary>
+    /// WHERE A LANE'S PROCESS RUNS. Three rungs, first non-empty wins: a directory that is
+    /// AUTHORITATIVE for this particular spawn, then the lane's own recorded cwd
+    /// (`lanes.cwd`, schema 8), then the workspace's first project as the last resort.
+    ///
+    /// THIS DECISION HAS ALREADY BEEN GOT WRONG ONCE, EXPENSIVELY (M5.1). `lane-respawn`
+    /// hardcoded the first project and rebuilt the PLAIN-lane prompt, so a resumed TICKET
+    /// agent ran in the operator's live working copy while being told "your worktree is the
+    /// current working directory; work only there" -- a gated agent, resumed, editing main's
+    /// tree. Both call sites now route through here, so the rung ORDER is one thing to read
+    /// and one thing to test rather than two similar expressions twelve hundred lines apart.
+    ///
+    /// WHAT RUNG 1 IS DIFFERS BY CALLER, and that difference is real rather than an oversight,
+    /// so it stays at the call site where it can be read:
+    ///   * the `lane-respawn` command supplies the open ticket's worktree, because a ticket is
+    ///     the authority on where its agent belongs;
+    ///   * <see cref="RespawnLaneAsync"/> supplies its `workDir` parameter, which is whatever
+    ///     the caller asked for -- and for `lane-respawn` that is the answer this function
+    ///     just gave. The second call is a pass-through, which is why the two sites never
+    ///     disagreed in practice despite reading differently.
+    ///
+    /// NO I/O, deliberately: `Directory.Exists` stays at the call sites and a caller passes
+    /// null for a rung it has already ruled out. That keeps the ORDER -- the part that was
+    /// wrong -- on the ~1 second `unit` loop beside <see cref="IsObviousGeneric"/> and
+    /// <see cref="LanePrefix"/>, instead of eight seconds of daemon startup away.
+    /// </summary>
+    internal static string ResolveLaneCwd(string? authoritative, string? recordedCwd, string firstProject) =>
+        authoritative is { Length: > 0 } a ? a
+        : recordedCwd is { Length: > 0 } r ? r
+        : firstProject;
 
     /// <summary>
     /// Unmistakable generics — the ones worth deciding in code so they are instant and free.

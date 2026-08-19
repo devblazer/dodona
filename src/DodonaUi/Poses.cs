@@ -117,7 +117,20 @@ static class Poses
 
             // Two lanes: the grid must give them half the window each, not two cells of six.
             case "two":
-                return (new Snapshot(SixPanes().Take(2).ToArray(), new(), Feed(2), null), null, null);
+            {
+                // TWO LANES IN TWO PROJECTS. The project tag is a new affordance and every new
+                // affordance owes a deterministic pose (CLAUDE.md 3, and the note above) --
+                // otherwise the only way to LOOK at it is two live daemons and a two-project
+                // registry, which is exactly the "no suite ever started a lane in a two-project
+                // workspace" gap docs/LOCATIONS-PLAN.md Phase 1 exists to close. A pose needs no
+                // store, so `--pose two --shot` is how a person reviews the pixels.
+                //
+                // Deliberately DIFFERENT projects: one tile showing a tag proves the binding, two
+                // tiles showing DIFFERENT tags prove the tag belongs to its lane.
+                var pair = SixPanes().Take(2).Select((pane, i) =>
+                    (PaneSnap?)(pane! with { Project = i == 0 ? @"C:\ws\alpha" : @"C:\ws\beta" })).ToArray();
+                return (new Snapshot(pair, new(), Feed(2), null), null, null);
+            }
 
             // Twelve: the far end of what the operator will actually let build up before
             // collapsing. Catches tiles that stop being readable, and a header that wraps.

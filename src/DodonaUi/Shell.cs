@@ -111,6 +111,15 @@ sealed class Shell : IDisposable
                 if (_open.TryGetValue(w.Id, out var o) && o.Name != w.Name)
                     _open[w.Id] = new Open { Id = o.Id, Name = w.Name, Reader = o.Reader, Poller = o.Poller };
 
+            // Each poller gets its workspace's PROJECTS, so a pane can say which one its lane
+            // is in (docs/LOCATIONS-PLAN.md P1.2). Here rather than in Add(), because Refresh
+            // already holds the registry open every tick and a project attached mid-session has
+            // to show up without a restart. The Poller reference survives the rename above, so
+            // this reads _open after it.
+            foreach (var w in all)
+                if (_open.TryGetValue(w.Id, out var op))
+                    op.Poller.ProjectPaths = w.Members.Select(m => m.Path).ToArray();
+
             // Boot-to-zero, or the focused workspace disappeared from the registry: adopt an
             // awake one if there is one, otherwise fall to the real zero state (§4).
             if (_focused.Length == 0 || !_open.ContainsKey(_focused))

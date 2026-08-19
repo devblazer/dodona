@@ -213,7 +213,13 @@ public partial class MainWindow : Window
                 {
                     slot = s.Slot, empty = false, lane = s.LaneId, title = s.Title, color = s.ColorHex,
                     state = s.State, presence = s.Presence, badge = s.Badge, blocked = s.Blocked,
-                    focused = s.Focused, repo = s.Repo, pulsing = s.Pulsing, collapsed = false,
+                    // `project` is the unabbreviated Projects.Field value (a project path,
+                    // `neutral`, or `none (cwd=...)`), and "" for "nothing to say" -- which is
+                    // every lane of a ONE-project workspace, so that workspace's dump reports
+                    // exactly what it always did (LOCATIONS-PLAN P1.2, and the same rule `repo`
+                    // beside it already follows). The TILE shows the leaf folder; a dump does
+                    // not abbreviate, because a check must not be able to confuse two projects.
+                    focused = s.Focused, repo = s.Repo, project = s.Project, pulsing = s.Pulsing, collapsed = false,
                     lines = s.Lines.Select(l => l.Text).ToList(),
                 }).ToList(),
             // Collapsed lanes are reported separately AND as part of `slots` shape-compatible

@@ -132,6 +132,26 @@ try {
     Check 'typing_does_not_error' ($d.status -notmatch '^error') $d.status
     Check 'typing_never_tells_you_to_use_the_cli' ($d.status -notmatch 'dodona \w' -and $d.status -notmatch '<LANE>') $d.status
 
+    # ---- A PANE SAYS WHICH PROJECT ITS LANE IS IN, and says nothing here (LOCATIONS-PLAN P1.2)
+    # This is the suite that drives the window the way a PERSON does, so this is where the new
+    # `project` key has to be exercised: a dump proving the UI reports correctly while the first
+    # thing a person tries is a dead end is the failure mode CLAUDE.md 3 names.
+    #
+    # This workspace has ONE project, so there is exactly one possible answer and the tag must be
+    # INVISIBLE -- Projects.Field returns null, PaneView.ProjectVisibility collapses the
+    # TextBlock, and the dump reports "". A one-project operator must never meet a field
+    # answering a question they did not ask, the same rule the `repo` tag beside it follows.
+    #
+    # A REGRESSION check: it goes red if a later phase makes the project unconditional, which is
+    # the careless form of Phase 2 and the thing that would change what every other suite sees.
+    $ps = @($d.slots | Where-Object { -not $_.empty })
+    Check 'a_pane_carries_a_project_key' `
+        ($ps.Count -ge 1 -and @($ps | Where-Object { $null -eq $_.PSObject.Properties['project'] }).Count -eq 0) "slots=$($ps.Count)"
+    Check 'a_one_project_workspace_shows_no_project_tag' `
+        ($ps.Count -ge 1 -and @($ps | Where-Object { "$($_.project)" -ne '' }).Count -eq 0) `
+        (($ps | ForEach-Object { "$($_.title)=[$($_.project)]" }) -join ' ')
+
+
     $lanes = @($d.slots | Where-Object { -not $_.empty })
     Check 'a_lane_now_exists' ($lanes.Count -eq 1) "$($lanes.Count) lanes"
     Check 'lane_named_from_the_text' ($lanes[0].title -eq 'SETTINGS') $lanes[0].title

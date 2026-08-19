@@ -21,6 +21,7 @@ sealed class StoreReader : IDisposable
     public StoreReader(string storePath) => _path = storePath;
 
     bool? _hasCompressed;
+    bool? _hasLaneCwd;
 
     bool Open()
     {
@@ -49,7 +50,30 @@ sealed class StoreReader : IDisposable
         return found;
     }
 
-    public record LaneR(long Id, string Title, string State, string Presence, string Role);
+    /// <summary>Does this store record where each lane RUNS (`lanes.cwd`, schema v8)? Same
+    /// shape and same reason as <see cref="HasCompressed"/>: the UI is read-only, cannot
+    /// migrate, and `--attach` is pointed at copies of older stores on purpose. Naming a
+    /// column that is not there throws into Lanes()' catch and returns NO LANES, which blanks
+    /// the whole grid -- a far worse answer than "this store predates the column".</summary>
+    bool HasLaneCwd()
+    {
+        if (_hasLaneCwd is bool known) return known;
+        var found = false;
+        try
+        {
+            using var c = _db!.CreateCommand();
+            c.CommandText = "SELECT COUNT(*) FROM pragma_table_info('lanes') WHERE name = 'cwd';";
+            found = Convert.ToInt64(c.ExecuteScalar() ?? 0L) > 0;
+        }
+        catch { }
+        _hasLaneCwd = found;
+        return found;
+    }
+
+    /// <summary>`Cwd` is where the lane's process actually runs, and it is what the pane's
+    /// project tag is derived from (docs/LOCATIONS-PLAN.md P1.2). Empty for a store that
+    /// predates schema v8, which reads as "no project to name" rather than as a defect.</summary>
+    public record LaneR(long Id, string Title, string State, string Presence, string Role, string Cwd);
 
     public List<LaneR> Lanes()
     {
@@ -57,10 +81,13 @@ sealed class StoreReader : IDisposable
         if (!Open()) return list;
         try
         {
+            var cwd = HasLaneCwd();
             using var c = _db!.CreateCommand();
-            c.CommandText = "SELECT id, title, state, presence, role FROM lanes ORDER BY id;";
+            c.CommandText = cwd
+                ? "SELECT id, title, state, presence, role, COALESCE(cwd, '') FROM lanes ORDER BY id;"
+                : "SELECT id, title, state, presence, role, '' FROM lanes ORDER BY id;";
             using var r = c.ExecuteReader();
-            while (r.Read()) list.Add(new LaneR(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4)));
+            while (r.Read()) list.Add(new LaneR(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5)));
         }
         catch { }
         return list;
