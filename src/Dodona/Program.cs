@@ -838,6 +838,27 @@ int GateHook()
     try { input = Console.In.ReadToEnd(); }
     catch (Exception ex) { return GateAllowedUnchecked($"stdin unreadable: {ex.GetType().Name}", ticket, null); }
 
+    // A BOM IS NOT CORRUPTION, AND IT WAS FAILING THIS GATE OPEN (2026-08-19).
+    //
+    // `Console.In` hands back a leading U+FEFF as an ordinary character, and JsonDocument.Parse
+    // refuses a document that does not start with `{`. So stdin arriving as EF BB BF 7B ...
+    // took the catch below, logged `JsonReaderException`, and ALLOWED the write unchecked --
+    // the claim gate, layer 1 of the safety model (§6), not enforcing at all. Measured: m1's
+    // `gate_allows_inside_claim` and `gate_denies_outside_claim` were red on `main` at d43dffb,
+    // deterministically, with `Ã¯Â»Â¿{"tool_input":...` in the bypass log.
+    //
+    // Windows writes BOMs everywhere -- PS 5.1's `>` and `Out-File` default to UTF-8-with-BOM
+    // in this environment (CLAUDE.md §0.2 has three separate incidents from that habit) -- so
+    // any producer piping a file into this hook can hand us one. Stripping it is not leniency
+    // about malformed input; it is reading the encoding the platform actually emits, and the
+    // alternative is a gate that silently does nothing.
+    //
+    // This is NOT the same failure as §3's intermittent one, and does not claim to explain it:
+    // that one left EMPTY output and an EMPTY bypass log under a parallel wave. This one is
+    // loud, deterministic and now fixed; that one is still open.
+    input = input.TrimStart('\uFEFF').Trim();      // spelled as an escape on purpose: an
+    // invisible literal here would be the same class of trap as the rest of CLAUDE.md 0.2
+
     // The tool name is only for the diagnostic, so it is read defensively and never gates.
     string tool = "";
     string? path = null;
