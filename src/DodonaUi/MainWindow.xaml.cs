@@ -324,6 +324,12 @@ public partial class MainWindow : Window
         catch (Exception ex) { return $"error: update failed ({ex.Message}); staying on {Ver.Build}"; }
     }
 
+    /// <summary>Set by --test-window. A test window must never produce a MODAL: it renders
+    /// off-screen precisely so it cannot steal the keyboard, and a MessageBox would both steal it
+    /// and block until somebody clicked — in an automated capture, forever. Anything that would
+    /// have been a dialog goes to stderr instead, and the exit code carries the meaning.</summary>
+    public bool IsTestWindow { get; set; }
+
     public string ApplyPose(string name)
     {
         if (name.Equals("live", StringComparison.OrdinalIgnoreCase))

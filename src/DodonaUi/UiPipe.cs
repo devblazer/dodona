@@ -39,11 +39,30 @@ static class UiPipe
                     continue;
                 }
                 // Another UI already owns this root — one grid per store (§14).
+                //
+                // TWO DEFECTS LIVED IN THE FOUR LINES BELOW, both found by simply running the app:
+                // launch `DodonaUi.exe --shell --shot out.png` while a shell is already up, and the
+                // screenshot is written and THEN the process dies of an unhandled
+                // NullReferenceException. Exit code empty, PNG present: a caller checking the file
+                // sees success and a caller checking the code sees failure.
+                //
+                // (1) `Application.Current` is NULL by the time this runs. --shot queues its
+                //     capture-then-Shutdown at ApplicationIdle, that runs first, and after an
+                //     Application has shut down `Current` is gone. Hence `?.` — whoever wins the
+                //     race, the process is ending either way, which is all this line ever wanted.
+                //
+                // (2) A MESSAGEBOX IN A TEST WINDOW. --test-window exists so a window cannot steal
+                //     the keyboard (a priority complaint), and a modal does exactly that AND blocks
+                //     until someone clicks — in an automated capture, forever, which is the
+                //     never-hung directive violated by a dialog nobody can see. Off-screen windows
+                //     say it on stderr and let the exit code mean it.
                 await win.Dispatcher.BeginInvoke(() =>
                 {
-                    MessageBox.Show($"Another Dodona UI is already running for this root.\n(pipe {pipeName})",
+                    var why = $"Another Dodona UI is already running for this root. (pipe {pipeName})";
+                    if (win.IsTestWindow) Console.Error.WriteLine($"DodonaUi: {why}");
+                    else MessageBox.Show(why.Replace(". (pipe", ".\n(pipe"),
                         "Dodona", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    Application.Current.Shutdown(3);
+                    Application.Current?.Shutdown(3);
                 });
                 return;
             }

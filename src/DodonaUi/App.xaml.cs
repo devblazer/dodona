@@ -93,6 +93,7 @@ public partial class App : Application
     /// and a human never sees it.</summary>
     static void MakeTestWindow(MainWindow w)
     {
+        w.IsTestWindow = true;   // so nothing downstream can pop a modal at an off-screen window
         // Qualified inside an Application, where bare `MainWindow` is Application.MainWindow.
         DodonaUi.MainWindow.TestWindow = true;      // survives a UI hot swap
         w.WindowStartupLocation = WindowStartupLocation.Manual;
