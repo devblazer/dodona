@@ -574,6 +574,98 @@ is an `overlay` pose).
 **Note:** `ui dump` has **no field for a dialog** today, which is why `PickerWindow` and
 `StartLaneWindow` are entirely untested. P4.2 is what makes any of this checkable.
 
+### What Phase 4 built  *(2026-08-19, branch `loc-p4`)*
+
+| item | built |
+|---|---|
+| P4.1 | `Dodona.Ask` — the pure half: `Choices(candidatesJson)`, `Match`, `IsFreeForm`, `RepoInitCandidates`. Linked into `DodonaUi.csproj` as SOURCE, so the daemon that WRITES `candidates` and the window that PARSES it cannot drift. **One row SHAPE, two stores** — see the correction below; "one source" as written is not achievable and should not be. |
+| P4.2 | **Live:** the ask overlay in `MainWindow.xaml`, last in the Grid so it renders above the transcript overlay. **Headless:** `ui dump`'s new `ask` key — `{id, scope, scopeLabel, question, shown, dismissed, choices[]}`, `null` when nothing is being asked. Two deterministic poses, `ask` and `ask-group`. |
+| P4.3 | `MainWindow.AnswerAsk(choice)` is the one answer path: the button's `Click` handler and the new `dodona ui answer <choice>` verb both call it, and it sends the SAME `{cmd:"answer", id, answer}` the CLI's `dodona answer` / `dodona concierge-answer` sends. Pipe-addressed by the question's scope. |
+| P4.4 | Two negative checks, both **demonstrated red** by making the ask unconditional (below). |
+| P4.5 | `ticket-create`'s no-repo refusal opens a question instead of printing `run dodona repo-init`. Answering `yes` runs `RepoInitOp` — the method the `repo-init` command was refactored to call, so there is not a second `git init` behind the overlay. |
+
+### P4.1's "one source" is wrong, and must be corrected rather than diverged from
+
+**The wording:** *"One `Ask` component with one source: the open `questions` row."* Taken
+literally that is unachievable, and achieving it would be a mistake. Phase 3's **D-L11** settled
+the half that forced the issue: the daemon has **zero coupling to the concierge** and must keep
+it — a workspace daemon may never read the concierge's store (§2's hard rule, the thing that
+stops the concierge becoming the one queue §12 designed out), and every suite plus any machine
+whose concierge is asleep runs daemons without one. A routing question that needed a live
+concierge would be undeliverable in precisely the cases routing matters.
+
+**The correct wording, as built: one row SHAPE, one answer path, two stores normalised at the
+edge.** Of D-L4's three invariants, the load-bearing one is **one answer path**, and it is
+intact: `MainWindow.AnswerAsk` is the only thing that answers anything, for either store.
+"One component, two render modes" is about live-versus-headless — the reason a modal was rejected
+is testability, not source count — and that also holds.
+
+**Scope is WHICH STORE the row is in.** That is the answer to "`questions` has no column for
+scope": it does not need one, and **no scope or workspace column was added to the concierge's
+table**. Group-scope questions stay in `ConciergeStore.questions`, written only by the concierge;
+project-scope questions live in the workspace's own store, written only by its daemon. Neither
+reads the other, `Shell.OpenAsk` reads both and prefers the focused workspace's, and the answer
+goes to whichever control pipe owns the row.
+
+**Two `questions` tables, one row shape — and NO schema bump.** The concierge's table already
+existed; the workspace store now carries one with the same seven columns plus `kind`/`subject`
+(what answering *does*, and to what — the UI never reads them). It is created by an unconditional
+`CREATE TABLE IF NOT EXISTS` rather than a versioned block, deliberately: `Ver.Schema` exists for
+exactly one purpose, the daemon's refusal to hot-swap DOWN across it, and a purely additive table
+no older binary names gives that refusal nothing to protect. Bumping would have spent a version
+number in a wave where **Phase 5 is already assigned v10** — the collision P5.1's own note warns
+about. If an integrator wants it versioned, it is a two-line change.
+
+**A question is one at a time, and the focused workspace's beats the concierge's.** A stack of
+overlays is a queue of modals. A BANDED workspace's question is deliberately not shown — the band
+already carries its badge, and a decision about a workspace you are not looking at must not land
+on top of the one you are.
+
+**Escape puts it down; the row stays open.** View state (`MainVm.DismissAsk`), keyed by question
+id so the next question still appears. An overlay that cannot be put down is a modal in all but
+name, and §0.1's "never hung, halted, stuck" applies to the operator's screen too. `ui key escape`
+lands in `Window_KeyDown`'s own body via `EscapePressed()`.
+
+**20 of 24 named checks `dev prove`-d PROVEN against HEAD**, including
+`the_dump_reports_an_ask_field_at_all`, `the_refusal_opens_a_question_row`,
+`a_choice_is_a_real_button_a_person_can_click` (UIA finds a Button named `ask:yes`),
+`the_ui_answer_verb_reaches_the_ask`, `answering_yes_actually_creates_the_repo` and
+`the_ticket_the_question_was_blocking_now_works`.
+
+The rest are **negative pins**, VACUOUS by construction and kept for that reason —
+`ticket_create_without_a_repo_still_refuses` (a must-not-break), plus
+`a_one_project_workspace_is_never_asked_anything` and `a_bare_launch_is_never_asked_anything`,
+which were instead **demonstrated red by breaking the behaviour**: `Shell.OpenAsk` was made to
+return a question unconditionally, rebuilt, and `ui-use` went to 14 failed with
+`{"id":99,…,"question":"DELIBERATE BREAK"}` in both details. `the_overlay_closes_when_the_row_closes`
+and `the_ask_offers_no_filesystem_navigation` went red in the same run — the second one only after
+it was rewritten, because an EMPTY choice list contains no paths either and the first draft was
+green against a build with no ask at all.
+
+**What Phase 4 could NOT test, and why.** Two gaps, both named rather than papered over — a
+component that renders one source while claiming to render both is worse than one that renders one
+and says so.
+
+- **Rung 4 is not rendered yet, and it is one call away.** Phase 3's rung 4 records a
+  `routing_decisions` row at tier `ask` plus a `project_unknown` event and an announce; it does
+  **not** open a question row, so the overlay never sees it. The overlay needs nothing new: the
+  workspace `questions` table is concierge-free by construction, and `kind`/`subject` exist for
+  exactly this. See **P3.A** below for the two-part hook. A fixture faking a rung-4 question was
+  deliberately not written — a green over a row no code path produces proves nothing.
+- **The group-scope source is rendered and posed (`ask-group`), but has no acceptance check.**
+  `ConciergeReader.OpenQuestions` reads it and `Ask.Choices` parses the concierge's own
+  `[{id,name}]` shape (pinned by `unit:The_concierges_candidate_shape_parses_too`), but producing a
+  real concierge question inside `ui-use` needs the concierge's model tiers, which that suite runs
+  without. The suite that HAS that fixture is `concierge`, which has no window.
+
+| item | what | for whom |
+|---|---|---|
+| P3.A | **Rung 4 opens a question row.** Part 1, at the hold site: alongside the `routing_decisions` row, `_store.QuestionOpen(<the held sentence>, <candidate projects as `[{id,name,why}]`>, kind: "route", subject: <the held input>)`. The overlay then renders it with no further change. Part 2, in `Daemon.AnswerQuestion`: a new `Ask.KindRoute` constant beside `Ask.KindRepoInit` (deliberately NOT added by Phase 4 — an unused constant reads as support that is not there) and a `case` for it that delivers the held sentence to a lane in the chosen project — that is `SpawnForAsync`, which is Phase 3's, which is why this is filed here and not built in Phase 4. `Ask.RepoInitCandidates` is the shape to copy. | Phase 3 |
+
+**Becomes impossible:** a refusal that tells a GUI user to go and type a command; a question that
+evaporates when the window closes; an ask with a second answer path behind it; a question rendered
+as a modal, which is to say a question that cannot be tested at all.
+
 ---
 
 ## Phase 5 — a brain per project

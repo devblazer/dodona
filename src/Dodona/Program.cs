@@ -216,6 +216,13 @@ async Task<int> Dispatch() => cmd switch
     "policy" => Client(new { cmd = "policy", text = string.Join(" ", pos) }),
     "repo-status" => Client(new { cmd = "repo-status", project = One("project"), cwd = Environment.CurrentDirectory }),
     "repo-init" => Client(new { cmd = "repo-init", adopt = opts.ContainsKey("adopt"), project = One("project"), cwd = Environment.CurrentDirectory }),
+    // Asking, at workspace scope (LOCATIONS-PLAN P4.1). Named to mirror `concierge-questions`
+    // / `concierge-answer` exactly, because they are the same thing one scope apart and D-L4
+    // turns on there being ONE answer path per question rather than one per surface.
+    "questions" => Client(new { cmd = "questions" }),
+    "answer" => pos.Count >= 2
+        ? Client(new { cmd = "answer", id = long.Parse(pos[0]), answer = string.Join(" ", pos.Skip(1)) })
+        : Fail("dodona answer <id> <choice>"),
     "publish" => Publish(),
     "swap" => Client(new { cmd = "swap", exe = Path.GetFullPath(pos[0]), mode = One("mode") ?? "ask" }),
     "swap-answer" => Client(new { cmd = "swap-answer", answer = pos[0] }),
@@ -1176,8 +1183,8 @@ void Shortcut(string outDir)
 int Ui()
 {
     if (pos.Count == 0) return Fail("ui verb required: dump | screenshot | pose <name> | overlay <PANE|off> | " +
-                                    "type <text> | compose <text> | key <enter|shift+enter> | input-resize <dy|reset> | " +
-                                    "workspace <name> | update <exe> | close");
+                                    "type <text> | compose <text> | key <enter|shift+enter|escape> | input-resize <dy|reset> | " +
+                                    "answer <choice> | workspace <name> | update <exe> | close");
     return pos[0] switch
     {
         "dump" => Client(new { verb = "dump" }, UiPipeName()),
@@ -1189,7 +1196,12 @@ int Ui()
         // (or an agent) writes a two-line prompt the way a person does — `type` alone always
         // submits, so it could never leave two lines sitting in the box.
         "compose" => pos.Count > 1 ? Client(new { verb = "compose", text = string.Join(" ", pos.Skip(1)) }, UiPipeName()) : Fail("ui compose <text>"),
-        "key" => pos.Count > 1 ? Client(new { verb = "key", key = pos[1] }, UiPipeName()) : Fail("ui key <enter|shift+enter>"),
+        "key" => pos.Count > 1 ? Client(new { verb = "key", key = pos[1] }, UiPipeName()) : Fail("ui key <enter|shift+enter|escape>"),
+        // Pick an answer to the ask overlay, WITHOUT focus and without a mouse — the same
+        // reasoning as `type` and `workspace`: it lands in the exact method a button click
+        // lands in (MainWindow.AnswerAsk), so the check drives the affordance a person
+        // touches rather than a parallel test-only path (LOCATIONS-PLAN P4.3).
+        "answer" => pos.Count > 1 ? Client(new { verb = "answer", answer = string.Join(" ", pos.Skip(1)) }, UiPipeName()) : Fail("ui answer <choice>"),
         "input-resize" => pos.Count > 1 ? UiResize(pos[1]) : Fail("ui input-resize <dy|reset>"),
         // Give a band the grid — the same code path a click takes, without needing focus.
         "workspace" => pos.Count > 1 ? Client(new { verb = "workspace", workspace = pos[1] }, UiPipeName()) : Fail("ui workspace <name|id>"),
@@ -1396,6 +1408,10 @@ static void Help() => Console.WriteLine("""
       dodona repo-status [--project <p>]    (is this project a repo? what is inside it?)
       dodona repo-init [--adopt] [--project <p>]   (--adopt commits the files already there)
       dodona repos                          (the workspace's repositories, and their tokens)
+      dodona questions | answer <id> <choice>
+              this workspace's open questions. The window renders the same row as an
+              overlay and `dodona ui answer <choice>` picks from it — one row, one answer
+              path, two renderings (docs/LOCATIONS-PLAN.md Phase 4)
     tickets & claims (§6/§11):
       dodona ticket-create --title <T> --claim <spec>... [--mode on-approval|auto] [--repo <name>]
               a ticket belongs to ONE repository, usually inferred from its claim paths

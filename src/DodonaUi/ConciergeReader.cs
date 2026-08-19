@@ -49,5 +49,26 @@ sealed class ConciergeReader : IDisposable
         return list;
     }
 
+    /// <summary>The concierge's own open questions — group-scope asks ("which workspace is this
+    /// for"), opened by <c>Concierge.Ask</c>. Same four columns and same shape as
+    /// <see cref="StoreReader.OpenQuestions"/>, because ONE row shape is what lets one overlay
+    /// render both scopes and one verb answer both (D-L4). Degrades to empty for the same reason
+    /// <see cref="Feed"/> does: a concierge that has never run must not be able to break the
+    /// window.</summary>
+    public List<StoreReader.QuestionR> OpenQuestions()
+    {
+        var list = new List<StoreReader.QuestionR>();
+        if (!Open()) return list;
+        try
+        {
+            using var c = _db!.CreateCommand();
+            c.CommandText = "SELECT id, ts, input, candidates FROM questions WHERE state = 'open' ORDER BY id;";
+            using var r = c.ExecuteReader();
+            while (r.Read()) list.Add(new StoreReader.QuestionR(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3)));
+        }
+        catch { /* concierge store missing or mid-migration: nothing is being asked */ }
+        return list;
+    }
+
     public void Dispose() => _db?.Dispose();
 }

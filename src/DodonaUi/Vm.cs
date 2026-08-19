@@ -65,8 +65,30 @@ public record BandLaneSnap(long LaneId, string Title, string Presence, int Badge
 /// </summary>
 public record BandSnap(string WorkspaceId, string Name, bool Live, List<BandLaneSnap> Lanes, int Tray, int Badge);
 
+/// <summary>
+/// ONE open question, ready to render (LOCATIONS-PLAN P4.1, decision D-L4). Plain data, built
+/// off the UI thread like every other snap.
+///
+/// <para><b>Scope</b> is which daemon answers it: a workspace id, or <see cref="Dodona.Instance.ConciergeId"/>
+/// for a group-scope ask. It exists because the ANSWER is pipe-addressed — writes always are
+/// (§6) — and not because the two kinds render differently. They do not: one component, one
+/// question text, one list of choices.</para>
+///
+/// <para>There is deliberately no `kind` here. The daemon knows what answering means; a window
+/// that branched on kind would be two components wearing one name, which is exactly what D-L4
+/// rejected a modal for.</para>
+/// </summary>
+public record AskSnap(string Scope, string ScopeLabel, long Id, string Question, List<AskChoiceSnap> Choices);
+
+public record AskChoiceSnap(string Value, string Label, string? Why);
+
 public record Snapshot(PaneSnap?[] Slots, List<string> Tray, List<FeedSnap> Feed, PaneSnap? Overlay)
 {
+    /// <summary>The open question, or null when nothing is being asked — which is the ordinary
+    /// state and the one a ONE-project workspace never leaves (this phase's rule 2: with one
+    /// project there is nothing to ask, so no overlay may ever appear).</summary>
+    public AskSnap? Ask { get; init; }
+
     /// <summary>The 5-hour-window line, or null when no reading has ever arrived.</summary>
     public string? Quota { get; init; }
 
@@ -326,6 +348,47 @@ public sealed class FeedView
     public double ChipRadius => IsSystem ? 5 : 2;
 }
 
+/// <summary>One button in the ask overlay. `AutomationName` is what makes the affordance
+/// findable: a check can prove the BUTTON a person clicks carries the same value the
+/// `ui answer` verb takes, which is the only mechanical link there is between the pixels and
+/// the path (LOCATIONS-PLAN P4.3).</summary>
+public sealed class AskChoiceView
+{
+    public string Value { get; init; } = "";
+    public string Label { get; init; } = "";
+    public string Why { get; init; } = "";
+    public Visibility WhyVisibility => Why.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public string AutomationName => $"ask:{Value}";
+}
+
+/// <summary>
+/// The ask, as the window sees it (LOCATIONS-PLAN Phase 4). Bound by the overlay in
+/// MainWindow.xaml and serialized by `ui dump` — the two render modes, over one object.
+///
+/// **This is not a dialog and must never become one.** A test window is forbidden from
+/// producing a modal (MainWindow.IsTestWindow's note: it renders off-screen precisely so it
+/// cannot steal the keyboard, and a MessageBox would block until somebody clicked — in an
+/// automated capture, forever), so a modal ask would be permanently untestable and that is why
+/// D-L4 rejected one. It is a layer in the window the operator already has.
+/// </summary>
+public sealed class AskView
+{
+    public string Scope { get; init; } = "";
+    /// <summary>What the operator reads as the source: a workspace name, or `[dodona]` for a
+    /// group-scope ask — the same label the merged feed already uses for the concierge's own
+    /// voice, because a question about which workspace belongs to no workspace's column (§6).</summary>
+    public string ScopeLabel { get; init; } = "";
+    public long Id { get; init; }
+    public string Question { get; init; } = "";
+    public List<AskChoiceView> Choices { get; init; } = new();
+    public Visibility ScopeVisibility => ScopeLabel.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>A malformed `candidates` blob renders the question and no buttons rather than
+    /// nothing at all (Ask.Choices never throws). The operator can still answer it by typing,
+    /// and this line is what tells them so — a silent empty overlay would be the silent degrade
+    /// CLAUDE.md §3 calls a bug.</summary>
+    public Visibility NoChoicesVisibility => Choices.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+}
+
 public sealed class ToastView
 {
     public string Ts { get; init; } = "";
@@ -415,6 +478,33 @@ public sealed class MainVm : INotifyPropertyChanged
     PaneView? _overlayPane;
     public PaneView? OverlayPane { get => _overlayPane; set { _overlayPane = value; Notify(nameof(OverlayPane)); Notify(nameof(OverlayVisible)); } }
     public Visibility OverlayVisible => _overlayPane is null ? Visibility.Collapsed : Visibility.Visible;
+
+    AskView? _ask;
+    /// <summary>The open question, or null. Set from the snapshot on every tick, so answering it
+    /// anywhere — the button, `dodona ui answer`, `dodona answer`, another window — closes it
+    /// here within 250 ms: the ROW is the state and this is a view of it (m3 doctrine).</summary>
+    public AskView? Ask
+    {
+        get => _ask;
+        set { _ask = value; Notify(nameof(Ask)); Notify(nameof(AskVisible)); }
+    }
+
+    long _askDismissed;
+    /// <summary>
+    /// The question the operator pressed Escape on. VIEW state and nothing else — the row stays
+    /// open, the feed still carries it, and `dodona questions` still lists it, so dismissing
+    /// loses nothing.
+    ///
+    /// It exists because an overlay you cannot put down is a modal in all but name, and §0.1's
+    /// standing directive ("never hung, halted, stuck") applies to the operator's screen as much
+    /// as to a process: a question they are not ready to answer must not be able to sit on top of
+    /// the work they are trying to look at. Recorded by ID, so the NEXT question still appears.
+    /// </summary>
+    public void DismissAsk() { _askDismissed = _ask?.Id ?? 0; Notify(nameof(AskVisible)); }
+
+    public bool AskDismissed => _ask is not null && _askDismissed == _ask.Id;
+
+    public Visibility AskVisible => _ask is not null && !AskDismissed ? Visibility.Visible : Visibility.Collapsed;
 
     string _status = "";
     public string Status { get => _status; set { _status = value; Notify(nameof(Status)); } }
@@ -538,6 +628,21 @@ public sealed class MainVm : INotifyPropertyChanged
                                : wsBrush.TryGetValue(f.Workspace, out var wb) ? wb
                                : focusedBrush,
             });
+
+        // The ask (P4.1). Rebuilt from the row every tick rather than held: answering it through
+        // ANY surface — a button, `dodona ui answer`, `dodona answer`, a second window — closes
+        // the row, and the overlay must then go away without the window being told. Identity is
+        // the id, so a re-render of the SAME question does not un-dismiss it.
+        // A pose is a deterministic fixture, so it must not inherit an Escape the operator (or a
+        // previous check) pressed: `pose ask` twice would otherwise render nothing the second
+        // time. Same reasoning as the pulse bookkeeping above.
+        if (PoseName is not null) _askDismissed = 0;
+        Ask = s.Ask is null ? null : new AskView
+        {
+            Scope = s.Ask.Scope, ScopeLabel = s.Ask.ScopeLabel, Id = s.Ask.Id, Question = s.Ask.Question,
+            Choices = s.Ask.Choices.Select(c => new AskChoiceView
+            { Value = c.Value, Label = c.Label, Why = c.Why ?? "" }).ToList(),
+        };
 
         Tray.Clear();
         foreach (var t in s.Tray) Tray.Add(t);

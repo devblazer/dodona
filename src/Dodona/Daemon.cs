@@ -1028,8 +1028,18 @@ sealed class Daemon
                     {
                         _store.Event("ticket_repo_unresolved", null, $"'{title}': {err}");
                         w.WriteLine($"error: {err}");
+                        // P4.5: ASK, do not instruct. This used to print "(lanes work without
+                        // git; only tickets need a repository)" and leave the operator to go and
+                        // type `dodona repo-init` — a GUI telling a person to use the CLI, which
+                        // is this project's original sin (the same reasoning that turned "undo:
+                        // dodona lane-stop 3" in the feed into a button). The refusal still
+                        // stands and still costs nothing; what is new is that the missing repo
+                        // becomes a QUESTION ROW, which the ask overlay renders and one verb
+                        // answers — and which survives the window closing, because a pending
+                        // question that evaporated would make asking worse than guessing
+                        // (ConciergeStore's class note).
                         if (repos.Count == 0 && !Git.IsRepo(_primary))
-                            w.WriteLine("       (lanes work without git; only tickets need a repository)");
+                            foreach (var line in AskForRepo(_primary, title)) w.WriteLine($"       {line}");
                         w.WriteLine("##exit 1");
                         break;
                     }
@@ -1459,44 +1469,25 @@ sealed class Daemon
                 // not reversible by anything Dodona knows how to do.
                 if (!TryCommandProject(e, out var initProj, out var initRefusal))
                 { w.WriteLine(initRefusal!); w.WriteLine("##exit 1"); break; }
-                var initCfg = ConfigForProject(initProj);
-                if (Git.IsRepo(initProj) && Git.HasCommit(initProj)) { w.WriteLine($"error: {initProj} is already a git repository with commits"); break; }
                 var adopt = e.TryGetProperty("adopt", out var ad) && ad.ValueKind == JsonValueKind.True;
-
-                if (!Git.IsRepo(initProj))
-                {
-                    var (ic, io) = Git.Run(initProj, "init", "-b", initCfg.Main);
-                    if (ic != 0) { w.WriteLine($"error: git init failed: {io}"); w.WriteLine("##exit 1"); break; }
-                    w.WriteLine($"initialized empty repository on '{initCfg.Main}'");
-                }
-
-                // Dodona's own state is never repo content: worktrees, the store and the
-                // deployed gate files all live under .dodona/ and would otherwise be
-                // committed by an agent's `git add -A` (the bug M1's test caught).
-                var ignore = Path.Combine(initProj, ".gitignore");
-                var ignoreText = File.Exists(ignore) ? File.ReadAllText(ignore) : "";
-                if (!ignoreText.Split('\n').Any(l => l.Trim() == ".dodona/"))
-                {
-                    File.AppendAllText(ignore, (ignoreText.Length > 0 && !ignoreText.EndsWith("\n") ? "\n" : "") + ".dodona/\n");
-                    w.WriteLine("added .dodona/ to .gitignore");
-                }
-
-                if (!Git.HasCommit(initProj))
-                {
-                    // An empty repo has no branch, so no worktree can be cut from it. What
-                    // goes into the first commit is the user's call, not ours: adopt takes
-                    // the files that are already here, otherwise the commit is empty and
-                    // they stay untracked.
-                    if (adopt) Git.Run(initProj, "add", "-A");
-                    var args = new List<string> { "commit", "-m", adopt ? "Initial commit" : "Initial commit (empty)" };
-                    if (!adopt) args.Insert(1, "--allow-empty");
-                    var (cc, co) = Git.Run(initProj, args.ToArray());
-                    if (cc != 0) { w.WriteLine($"error: initial commit failed: {co}"); w.WriteLine("##exit 1"); break; }
-                    w.WriteLine(adopt ? "committed the existing files as the initial commit" : "made an empty initial commit; existing files left untracked");
-                }
-                _store.Event("repo_init", null, $"{initProj} main={initCfg.Main} adopt={adopt}");
-                Announce($"[dodona] git repository ready on '{initCfg.Main}' — tickets can branch now");
-                w.WriteLine($"ready: {initProj} is a git repository on '{initCfg.Main}'");
+                RepoInitOp(initProj, adopt, w);
+                break;
+            }
+            case "questions":
+            {
+                // The workspace's own open questions, in the same tab-separated shape the
+                // concierge's `questions` command prints (Concierge.cs:198). One shape, because
+                // the ask overlay and this command are two renderings of one row (D-L4) and a
+                // second format would be a second thing to keep in step.
+                foreach (var q in _store.OpenQuestions())
+                    w.WriteLine($"{q.Id}\t{q.Input}\t{q.Candidates}");
+                break;
+            }
+            case "answer":
+            {
+                foreach (var line in AnswerQuestion(e.GetProperty("id").GetInt64(),
+                                                    e.GetProperty("answer").GetString() ?? ""))
+                    w.WriteLine(line);
                 break;
             }
             case "project-gone":
@@ -2178,6 +2169,161 @@ sealed class Daemon
     /// therefore gets the built-in default for `agent`, `model` and everything else — not the
     /// workspace's. That is the same rule per-repo config has always had.</summary>
     Config ConfigForProject(string project) => Config.For(_primary, project);
+
+    // ---------------------------------------------------------------- asking (P4.1/P4.5)
+
+    /// <summary>
+    /// `git init` plus the first commit, on ONE named project. Extracted from the `repo-init`
+    /// case so that answering the repo question runs **the same code** the command runs
+    /// (LOCATIONS-PLAN P4.3, D-L4: one answer path). A second copy behind the overlay is
+    /// exactly the two-systems-one-tested divergence Phase 4 exists to prevent — and it would
+    /// be the copy that ran `git init`, which is the one act here that nothing can undo.
+    /// </summary>
+    void RepoInitOp(string project, bool adopt, StreamWriter w)
+    {
+        var cfg = ConfigForProject(project);
+        if (Git.IsRepo(project) && Git.HasCommit(project))
+        { w.WriteLine($"error: {project} is already a git repository with commits"); return; }
+
+        if (!Git.IsRepo(project))
+        {
+            var (ic, io) = Git.Run(project, "init", "-b", cfg.Main);
+            if (ic != 0) { w.WriteLine($"error: git init failed: {io}"); w.WriteLine("##exit 1"); return; }
+            w.WriteLine($"initialized empty repository on '{cfg.Main}'");
+        }
+
+        // Dodona's own state is never repo content: worktrees, the store and the
+        // deployed gate files all live under .dodona/ and would otherwise be
+        // committed by an agent's `git add -A` (the bug M1's test caught).
+        var ignore = Path.Combine(project, ".gitignore");
+        var ignoreText = File.Exists(ignore) ? File.ReadAllText(ignore) : "";
+        if (!ignoreText.Split('\n').Any(l => l.Trim() == ".dodona/"))
+        {
+            File.AppendAllText(ignore, (ignoreText.Length > 0 && !ignoreText.EndsWith("\n") ? "\n" : "") + ".dodona/\n");
+            w.WriteLine("added .dodona/ to .gitignore");
+        }
+
+        if (!Git.HasCommit(project))
+        {
+            // An empty repo has no branch, so no worktree can be cut from it. What
+            // goes into the first commit is the user's call, not ours: adopt takes
+            // the files that are already here, otherwise the commit is empty and
+            // they stay untracked.
+            if (adopt) Git.Run(project, "add", "-A");
+            var args = new List<string> { "commit", "-m", adopt ? "Initial commit" : "Initial commit (empty)" };
+            if (!adopt) args.Insert(1, "--allow-empty");
+            var (cc, co) = Git.Run(project, args.ToArray());
+            if (cc != 0) { w.WriteLine($"error: initial commit failed: {co}"); w.WriteLine("##exit 1"); return; }
+            w.WriteLine(adopt ? "committed the existing files as the initial commit" : "made an empty initial commit; existing files left untracked");
+        }
+        _store.Event("repo_init", null, $"{project} main={cfg.Main} adopt={adopt}");
+        Announce($"[dodona] git repository ready on '{cfg.Main}' — tickets can branch now");
+        w.WriteLine($"ready: {project} is a git repository on '{cfg.Main}'");
+    }
+
+    /// <summary>
+    /// Answer one of this workspace's open questions. **This is THE answer path** — the
+    /// `answer` command, the ask overlay's buttons and `dodona ui answer` all arrive here,
+    /// which is what makes D-L4's "only pixels diverge" a fact about the code rather than a
+    /// hope (P4.3). It mirrors <c>Concierge.Answer</c> deliberately, line for line where it
+    /// can: same guard against answering twice, same "the row is the record" shape.
+    ///
+    /// An answer the question does not offer is REFUSED, not guessed. Asking exists because
+    /// guessing was wrong; a fuzzy answer would reintroduce the guess at the one moment the
+    /// operator had actually told us the truth.
+    /// </summary>
+    List<string> AnswerQuestion(long id, string answer)
+    {
+        var lines = new List<string>();
+        var q = _store.Question(id);
+        if (q is null) { lines.Add($"error: no question {id}"); return lines; }
+        if (q.State != "open") { lines.Add($"error: question {id} is already {q.State}"); return lines; }
+
+        var choices = Ask.Choices(q.Candidates);
+        var picked = Ask.Match(choices, answer);
+        if (picked is null)
+        {
+            lines.Add($"error: \"{answer}\" is not one of the answers to question {id}" +
+                      (choices.Count > 0 ? $" ({string.Join(" / ", choices.Select(c => c.Value))})" : ""));
+            return lines;
+        }
+
+        // `withdrawn`, not `answered`, for a declined question: the two are different facts and
+        // a later "why is there no repo" wants to know which one happened.
+        var declined = picked.Value.Equals("no", StringComparison.OrdinalIgnoreCase);
+        _store.QuestionAnswer(id, picked.Value, declined ? "withdrawn" : "answered");
+        _store.Event("question_answered", null, $"question {id} kind={q.Kind} -> {picked.Value}");
+        lines.Add($"answered: question {id} -> {picked.Label}");
+
+        switch (q.Kind)
+        {
+            case Ask.KindRepoInit when !declined:
+                // `adopt: true` because the files are already there — that is the whole shape of
+                // this question. A GUI that made a git repo and then left the operator's own
+                // files untracked would have answered a question they did not ask.
+                foreach (var line in RepoInitLines(q.Subject)) lines.Add(line);
+                break;
+            case Ask.KindRepoInit:
+                Announce("[dodona] no repo made — lanes keep working without git; only tickets need one");
+                lines.Add("nothing was created; ask again by creating a ticket");
+                break;
+            // A kind with no case here answers the ROW and does nothing else, which is the right
+            // default for a question that was only ever "tell me which one" — the caller reads the
+            // answer off the row. The next one to arrive is routing's rung 4 (LOCATIONS-PLAN P3.A):
+            // it needs a case, because delivering the held sentence to the chosen project is
+            // `SpawnForAsync`, which belongs to Phase 3.
+        }
+        return lines;
+    }
+
+    /// <summary>
+    /// Open (or re-find) the "this project has no git repo; create one?" question — P4.5.
+    ///
+    /// **Idempotent on purpose.** A ticket-create that is refused twice must not leave two
+    /// identical open questions: the overlay renders one at a time, so the second would appear
+    /// the instant the first was answered and read as the system not having listened. Existing
+    /// open question of the same kind and subject wins, and its id is reported again.
+    /// </summary>
+    List<string> AskForRepo(string project, string forWhat)
+    {
+        var lines = new List<string>();
+        var existing = _store.OpenQuestions()
+            .FirstOrDefault(q => q.Kind == Ask.KindRepoInit &&
+                                 q.Subject.Equals(project, StringComparison.OrdinalIgnoreCase));
+        var leaf = Path.GetFileName(project.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (leaf.Length == 0) leaf = project;
+        var text = $"{leaf} has no git repo, so \"{forWhat}\" cannot become a ticket. Create one?";
+        var id = existing?.Id ?? _store.QuestionOpen(text, Ask.RepoInitCandidates(leaf), Ask.KindRepoInit, project);
+        if (existing is null)
+        {
+            _store.Event("question_opened", null, $"question {id} kind={Ask.KindRepoInit} subject={project}");
+            // The announcement is what puts it in the feed, which is where a person who closed
+            // the window finds it again. It carries the command as well as the words, for the
+            // same reason every other announcement does: the overlay is the fast path, not the
+            // only one.
+            Announce($"[dodona] {text} answer: dodona answer {id} yes|no");
+        }
+        lines.Add(text);
+        lines.Add($"answer it in the window, or: dodona answer {id} yes   (or: dodona answer {id} no)");
+        return lines;
+    }
+
+    /// <summary>`RepoInitOp` writes to a pipe; an answer needs its words as a list. One buffer
+    /// rather than two implementations — the alternative was a second repo-init, which is the
+    /// thing P4.3 forbids.</summary>
+    List<string> RepoInitLines(string project)
+    {
+        using var ms = new MemoryStream();
+        using var sw = new StreamWriter(ms) { AutoFlush = true };
+        RepoInitOp(project, adopt: true, sw);
+        ms.Position = 0;
+        using var sr = new StreamReader(ms);
+        var lines = new List<string>();
+        string? line;
+        while ((line = sr.ReadLine()) is not null)
+            if (!line.StartsWith("##")) lines.Add(line);
+        return lines;
+    }
 
     /// <summary>
     /// WHICH PROJECT CONFIGURED THIS LANE, as a row (T2's only observable surface). A lane's
