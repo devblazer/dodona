@@ -46,7 +46,10 @@ public partial class App : Application
             using var reg = new Registry();
             var ws = workspace is not null
                 ? WorkspaceResolve.ByNameOrId(reg, workspace)
-                : WorkspaceResolve.ForPath(reg, root!).Ws;
+                // EXPLICIT: the branch above already sent a bare launch to the shell, so
+                // reaching here with no --workspace means --root was on the command line.
+                // There is no inherited-cwd route into the UI at all (D-L9).
+                : WorkspaceResolve.ForPath(reg, root!, PathSource.Explicit).Ws;
             if (ws is null)
             {
                 MessageBox.Show($"No workspace \"{workspace}\".", "Dodona",

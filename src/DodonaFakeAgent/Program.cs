@@ -9,6 +9,9 @@ using System.Text.RegularExpressions;
 // Directives inside the user text make turns deterministic and schedulable:
 //   sleep:N       — wait N seconds mid-turn (a long "thinking" turn to kill daemons under)
 //   say <text>    — the result event carries exactly <text>
+//   env:NAME      — the result event carries the value of environment variable NAME, or
+//                   `(unset)`. This is how a check sees what the SPAWN SITE actually put in
+//                   an agent's environment (Phase 0c, DODONA_WORKSPACE).
 //
 // DODONA_LANE_ROLE=compressor makes it answer in the compressor's fixed JSON schema (§5)
 // instead, deterministically shortening whatever it was given. That keeps selective
@@ -289,12 +292,26 @@ while ((line = Console.ReadLine()) is not null)
     var sleep = Regex.Match(text, @"sleep:(\d+)");
     if (sleep.Success) Thread.Sleep(int.Parse(sleep.Groups[1].Value) * 1000);
 
+    // env:NAME — the result IS that environment variable's value, or `(unset)`.
+    //
+    // Not a convenience. The daemon puts three variables into every lane it spawns
+    // (DODONA_SHIM_INFO, DODONA_LANE_ROLE and, since Phase 0c, DODONA_WORKSPACE), and until
+    // this directive existed no check could see what an agent inside a lane actually
+    // inherited — a spawn-site environment was observable only by reading the code that set
+    // it. The whole of Phase 0c is about that environment being right: without
+    // DODONA_WORKSPACE an agent's own `dodona` command had nothing to resolve by except the
+    // folder its process happened to start in, and that fallback CREATED a workspace.
+    //
+    // Checked BEFORE `say`, because `say env:X` matches both patterns.
+    var envq = Regex.Match(text, @"env:(\w+)");
     var say = Regex.Match(text, @"say\s+(.+)$");
     Emit(new
     {
         type = "result",
         subtype = "success",
         session_id = sessionId,
-        result = say.Success ? say.Groups[1].Value.Trim() : $"done: {text}",
+        result = envq.Success ? (Environment.GetEnvironmentVariable(envq.Groups[1].Value) ?? "(unset)")
+               : say.Success ? say.Groups[1].Value.Trim()
+               : $"done: {text}",
     });
 }

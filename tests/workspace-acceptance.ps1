@@ -351,6 +351,106 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
     $migRow = (DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.id -eq $mig.Id }
     Check 'migrated_root_is_the_sole_member' (@($migRow.members).Count -eq 1) "members=$(@($migRow.members).Count)"
 
+    # ---- Dodona does not INVENT a workspace for a folder nobody named -------------------
+    # docs/LOCATIONS-PLAN.md Phase 0c / D-L9, operator 2026-08-19: *creating a workspace is a
+    # user action.* The incident: an agent inside a lane ran an ordinary `dodona` command; the
+    # CLI had no workspace id in its environment, fell back to Environment.CurrentDirectory,
+    # and CREATED a workspace named after whatever folder the daemon happened to spawn that
+    # process in -- moving a legacy store into workspace territory on the way.
+    #
+    # THIS SITS DELIBERATELY BESIDE THE MIGRATION SET ABOVE, which must keep passing: an
+    # EXPLICIT `--root` still creates (that is what Get-WorkspacePaths passes, and it is the
+    # whole invisible-migration mechanism). The distinction being asserted here is provenance,
+    # not the path -- the same folder either creates or refuses depending on whether anybody
+    # asked for it.
+    $stray = Join-Path (Use-SuiteTemp) ("dodona-stray-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force "$stray\.dodona" | Out-Null
+    # Shaped like a real legacy store, so "the store did not move" is an assertion about this
+    # exact file rather than about a path that never existed.
+    $strayMarker = "stray-store-" + [guid]::NewGuid().ToString('N')
+    Set-Content "$stray\.dodona\store.db" $strayMarker
+
+    # LAND THE JSON IN A VARIABLE BEFORE COUNTING IT. `ConvertFrom-Json` emits a JSON ARRAY as
+    # ONE pipeline item (CLAUDE.md §0.2), so `@(cmd | ConvertFrom-Json).Count` is 1 however
+    # many workspaces exist. The first version of `inherited_cwd_creates_no_workspace` compared
+    # 1 to 1 and came back VACUOUS from `dev prove` -- passing against a HEAD that was
+    # cheerfully inventing a workspace underneath it. Third time this trap has cost this repo a
+    # silent no-op check.
+    function WsCount { $all = DodonaBare @("workspaces", "--json") | ConvertFrom-Json; @($all).Count }
+    $wsBefore = WsCount
+
+    # An AGENT-SHAPED invocation: no --root, no --workspace, cwd inherited from whoever
+    # started the process. Push-Location is how a suite can be somewhere else without
+    # spawning a shell -- `& $dodona` inherits PowerShell's own working directory.
+    Push-Location $stray
+    try { $strayOut = DodonaBare @("tickets") } finally { Pop-Location }
+    $strayExit = $DODONA_EXIT
+    $wsAfter = WsCount
+    # COUNT, not just the message. A refusal that still wrote a registry row would print
+    # exactly the same words -- and "a message appeared" is the assertion that lets a phantom
+    # workspace ship anyway.
+    Check 'inherited_cwd_creates_no_workspace' `
+        ($strayExit -ne 0 -and $wsAfter -eq $wsBefore) `
+        "exit=$strayExit before=$wsBefore after=$wsAfter :: $strayOut"
+    Check 'inherited_cwd_does_not_move_a_legacy_store' `
+        ((Test-Path "$stray\.dodona\store.db") -and (Get-Content "$stray\.dodona\store.db" -Raw).Trim() -eq $strayMarker) `
+        "still there: $(Test-Path "$stray\.dodona\store.db")"
+    # CLAUDE.md §0.1: a refusal must name the thing that un-sticks it. Whitespace-normalised
+    # first -- PowerShell WRAPS captured native stderr to the console width, so a phrase
+    # spanning a space can match today and fail tomorrow because a path got longer (§0.2).
+    Check 'the_refusal_names_the_command_that_makes_a_workspace' `
+        ((($strayOut -replace '\s+', ' ') -match 'workspace-create --name') -and
+         (($strayOut -replace '\s+', ' ') -match 'user action')) $strayOut
+
+    # ---- DODONA_WORKSPACE: the workspace an agent is already in (P0c.1/P0c.2) ------------
+    # The daemon stamps this on every lane it spawns (Daemon.AttachShimAsync), which is what
+    # gives an agent's own `dodona` commands an answer that is not a guess. Asserted here from
+    # the environment directly, so the resolution ladder is testable without a daemon at all.
+    $env:DODONA_WORKSPACE = $mig.Id
+    try {
+        Push-Location $stray
+        try { $envWhere = DodonaBare @("where", "--json") } finally { Pop-Location }
+        $envId = try { ($envWhere | ConvertFrom-Json).id } catch { "unparseable: $envWhere" }
+        $wsEnv = WsCount
+        Check 'env_workspace_is_used_before_any_folder' `
+            ($envId -eq $mig.Id -and $wsEnv -eq $wsBefore) `
+            "id=$envId want=$($mig.Id) workspaces=$wsEnv/$wsBefore"
+
+        # PRECEDENCE, and this one is a PIN rather than a proof: `--workspace` -> explicit
+        # `--root` -> DODONA_WORKSPACE -> the inherited cwd. The plan wrote the middle pair the
+        # other way round; an environment variable silently overruling a typed argument is the
+        # compiles-clean, acts-on-the-wrong-workspace failure Phase 0c exists to remove, and it
+        # would also break every suite the moment one ran inside a lane -- they all pass --root,
+        # and their workspaces live in an isolated DODONA_HOME the inherited id knows nothing
+        # about. `dev prove` calls this VACUOUS by construction: nothing in the fix makes it
+        # pass, it is here so a later reordering cannot pass quietly.
+        # $root, not $solo: `workspace-move` above reassigned $solo to `rival`, so $soloWs.Id
+        # is deliberately stale by here. $root's ownership never changes in this suite.
+        $rootWins = DodonaBare @("where", "--root", $root, "--json")
+        $rootWinsId = try { ($rootWins | ConvertFrom-Json).id } catch { "unparseable: $rootWins" }
+        Check 'an_explicit_root_beats_the_inherited_env' ($rootWinsId -eq $ws.Id) `
+            "id=$rootWinsId want=$($ws.Id)"
+    }
+    finally { Remove-Item env:DODONA_WORKSPACE -ErrorAction SilentlyContinue }
+
+    # A STALE id must be neither obeyed nor swallowed. It happens for real: the workspace was
+    # forgotten, or DODONA_HOME moved, and the lane's environment still carries the old id. A
+    # silent degrade is a bug (CLAUDE.md §3's dead routing ladder), and hard-failing on a
+    # leftover variable would strand a lane for no reason -- so it says so and carries on down
+    # the ladder, which then refuses the unowned cwd on its own terms.
+    $env:DODONA_WORKSPACE = 'no-such-workspace-id'
+    try {
+        Push-Location $stray
+        try { $staleOut = DodonaBare @("tickets") } finally { Pop-Location }
+        $staleExit = $DODONA_EXIT
+    }
+    finally { Remove-Item env:DODONA_WORKSPACE -ErrorAction SilentlyContinue }
+    $wsStale = WsCount
+    Check 'a_stale_env_workspace_is_announced_and_still_creates_nothing' `
+        ((($staleOut -replace '\s+', ' ') -match 'names no workspace in this registry') -and
+         $staleExit -ne 0 -and $wsStale -eq $wsBefore) `
+        "exit=$staleExit workspaces=$wsStale/$wsBefore :: $staleOut"
+
     # ---- creating a workspace cannot quietly take an owned repo with it ----
     DodonaBare @("workspace-create", "--name", "twin", "--member", $solo) | Out-Null
     # the workspace IS created; the attach inside it is what gets refused

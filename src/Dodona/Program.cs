@@ -6,7 +6,7 @@ using Dodona;
 //   dodona daemon --root <path>       the single writer: store, lanes, tickets, token
 //   dodona <command> [--root <path>]  a client over the control pipe
 
-var (cmd, root, opts, pos) = ParseArgs(args);
+var (cmd, root, rootSource, opts, pos) = ParseArgs(args);
 if (cmd is null) { Help(); return 1; }
 
 // ---------------------------------------------------------------- who am I talking to
@@ -14,10 +14,23 @@ if (cmd is null) { Help(); return 1; }
 // ways in, and they are deliberately different:
 //   --workspace <name|id|alias>  addresses a workspace directly; never creates one, because
 //                                naming one that does not exist is a typo.
-//   --root <path>  (the default) asks the registry who owns that path — and if nobody does,
-//                                MIGRATES or CREATES a workspace for it, which is what makes
-//                                every pre-workspace project and every existing acceptance
-//                                suite keep working untouched.
+//   --root <path>  asks the registry who owns that path — and if nobody does, MIGRATES or
+//                                CREATES a workspace for it, which is what makes every
+//                                pre-workspace project and every existing acceptance suite
+//                                keep working untouched. **A person has to type it.**
+//   DODONA_WORKSPACE (env)       the workspace an agent's own lane belongs to. The daemon
+//                                stamps it on every shim it spawns, so an agent's `dodona`
+//                                commands address their own workspace instead of guessing.
+//   an INHERITED cwd             refuses. It is not a way in (Phase 0c / D-L9).
+//
+// THE ORDER IS `--workspace` -> `--root` -> DODONA_WORKSPACE -> the inherited cwd, and the
+// middle pair is that way round on purpose. The plan wrote it as "env -> path"; a typed
+// `--root` is not "path" in the sense the plan meant, which was *guessing from a folder*. An
+// environment variable that silently overruled a typed argument would be precisely the
+// compiles-clean, acts-on-the-wrong-workspace failure this phase exists to remove — and it
+// would break every acceptance suite the moment one was run from inside a lane, because they
+// all pass `--root` and their workspaces live in an isolated DODONA_HOME the inherited id
+// knows nothing about.
 //
 // **Resolved LAZILY, and that is load-bearing.** Doing it eagerly meant any command at all
 // created-or-migrated a workspace for whatever the cwd happened to be, purely as a side
@@ -45,7 +58,28 @@ Workspace Ws()
         }
         return wsCache = found;
     }
-    var resolved = WorkspaceResolve.ForPath(reg, root);
+
+    // THE WORKSPACE AN AGENT IS ALREADY IN (Phase 0c, P0c.1/P0c.2). `Daemon.AttachShimAsync`
+    // stamps DODONA_WORKSPACE on every lane it spawns, beside DODONA_SHIM_INFO and
+    // DODONA_LANE_ROLE. Without it, an agent's own `dodona` command had no idea which
+    // workspace it belonged to and fell through to the folder its process happened to start
+    // in — and that fallback CREATED (D-L9).
+    //
+    // Consulted only when nothing more explicit was said: see the ordering note above for why
+    // a typed `--root` beats it.
+    if (rootSource == PathSource.Inherited &&
+        Environment.GetEnvironmentVariable("DODONA_WORKSPACE") is { Length: > 0 } inherited)
+    {
+        if (WorkspaceResolve.ByNameOrId(reg, inherited) is { } fromEnv) return wsCache = fromEnv;
+        // A stale id (the workspace was forgotten, or DODONA_HOME points somewhere else) must
+        // neither be obeyed nor swallowed: a silent degrade is a bug (CLAUDE.md §3), and
+        // hard-failing on a leftover variable would strand a lane for no reason. Say it once,
+        // then carry on down the ladder — which either finds an owner or refuses loudly.
+        Console.Error.WriteLine(
+            $"dodona: DODONA_WORKSPACE=\"{inherited}\" names no workspace in this registry — ignoring it");
+    }
+
+    var resolved = WorkspaceResolve.ForPath(reg, root, rootSource);
     // Announced, not silent (§11): a workspace appearing, or a store moving out of a project
     // folder, is exactly the kind of thing an operator must be able to see afterwards.
     if (resolved.Note is not null) Console.Error.WriteLine($"dodona: {resolved.Note}");
@@ -1245,7 +1279,12 @@ static string? Autostart(string wsId, string primary)
     catch (Exception ex) { return ex.Message; }
 }
 
-static (string? cmd, string root, Dictionary<string, List<string>> opts, List<string> pos) ParseArgs(string[] args)
+// `rootSource` is not a nicety: `root` is EITHER a typed `--root` OR the folder this process
+// was started in, and until this was returned alongside it nothing downstream could tell the
+// two apart — so `WorkspaceResolve.ForPath` created a workspace for either one, which is how an
+// agent's `dodona tickets` invented a workspace named after a folder and moved a store into it
+// (plan D-L9, Phase 0c). Carry the provenance; do not try to re-derive it from the string.
+static (string? cmd, string root, PathSource rootSource, Dictionary<string, List<string>> opts, List<string> pos) ParseArgs(string[] args)
 {
     // Valueless flags must be declared: otherwise `--json` at the end of a line is
     // indistinguishable from a positional argument, and silently becomes one.
@@ -1259,11 +1298,12 @@ static (string? cmd, string root, Dictionary<string, List<string>> opts, List<st
 
     string? cmd = null;
     string root = Environment.CurrentDirectory;
+    var rootSource = PathSource.Inherited;
     var opts = new Dictionary<string, List<string>>();
     var pos = new List<string>();
     for (int i = 0; i < args.Length; i++)
     {
-        if (args[i] == "--root" && i + 1 < args.Length) { root = args[++i]; continue; }
+        if (args[i] == "--root" && i + 1 < args.Length) { root = args[++i]; rootSource = PathSource.Explicit; continue; }
         if (args[i].StartsWith("--") && boolFlags.Contains(args[i][2..])) { opts[args[i][2..]] = new List<string> { "true" }; continue; }
         if (args[i].StartsWith("--") && i + 1 < args.Length)
         {
@@ -1275,7 +1315,7 @@ static (string? cmd, string root, Dictionary<string, List<string>> opts, List<st
         if (cmd is null) { cmd = args[i]; continue; }
         pos.Add(args[i]);
     }
-    return (cmd, root, opts, pos);
+    return (cmd, root, rootSource, opts, pos);
 }
 
 string? One(string name) => opts.TryGetValue(name, out var l) ? l[0] : null;
@@ -1365,7 +1405,10 @@ static void Help() => Console.WriteLine("""
       dodona ui overlay <PANE|off> | ui update <DodonaUi.exe> | ui close
       dodona ack <pane_event_id> | undo-route <routing_decision_id>
       dodona stop-daemon
-    Every command takes --workspace <name|id|alias>, or --root <path> (default: cwd) to
-    address the workspace that owns that path — an unowned path gets a workspace made for
-    it, named after the folder, with that folder as its sole member.
+    Every command takes --workspace <name|id|alias>, or --root <path> to address the
+    workspace that owns that path — and an unowned --root gets a workspace made for it,
+    named after the folder, with that folder as its sole member.
+    With neither, DODONA_WORKSPACE is used if set (the daemon sets it for every agent it
+    spawns); failing that the current directory, but only if a workspace already owns it.
+    Dodona never invents a workspace for a folder nobody named.
     """);

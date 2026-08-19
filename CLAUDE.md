@@ -175,7 +175,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 |---|---|
 | `check` | Can this tree build? What is in the way? Seconds. **Run it before starting work, not after.** |
 | `build` | Builds. Only *real* compile errors reach you; a locked output is named, never mistaken for one. |
-| `test <suite>...` | One or more named suites, run concurrently. `--sequential` for one at a time. |
+| `test <suite>...` | One or more named suites, run concurrently. `--sequential` for one at a time. **IT DOES NOT BUILD — run `dev build` first or you are testing the PREVIOUS binary.** Suites copy their binaries out of `src\...\bin\Release\...` (`Use-TestBinaries`), and only `prove`, `gate` and `suites` compile. Measured 2026-08-19: a defect was deleted from `Daemon.cs`, `dev test m0` said **26 checks, 0 failed**, and `dev build` + the same command said 1 failed. That is a false green from the tool itself — `LOCATIONS-PLAN.md` P1.5 carries the fix. |
 | `test unit` | The pure logic — no daemon, no store, no window. **~1 second**; run it while you edit. |
 | `suites` | All twelve, **three at a time** (69e8003 lowered it from five; `ui-use` went intermittently red at five). Measured on this machine 2026-08-19: **93 s** at 69e8003 and **100 s** with Phase 3's fifteen extra checks, not the 54–72 s this row claimed — the range predates both the concurrency change and Phase 3's eleven extra m0 checks. Still a gate before committing rather than the twenty-minute event the table claimed before that. |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. Three verdicts: PROVEN, VACUOUS (it passes against HEAD — rewrite it), MISSING (it never ran). |

@@ -138,10 +138,10 @@ overlaps nothing and covers nothing — a claim reading "the whole tree" that bl
 
 ---
 
-## Phase 0c — Dodona stops inventing workspaces  *(independent; can run in parallel with 0)*
+## Phase 0c — Dodona stops inventing workspaces  *(BUILT, 2026-08-19, branch `loc-p0c`)*
 
 **Operator, 2026-08-19: creating a workspace is a user action. Dodona must never do it on its
-own.** Today it does.
+own.** It used to.
 
 `Ws()` uses `--workspace` when given, otherwise `WorkspaceResolve.ForPath(reg, root)` where
 `root = Environment.CurrentDirectory` ([Program.cs:1262](../src/Dodona/Program.cs#L1262)) — and
@@ -153,17 +153,62 @@ The operator's own input never has this problem — the box knows its workspace.
 `DODONA_SHIM_INFO` and `DODONA_LANE_ROLE` ([Daemon.cs:1797-1801](../src/Dodona/Daemon.cs#L1797))
 but **not the workspace id**, so the CLI falls back to guessing from a folder.
 
-| item | what |
-|---|---|
-| P0c.1 | `psi.Environment["DODONA_WORKSPACE"] = _instanceId` at the spawn site. |
-| P0c.2 | `Ws()` honours it **before** ever looking at a folder. Order: `--workspace` → env → path. |
-| P0c.3 | Path resolution **creates only when the path was explicit** (`--root` typed by a person). An inherited cwd that nothing owns is a loud refusal, never a creation. |
+Every citation above was checked against the source before it was changed and all of them held,
+including that `DODONA_WORKSPACE` appeared **nowhere** in `src/`, `tests/` or `tools/`.
+
+| item | what | built |
+|---|---|---|
+| P0c.1 | `psi.Environment["DODONA_WORKSPACE"] = _instanceId` at the spawn site. | yes — `AttachShimAsync`, beside `DODONA_SHIM_INFO`/`DODONA_LANE_ROLE`. The shim does not touch its child's environment, so it reaches the agent. |
+| P0c.2 | `Ws()` honours it **before** ever looking at a folder. Order: `--workspace` → env → path. | yes, **with the middle pair swapped** — see below. |
+| P0c.3 | Path resolution **creates only when the path was explicit** (`--root` typed by a person). An inherited cwd that nothing owns is a loud refusal, never a creation. | yes — `PathSource.Explicit` / `.Inherited`, carried out of `ParseArgs` and passed into `ForPath`. |
+
+**The order as built is `--workspace` → explicit `--root` → `DODONA_WORKSPACE` → inherited cwd,
+and the deviation from P0c.2's wording is deliberate** (see D-L9 below for the decision). "Path"
+in P0c.2 meant *guessing from a folder*; a typed `--root` is not a guess. Putting the environment
+ahead of it would have been an environment variable silently overruling a typed argument — the
+exact compiles-clean/acts-on-the-wrong-workspace failure this phase exists to remove — and it
+would break every acceptance suite the moment one was run from inside a lane, because they all
+pass `--root` while their workspaces live in an isolated `DODONA_HOME` that the inherited id
+knows nothing about.
+
+Two shapes worth copying:
+
+- **The refusal names the commands that un-stick it** (CLAUDE.md §0.1): the workspaces that do
+  exist, `workspace-create --name <NAME> --member "<path>"`, and `--root "<path>"` with the note
+  that an explicit path *does* create. It refuses; it never waits for anybody.
+- **A stale `DODONA_WORKSPACE` is announced and then ignored**, not obeyed and not fatal. It
+  happens for real (the workspace was forgotten; `DODONA_HOME` moved) and a silent degrade is a
+  bug (CLAUDE.md §3's dead routing ladder), while hard-failing on a leftover variable would
+  strand a lane for nothing.
 
 **Becomes impossible:** a phantom workspace named after whatever folder a process happened to be
 in; a store relocated because an agent ran `dodona tickets`.
 
+Demonstrated, all `dev prove`-d **PROVEN** against HEAD:
+
+| check | suite | what HEAD did instead |
+|---|---|---|
+| `inherited_cwd_creates_no_workspace` | workspace | `workspaces 6 → 7` |
+| `inherited_cwd_does_not_move_a_legacy_store` | workspace | moved `.dodona\store.db` out of the folder |
+| `the_refusal_names_the_command_that_makes_a_workspace` | workspace | printed a migration notice instead of a refusal |
+| `env_workspace_is_used_before_any_folder` | workspace | resolved `dodona-stray-…` instead of the named workspace |
+| `a_stale_env_workspace_is_announced_and_still_creates_nothing` | workspace | created, then complained the daemon was down |
+| `a_lane_agent_is_told_its_workspace` | m0 | the agent reported `(unset)` |
+
+`an_explicit_root_beats_the_inherited_env` (workspace) is **VACUOUS by construction** and kept
+anyway: it pins the precedence above, which the fix does not change, so no code state makes it go
+red. It exists so a later reordering cannot pass quietly.
+
+`a_lane_agent_is_told_its_workspace` was additionally seen red *for the right reason* by deleting
+only the one `psi.Environment` line, rebuilding, and re-running m0: 1 of 26 failed, with the
+detail `agent reported: … result (unset)`. `DodonaFakeAgent` gained an `env:NAME` directive to
+make that possible — before it, a spawn-site environment was observable only by reading the code
+that set it.
+
 **Must not break:** `workspace:304-317` (the legacy-store migration set) — auto-create on an
-**explicit** `--root` is what makes that migration invisible and must survive.
+**explicit** `--root` is what makes that migration invisible and must survive. **It does, and it
+is exercising the explicit route:** `Get-WorkspacePaths` in `tests/_workspace.ps1` calls
+`dodona where --root $root --json`. All four migration checks stay green.
 
 ---
 
@@ -187,6 +232,7 @@ in; a store relocated because an agent ran `dodona tickets`.
 | P1.2 | A lane's project appears in `dodona status` and in `ui dump`'s slot shape. A wrong project is currently invisible to a person as well as to a check. |
 | P1.3 | Extract the cwd precedence decision (ticket worktree → recorded cwd → first project, [Daemon.cs:549](../src/Dodona/Daemon.cs#L549), [:1779](../src/Dodona/Daemon.cs#L1779)) into a **static**, like `IsObviousGeneric` and `LanePrefix`. Three nullable strings, no I/O — it belongs on the 1-second `unit` loop. |
 | P1.4 | A check that `registry.db` is under `DODONA_HOME`. |
+| P1.5 | **`dev test <suite>` does not build, so it silently tests the PREVIOUS binary.** Found 2026-08-19 while proving Phase 0c: the one `psi.Environment` line was deleted, `dev test m0` was run, and it reported **26 checks, 0 failed** — a clean green against a defect that was present in the source. `dev build` then `dev test m0` reported 1 failed. The cause is structural: `Use-TestBinaries` copies out of `src\...\bin\Release\...` ([tests/_workspace.ps1:130](../tests/_workspace.ps1#L130)) and **only `prove` builds** — `suites` has no build step either, and `gate`’s two builds are `dev build` runs in two *detached worktrees of HEAD* (the I2 row), not a build of the tree being gated, so **`dev gate` also gates stale binaries**. This is a false-green generator for **every** lane in this wave, not a Phase 0c problem. **Do not "fix" it by building inside `dev test`** — `dev test unit` is 1–2 s by the operator's explicit requirement (CLAUDE.md §1) and a ~6 s incremental build would end that. The shape that fits is a REFUSAL: `dev test` compares the build output against the tracked sources it is about to test and, when the output is older, names `dev build` and stops. Deliberately *not* done from a phase lane: `tools/dev.ps1` is the one file all three concurrent lanes invoke, and this belongs with whoever owns the tooling. |
 | P1.6 | **Done 2026-08-19 (Phase 0), recorded here because it is a `dev prove` fix, not a Phase 0 one.** `dev prove` built `Dodona.sln` in its HEAD worktree, which includes `Dodona.Tests` — and `prove` copies `tests\` from the WORKING tree over HEAD's `src\`. So a unit test naming a method the fix introduces cannot compile there, by construction, and the whole proof aborted with `HEAD does not build` plus nine `CS0117`s in a project no acceptance suite loads. Measured: 12 checks across 2 suites, **zero verdicts**, for a change whose acceptance checks were all provable. It now builds the four executables unless `unit` is itself among the suites being proved. The residual limit is inherent and the abort message states it: **a unit test for a NEW API can never be proven red**, so prove the acceptance check and say so in the report. |
 
 **Becomes impossible:** landing any later phase unobserved.
@@ -396,7 +442,7 @@ healthy is ever killed.
 
 | item | what |
 |---|---|
-| P5.1 | A `lanes.project` column (schema v9). Note the daemon **refuses to hot-swap down** across a schema version ([Daemon.cs:1249](../src/Dodona/Daemon.cs#L1249)), so this blocks rollback; take the pre-migration backup seriously. |
+| P5.1 | A `lanes.project` column (**schema v10** — Phase 0 spent 9 on the repo-identity migration; this row said v9 and two changes would have collided on one version number). Note the daemon **refuses to hot-swap down** across a schema version ([Daemon.cs:1249](../src/Dodona/Daemon.cs#L1249)), so this blocks rollback; take the pre-migration backup seriously. |
 | P5.2 | Registration replaces counting. **Delete the surplus-retirement loop** ([:373-387](../src/Dodona/Daemon.cs#L373)); reap only what has no valid registration. |
 | P5.3 | `_brainLo`/`_brainHi` become dictionaries keyed by project; locks become per-project, mirroring `_compressorLocks` and for the reason stated there. Scalars today mean `EnsureBrainAsync` for project A can silently return **project B's session**. |
 | P5.4 | `ClearOfLivePredecessorsAsync` filters by `(role, project)` ([:2079](../src/Dodona/Daemon.cs#L2079)). `_shutdownAsked` is a `HashSet` **never cleared** ([:2110](../src/Dodona/Daemon.cs#L2110)) — verified — so one wedged brain would block creation for every project. Give it a bounded retry or per-project scope. |
@@ -459,3 +505,10 @@ grouped form `dev prove <suite>:<check> ...` — one run per suite, not one per 
   healing.
 - **D-L9. Dodona never creates a workspace on its own.** *(operator, 2026-08-19)* Only an
   explicit `--root` or an operator action creates. An inherited cwd refuses.
+  **Resolution order, settled while building Phase 0c:** `--workspace` → explicit `--root` →
+  `DODONA_WORKSPACE` → an inherited cwd that is *already owned* → refuse. Rejected: putting
+  `DODONA_WORKSPACE` ahead of `--root`, which is how P0c.2 was originally worded — an environment
+  variable that overrules a typed argument compiles clean and acts on the wrong workspace, and it
+  would break every suite run from inside a lane (they pass `--root`; their workspaces live in an
+  isolated `DODONA_HOME`). Also rejected: making a stale `DODONA_WORKSPACE` fatal — it strands a
+  lane over a leftover variable; it is announced and stepped past instead.
