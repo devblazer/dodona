@@ -28,7 +28,7 @@ Remove-Item "$out\*" -Force -Recurse -ErrorAction SilentlyContinue
 
 # A workspace: not a repository itself, holding three that are, plus a docs folder that
 # belongs to no repository at all.
-$root = Join-Path $env:TEMP ("dodona-ws-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$root = Join-Path (Use-SuiteTemp) ("dodona-ws-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force "$root\docs" | Out-Null
 Set-Content "$root\docs\notes.md" "# workspace notes"
 foreach ($r in 'engine', 'tools') {
@@ -182,13 +182,13 @@ for r in db.execute('''SELECT detail FROM events WHERE kind='ticket_created' ORD
 
     # ---- THE INVARIANT: a repo belongs to at most one workspace ----
     # Fresh fixtures, so the live workspace above is never disturbed.
-    $solo = Join-Path $env:TEMP ("dodona-solo-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $solo = Join-Path (Use-SuiteTemp) ("dodona-solo-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force $solo | Out-Null
     Set-Content "$solo\a.txt" "solo"
     git -C $solo init -b main -q
     git -C $solo add -A
     git -C $solo -c user.email=t@t -c user.name=t commit -q -m init
-    $shared = Join-Path $env:TEMP ("dodona-notes-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $shared = Join-Path (Use-SuiteTemp) ("dodona-notes-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force $shared | Out-Null
 
     # Extra daemons for the extra workspaces these checks address. This suite owns daemon
@@ -216,7 +216,16 @@ for r in db.execute('''SELECT detail FROM events WHERE kind='ticket_created' ORD
     $soloWs = Get-WorkspacePaths $dodona $solo
     DodonaBare @("workspace-create", "--name", "rival") | Out-Null
     $steal = DodonaBare @("workspace-attach", "--member", $solo, "--workspace", "rival")
-    Check 'repo_in_two_workspaces_refused' ($DODONA_EXIT -ne 0 -and $steal -match 'already belongs to workspace') $steal
+    # WHITESPACE-NORMALISED BEFORE MATCHING, and this is not defensive padding -- it is a trap
+    # that fired for real. PowerShell WRAPS a native command's stderr to the console width when
+    # it renders the error record, inserting a newline mid-sentence. The phrase this looks for
+    # sits immediately after a temp path, so when that path grew by ~24 characters (suites moved
+    # into a per-run sandbox) the wrap landed between "already" and "belongs" and a check that
+    # had passed for months went red -- while the product was refusing correctly, which is a
+    # FALSE RED and every bit as costly as a false green. Never regex across a space in captured
+    # native stderr without collapsing it first.
+    $stealFlat = ($steal -replace '\s+', ' ')
+    Check 'repo_in_two_workspaces_refused' ($DODONA_EXIT -ne 0 -and $stealFlat -match 'already belongs to workspace') $stealFlat
     Check 'refusal_says_why_two_tokens_is_the_problem' ($steal -match 'two merge tokens over one main') $steal
     Check 'refusal_offers_the_move_affordance' ($steal -match 'dodona workspace-move --member') $steal
 
@@ -244,7 +253,7 @@ for r in db.execute('''SELECT detail FROM events WHERE kind='ticket_created' ORD
     #
     # Its own fixture and its own two workspaces: the pair above are now doing other jobs,
     # and a check this load-bearing should not depend on their state.
-    $drift = Join-Path $env:TEMP ("dodona-drift-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $drift = Join-Path (Use-SuiteTemp) ("dodona-drift-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force $drift | Out-Null
     DodonaBare @("workspace-create", "--name", "drift-a", "--member", $drift) | Out-Null
     DodonaBare @("workspace-create", "--name", "drift-b", "--member", $drift) | Out-Null
@@ -292,7 +301,7 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
     Check 'unknown_workspace_name_is_refused' ($DODONA_EXIT -ne 0 -and $typo -match 'no workspace') $typo
 
     # ---- migration: a pre-workspace instance becomes a workspace named after its root ----
-    $legacy = Join-Path $env:TEMP ("dodona-legacy-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $legacy = Join-Path (Use-SuiteTemp) ("dodona-legacy-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force "$legacy\.dodona" | Out-Null
     # A store shaped like the real thing, so the assertion is "this exact file moved".
     $marker = "legacy-store-" + [guid]::NewGuid().ToString('N')
@@ -317,8 +326,8 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
     # Two members, so `.` is no longer an unambiguous name and a member prefix appears.
     # A ONE-member workspace must keep the old names byte-for-byte, which is what every
     # check above this line has already been asserting.
-    $twoA = Join-Path $env:TEMP ("dodona-mA-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
-    $twoB = Join-Path $env:TEMP ("dodona-mB-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $twoA = Join-Path (Use-SuiteTemp) ("dodona-mA-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $twoB = Join-Path (Use-SuiteTemp) ("dodona-mB-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     foreach ($r in $twoA, $twoB) {
         New-Item -ItemType Directory -Force "$r\src" | Out-Null
         Set-Content "$r\src\main.cs" "// $r"

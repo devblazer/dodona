@@ -309,6 +309,58 @@ last.
 
 ---
 
+## Phase 6 — Nothing Dodona starts is allowed to outlive its reason  *(operator directive, 2026-08-19)*
+
+**Run this LAST, and treat it as an investigation rather than a fix list.** The operator's words:
+*"the fact that you have strays is very alarming."* They are right, and the alarming part is not
+the wasted memory — it is what the strays imply about whether Dodona knows what it is running.
+
+**What is measured, not suspected.** During Phase 4, on a machine with no app open and no
+daemon running:
+
+- `publish-acceptance` leaks **four `DodonaShim` processes on every successful run**. Over one
+  session **78** accumulated, from six different suite runs, all still holding pipes.
+- They are **not idle**. With 78 alive, a full suite run took **300 s instead of 87 s**, `m3`
+  crashed outright with no tally, `brain` went red on **nine** timing checks, `ui-use` on two
+  and `m4` on two. A verification tool whose answer depends on how many corpses are on the
+  machine is not a verification tool.
+- They **held the runner's own redirect files open** — every `.publish.out` from that session
+  was undeletable, `Device or resource busy`. With the older stdout *pipe* those same handles
+  held `dev suites` hostage for **eight minutes**, and `dev prove` for **24**.
+- The investigation of 2026-08-18 already recorded the mechanism (RC2): a shim's only exit is
+  `##shutdown` from a client, it detects its child's death and does nothing, and the daemon
+  abandons a lane after ONE 500 ms connect attempt without ever asking the OS whether the shim
+  is alive. Four live agents had no shim-info record at all, so `dodona ps` could not see them
+  and `stop-all --lanes` could not reach them.
+
+**Phase 4 did NOT fix this. It fixed being poisoned by it**, which is a different thing and the
+distinction matters:
+
+- the runner gives each suite a sandbox directory and reaps anything still running under it,
+  reporting the count (`reaped N leaked`) rather than tidying silently;
+- suite output goes to files, so an inherited handle can no longer hang the runner;
+- `dev gate` counts pre-existing strays before the run and names them first when I7 fails.
+
+So the leak is now **contained and visible**. It is still a leak.
+
+**What this phase has to answer, in order:**
+
+1. Why does a shim survive its own agent? (RC2 names the code: `childExited` is computed and
+   discarded — `DodonaShim/Program.cs`.) Exit when the child exits, once the buffer is drained.
+2. Why does the daemon declare a live lane dead after one attempt, and then spawn a
+   replacement? Ask the OS — `Instance.LivePipes()` is already the authority for daemons and
+   UIs, and lanes are the one thing still counted from files.
+3. Why can `dodona ps` and `stop-all --lanes` see fewer lanes than exist? Same answer.
+4. **Only then**: should the suites need a reaper at all? If a shim cannot outlive its agent,
+   the Phase 4 sandbox becomes a belt-and-braces measure rather than a load-bearing one. Do not
+   delete it — it also catches a suite that fails to PARSE and so never reaches its `finally`.
+
+**Do not start here by deleting the reaper or the leak counter.** They are the only reason the
+numbers above are visible at all, and a silent leak is how this went unnoticed for two days
+before.
+
+---
+
 ## Phase 5 — Prose shrinks to what code cannot hold  *(I8)*
 
 **Effort: ~half a day. Depends on P0.2, Phase 4, P5.1.**

@@ -16,8 +16,38 @@
 #      binary instead of reconstructing the path — `dodona where --json` exists for exactly
 #      this, and it means a future relocation breaks nothing here.
 
+# ---------------------------------------------------------------- one directory per suite run
+
+# EVERY temporary thing a suite makes lives under here: its DODONA_HOME, its fake project
+# roots, its scratch bin roots. One directory per suite run, and the RUNNER owns it.
+#
+# Why it exists (2026-08-19). The suites leak processes -- publish-acceptance leaves four
+# DodonaShim behind every run, because a shim's only exit is a message from a daemon that is
+# already gone. Leaked shims are not idle: measured with 78 alive, a full run took 300 s
+# instead of 87 s, m3 crashed outright and brain went red on nine timing checks. So the runner
+# has to be able to clean up after itself.
+#
+# AND THAT IS WHY THE PATH MATTERS RATHER THAN THE PROCESS NAME. Cleaning "every DodonaShim
+# under %TEMP%" would kill a CONCURRENT session's suite run stone dead -- this repo already
+# deleted `stop-all` out of `dev build` for exactly that blast radius (P0.2), and killing by
+# name once murdered the operator's live session (CLAUDE.md section 4). A directory the runner
+# created for one child process is an identity nothing else can be inside.
+#
+# DODONA_TEST_SANDBOX is how tools\dev.ps1 hands it in. A suite run BY HAND still works: it
+# makes its own, and cleans nothing, which is the same behaviour as before.
+function Use-SuiteTemp {
+    if ($script:DodonaSuiteTemp) { return $script:DodonaSuiteTemp }
+    $dir = if ($env:DODONA_TEST_SANDBOX) { $env:DODONA_TEST_SANDBOX }
+           else { Join-Path $env:TEMP ("dodona-suite-" + [guid]::NewGuid().ToString('N').Substring(0, 8)) }
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    $script:DodonaSuiteTemp = $dir
+    return $dir
+}
+
 function Use-IsolatedDodonaHome([string]$tag) {
-    $dir = Join-Path $env:TEMP ("dodona-home-$tag-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    # Inside the suite's sandbox, so the runner can clean up everything this suite started by
+    # looking at one directory. See Use-SuiteTemp for why a path and not a process name.
+    $dir = Join-Path (Use-SuiteTemp) ("dodona-home-$tag-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force $dir | Out-Null
     $env:DODONA_HOME = $dir
     $dir

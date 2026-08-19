@@ -28,7 +28,7 @@ $out = Join-Path $PSScriptRoot 'ui-use-output'
 New-Item -ItemType Directory -Force $out | Out-Null
 Remove-Item "$out\*" -Force -Recurse -ErrorAction SilentlyContinue
 
-$root = Join-Path $env:TEMP ("dodona-uiuse-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$root = Join-Path (Use-SuiteTemp) ("dodona-uiuse-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force "$root\src" | Out-Null
 Set-Content "$root\src\app.cs" "// app"
 Set-Content "$root\.gitignore" ".dodona/"
@@ -517,7 +517,7 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
         "bootToZero=$($z.bootToZero) ws=$($z.workspaceName)"
 
     # ---- a SECOND awake workspace becomes a band (§6, shape B) ---------------------------
-    $root2 = Join-Path $env:TEMP ("dodona-uiuse2-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $root2 = Join-Path (Use-SuiteTemp) ("dodona-uiuse2-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force "$root2\src" | Out-Null
     Set-Content "$root2\src\other.cs" "// other"
     Set-Content "$root2\dodona.json" (@{ main = 'main'; agent = $fake } | ConvertTo-Json)
@@ -571,7 +571,7 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     # at startup, never signalled ready, and the incumbent silently kept the old build. From
     # where the operator sits that is indistinguishable from "publish never built anything"
     # (2026-08-18). The successor must respawn as what it is: --shell.
-    $uiCopy = Join-Path $env:TEMP ("dodona-uiswap-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $uiCopy = Join-Path (Use-SuiteTemp) ("dodona-uiswap-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     Copy-Item (Split-Path $ui) $uiCopy -Recurse
     $upd = (& $dodona ui update "$uiCopy\DodonaUi.exe" --shell) | Out-String
     Check 'shell_ui_update_hands_off' ($upd -match 'updated:') $upd.Trim()

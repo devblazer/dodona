@@ -56,7 +56,7 @@ function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$nam
 # shown to mean "every live one" and not "every one".
 $roots = @{}
 foreach ($n in 'alpha', 'beta', 'asleep') {
-    $r = Join-Path $env:TEMP ("dodona-pub-$n-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    $r = Join-Path (Use-SuiteTemp) ("dodona-pub-$n-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
     New-Item -ItemType Directory -Force $r | Out-Null
     Set-Content "$r\readme.md" "# $n"
     $roots[$n] = $r
@@ -110,9 +110,9 @@ try {
     # A daemon for a workspace registered in a DIFFERENT registry — which is exactly what the
     # operator's own instances are, relative to this suite. Its ctl pipe is live and would have
     # been swept up by the old pipe-namespace scan; it must be invisible to --all now.
-    $foreignHome = Join-Path $env:TEMP ("dodona-foreign-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    $foreignHome = Join-Path (Use-SuiteTemp) ("dodona-foreign-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
     New-Item -ItemType Directory -Force $foreignHome | Out-Null
-    $foreignRoot = Join-Path $env:TEMP ("dodona-foreignws-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    $foreignRoot = Join-Path (Use-SuiteTemp) ("dodona-foreignws-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
     New-Item -ItemType Directory -Force $foreignRoot | Out-Null
     $saveHome = $env:DODONA_HOME
     $env:DODONA_HOME = $foreignHome
@@ -150,7 +150,7 @@ try {
     # Found live, and the reason resolution is lazy: a source tree whose own pre-workspace
     # daemon still holds its store cannot be migrated — and publish must not refuse to BUILD
     # over a workspace it never needed. It says so and exits 0, because the build is real.
-    $orphan = Join-Path $env:TEMP ("dodona-orphan-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    $orphan = Join-Path (Use-SuiteTemp) ("dodona-orphan-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
     New-Item -ItemType Directory -Force "$orphan\.dodona" | Out-Null
     Set-Content "$orphan\.dodona\store.db" "pretend-store"
     # Make it look like a pre-workspace daemon owns it, by holding the legacy ctl pipe name.
@@ -188,7 +188,7 @@ try {
     # that it is not watching, because a silent degrade is a bug (CLAUDE.md section 3: the
     # routing ladder was green and dead in production for two days, and its only symptom was a
     # status-line suffix nobody reads).
-    $apRoot = Join-Path $env:TEMP ("dodona-pub-ap-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    $apRoot = Join-Path (Use-SuiteTemp) ("dodona-pub-ap-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
     New-Item -ItemType Directory -Force $apRoot | Out-Null
     New-Item -ItemType Directory -Force "$apRoot\src\Dodona" | Out-Null
     # autoPublish on, and a src\Dodona\Dodona.csproj so the watcher gets PAST its

@@ -43,7 +43,7 @@ Remove-Item "$out\*" -Force -Recurse -ErrorAction SilentlyContinue
 # ---- fixtures -----------------------------------------------------------------------
 # A fence with something in it. `bay` is the folder rung 3 has to find: it is INSIDE the
 # fence (a sibling of a registered member) and belongs to no workspace.
-$fenceRoot = Join-Path $env:TEMP ("dodona-fence-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$fenceRoot = Join-Path (Use-SuiteTemp) ("dodona-fence-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 foreach ($n in 'harbour', 'lighthouse', 'bay') {
     New-Item -ItemType Directory -Force "$fenceRoot\$n\src" | Out-Null
     Set-Content "$fenceRoot\$n\src\main.cs" "// $n"
@@ -52,7 +52,7 @@ foreach ($n in 'harbour', 'lighthouse', 'bay') {
     git -C "$fenceRoot\$n" -c user.email=t@t -c user.name=t commit -q -m init
 }
 # Outside the fence entirely: the fence must never reach it, and nothing widens itself (§8).
-$outside = Join-Path $env:TEMP ("dodona-outside-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$outside = Join-Path (Use-SuiteTemp) ("dodona-outside-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force "$outside\atlantis" | Out-Null
 
 # The concierge's own config, beside its own store -- it belongs to no workspace, so no

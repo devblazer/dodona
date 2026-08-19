@@ -27,7 +27,7 @@ $out = Join-Path $PSScriptRoot 'compression-output'
 New-Item -ItemType Directory -Force $out | Out-Null
 Remove-Item "$out\*" -Force -Recurse -ErrorAction SilentlyContinue
 
-$root = Join-Path $env:TEMP ("dodona-cmp-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$root = Join-Path (Use-SuiteTemp) ("dodona-cmp-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force "$root\src" | Out-Null
 Set-Content "$root\src\a.cs" "// a"
 Set-Content "$root\.gitignore" ".dodona/"

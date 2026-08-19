@@ -27,7 +27,7 @@ $fake = "$bin\DodonaFakeAgent.exe"
 $env:DODONA_SHIM = "$bin\DodonaShim.exe"
 $env:DODONA_NO_AUTOSTART = "1"   # this test owns daemon lifetime; start-on-demand (M4) must not join in
 
-$root = Join-Path $env:TEMP ("dodona-m0-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$root = Join-Path (Use-SuiteTemp) ("dodona-m0-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force $root | Out-Null
 $out = Join-Path $PSScriptRoot 'm0-output'
 New-Item -ItemType Directory -Force $out | Out-Null

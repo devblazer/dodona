@@ -380,14 +380,42 @@ function Start-Suite([string]$name, [string]$file = '') {
     if (-not (Test-Path $f)) { Abort "no suite '$name'" "one of: $((AllSuites) -join ', ')" }
     $so = "$log.$name.out"; $se = "$log.$name.err"
     Remove-Item $so, $se -Force -ErrorAction SilentlyContinue
-    $p = Start-Process -FilePath 'powershell' `
-        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $f) `
-        -RedirectStandardOutput $so -RedirectStandardError $se -NoNewWindow -PassThru
+
+    # ONE SANDBOX PER SUITE RUN, created here and handed to the child, so that when the child
+    # is finished this runner can clean up EXACTLY what that child started -- see
+    # Complete-Suite, and tests\_workspace.ps1 Use-SuiteTemp for why this is a path and never
+    # a process name.
+    #
+    # NOT Start-Process -Environment (PowerShell 7.4+, and this repo is 5.1): the variable is
+    # set on the parent immediately before the child is created, which is enough because a
+    # child snapshots the environment at creation. Concurrent starts are therefore still
+    # correct -- set, start, set, start -- and the parent's value is put back afterwards so
+    # nothing else in this process sees a stale one.
+    # SHORT on purpose: `dsb-<6hex>`, not `dodona-suite-<name>-<8hex>`. Everything a suite makes
+    # now nests one level deeper, and the first version added ~24 characters to every path
+    # inside it. Windows MAX_PATH is a real margin here (CLAUDE.md 5.2), and it bit immediately
+    # in a subtler way: a longer path pushed a word of `dodona.exe`'s stderr onto a wrapped
+    # line and broke a regex in workspace-acceptance that had matched for months. The suite name
+    # goes in a marker file instead, where it costs no path length.
+    $sandbox = Join-Path $env:TEMP ("dsb-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    New-Item -ItemType Directory -Force $sandbox | Out-Null
+    Set-Content -Path (Join-Path $sandbox '_suite.txt') -Value $name -Encoding ascii
+    $savedSandbox = $env:DODONA_TEST_SANDBOX
+    $env:DODONA_TEST_SANDBOX = $sandbox
+    try {
+        $p = Start-Process -FilePath 'powershell' `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $f) `
+            -RedirectStandardOutput $so -RedirectStandardError $se -NoNewWindow -PassThru
+    }
+    finally {
+        if ($null -eq $savedSandbox) { Remove-Item env:DODONA_TEST_SANDBOX -ErrorAction SilentlyContinue }
+        else { $env:DODONA_TEST_SANDBOX = $savedSandbox }
+    }
     # Touch .Handle BEFORE waiting, or .ExitCode reads back EMPTY afterwards -- the trap the
     # I2 row in Do-Gate carries a comment about, which once reported two successful builds as
     # a failure. It has to happen at start, not after the wait.
     $null = $p.Handle
-    [pscustomobject]@{ Name = $name; Proc = $p; Out = $so; Err = $se; Sw = [System.Diagnostics.Stopwatch]::StartNew() }
+    [pscustomobject]@{ Name = $name; Proc = $p; Out = $so; Err = $se; Sandbox = $sandbox; Sw = [System.Diagnostics.Stopwatch]::StartNew() }
 }
 
 function Complete-Suite($h, [int]$timeoutSec = 420) {
@@ -410,8 +438,30 @@ function Complete-Suite($h, [int]$timeoutSec = 420) {
     Add-Content -Path $log -Value $o -Encoding utf8
     Remove-Item $h.Out, $h.Err -Force -ErrorAction SilentlyContinue
 
+    # THE SUITE CLEANS UP AFTER ITSELF, whatever it did or did not manage to do in its own
+    # `finally`. A .ps1 that fails to PARSE never reaches `finally` at all (CLAUDE.md 0.2), and
+    # publish-acceptance leaks four shims on every successful run -- so leaving this to the
+    # suites means it does not happen. Leaked shims are not idle: 78 of them turned an 87 s run
+    # into 300 s, crashed m3 and reddened nine of brain's timing checks.
+    #
+    # SCOPED TO THE DIRECTORY THIS RUNNER MADE FOR THIS CHILD. Not by process name, and not
+    # "everything under %TEMP%": a concurrent session's suites live in their own sandboxes and
+    # must survive untouched, which is the same reason `stop-all` was deleted out of `dev build`
+    # (P0.2). Nothing outside this one directory can be reached from here.
+    $leaked = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $pp = $null
+            try { $pp = $_.Path } catch { }
+            $pp -and $pp.StartsWith($h.Sandbox, [StringComparison]::OrdinalIgnoreCase)
+        })
+    foreach ($lp in $leaked) { try { Stop-Process -Id $lp.Id -Force -ErrorAction Stop } catch { } }
+    if ($leaked.Count -gt 0) {
+        Add-Content -Path $log -Value "$($h.Name): reaped $($leaked.Count) leaked process(es) from its sandbox" -Encoding utf8
+    }
+    Remove-Item $h.Sandbox -Recurse -Force -ErrorAction SilentlyContinue
+
     $fails = @($o | Select-String -Pattern ': FAIL' | ForEach-Object { $_.Line.Trim() })
     $tally = ($o | Select-String -Pattern '^\d+ checks,' | Select-Object -Last 1)
+    $reaped = $leaked.Count
 
     # Structural faults: the suite did not run, did not finish, or did not report. Counted
     # like failed checks by every caller, because that is what they are.
@@ -427,6 +477,7 @@ function Complete-Suite($h, [int]$timeoutSec = 420) {
         Seconds  = [math]::Round($elapsed.TotalSeconds, 1)
         Exit     = $code
         Tally    = if ($tally) { $tally.Line.Trim() } else { 'NO TALLY LINE' }
+        Reaped   = $reaped
         # The raw lines, for the one caller that needs a SPECIFIC check rather than a verdict:
         # `dev prove` has to find "<check>: PASS|FAIL" and judge that one line.
         Output   = $o
@@ -556,8 +607,12 @@ function Run-Suites([string[]]$names, [switch]$Sequential) {
 function Report-Suites($results, [switch]$Wide) {
     $bad = 0
     foreach ($r in $results) {
-        if ($Wide) { Say "$($r.Name.PadRight(12)) $($r.Tally.PadRight(24))  $($r.Seconds)s" }
-        else { Say "$($r.Name): $($r.Tally)  [$($r.Seconds)s]" }
+        # The reaped count is printed, never swallowed. A runner that quietly tidies up a leak
+        # is a runner that hides it, and the leak is a real defect (P3): a shim should exit when
+        # its child does. This keeps it visible while stopping it from poisoning the next run.
+        $reap = if ($r.Reaped) { "  (reaped $($r.Reaped) leaked)" } else { '' }
+        if ($Wide) { Say "$($r.Name.PadRight(12)) $($r.Tally.PadRight(24))  $($r.Seconds)s$reap" }
+        else { Say "$($r.Name): $($r.Tally)  [$($r.Seconds)s]$reap" }
         foreach ($f in $r.Fails) { Say "  $f"; $bad++ }
         foreach ($x in $r.Problems) { Say "  $x"; $bad++ }
     }

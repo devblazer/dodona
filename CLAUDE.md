@@ -93,6 +93,11 @@ nothing while looking installed).
   match nothing — build patterns from `[char]0x2713` / `[char]0x2014`.
 - **Native stderr**: capturable only with `$ErrorActionPreference='Continue'` + `2> file`
   (`Stop` throws NativeCommandError; `SilentlyContinue` eats the record).
+- **Captured native stderr is WRAPPED to the console width**, with a newline inserted
+  mid-sentence. So a regex spanning a space can match today and fail tomorrow because a path
+  got longer and moved the wrap. Collapse first: `($out -replace '\s+', ' ') -match '...'`.
+  This turned `workspace-acceptance`'s repo-exclusivity check red while the product was
+  refusing correctly — a **false red**, which costs exactly as much as a false green.
 - **`-shl` on `[byte]` stays a byte** and overflows to 0 — cast `[int]` first.
 - **Commit messages** with quotes/dashes: `git commit -F <file>`, never inline `-m`.
 - **`.Count` on a one-element pipeline** is `$null` — wrap in `@(...)`.
@@ -400,6 +405,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 | `brain` | the dispatcher brain and its routing ladder | ~23 s |
 | `concierge` | the group-scope ladder, the fence, the review-behind | ~11 s |
 | `publish` | publish targeting: `--all` spares foreign instances | ~30 s |
+
+**Two suites run ALONE, and taking either out of that list will look like it works.**
+`SoloSuites` in `tools/dev.ps1` is the list, and each entry carries its reason in a comment:
+
+- **`unit`** compiles (`dotnet test` builds Dodona into `src\Dodona\bin`), and every other
+  suite copies its binaries out of there at startup. Two compilers, one directory.
+- **`m1`** is intermittent beside a parallel wave — measured, green 5/5 alone in 8–9 s, and
+  `gate_denies_outside_claim` failed 3 of 4 times when it ran next to `m4`'s real build,
+  because `dodona gate-hook` returned EMPTY for longer than the check's 20 s retry.
+  **The cause is not known.** It is not the daemon being slow (that path writes
+  `.dodona-bypass.log`, and the log was empty), and it is not PowerShell failing to deliver
+  stdin to `cmd /c` (probed 60× under load, 60/60 delivered). What is left is one of
+  `GateHook`'s three *silent* `return 0` paths, i.e. the gate never reached the daemon.
+
+So: **do not "tidy up" `SoloSuites` because a suite looks fast enough to parallelise.** m1 alone
+costs 8 seconds. A gate that is red one run in four for a reason nobody has diagnosed costs far
+more, because it teaches people to re-run instead of read — which is the same disease as a gate
+that is always green. If you want m1 back in the wave, first find out why the hook goes quiet,
+and put the answer in the commit.
 
 **Waits are conditions, not sleeps.** `Wait-Until { <condition> } <timeoutMs> '<what>'` in
 `tests/_workspace.ps1` is how every one of them is written now; `Wait-Daemon` is the common

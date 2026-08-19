@@ -20,7 +20,7 @@ $out = Join-Path $PSScriptRoot 'm2-output'
 New-Item -ItemType Directory -Force $out | Out-Null
 Remove-Item "$out\*" -Force -Recurse -ErrorAction SilentlyContinue
 
-$root = Join-Path $env:TEMP ("dodona-m2-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$root = Join-Path (Use-SuiteTemp) ("dodona-m2-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force "$root\src\water", "$root\src\sky" | Out-Null
 Set-Content "$root\src\water\sim.cs" "// water"
 Set-Content "$root\src\sky\box.cs" "// sky"

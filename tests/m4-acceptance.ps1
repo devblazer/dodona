@@ -31,10 +31,10 @@ Remove-Item "$out\*" -Force -Recurse -ErrorAction SilentlyContinue
 
 # Published builds go to a scratch bin root, not the machine-wide one: tests collide with
 # nothing (§17), and the GC check gets a directory it owns.
-$binRoot = Join-Path $env:TEMP ("dodona-bin-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$binRoot = Join-Path (Use-SuiteTemp) ("dodona-bin-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $env:DODONA_BIN_ROOT = $binRoot
 
-$root = Join-Path $env:TEMP ("dodona-m4-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$root = Join-Path (Use-SuiteTemp) ("dodona-m4-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force "$root\src" | Out-Null
 Set-Content "$root\src\a.cs" "// a"
 Set-Content "$root\.gitignore" ".dodona/"
@@ -87,6 +87,13 @@ try {
     # Read THIS lane's session, not the last one printed: the dispatcher lane the swap
     # creates has no session, and a greedy match would happily take its dash.
     function LaneSession { ((Dodona @("status")) -split "`r?`n" | Where-Object { $_ -match "^lane $lane\b" }) -replace '.*session=(\S+).*', '$1' }
+    # WAIT FOR A SESSION TO EXIST before recording it. An agent reports its session id on its
+    # first exchange, so reading immediately after lane-start sometimes catches `-` -- and then
+    # `same_session_after_swap` compares "-" against a real id and fails. It was intermittent
+    # from the very first baseline run of this phase and read as a hot-swap defect, which it
+    # never was: the swap preserves the session perfectly, the test was just asking too early.
+    # The check is "the session did not CHANGE", so it needs a session to start with.
+    Wait-Until { (LaneSession) -match '^fake-' } 20000 'the agent reports a session id' | Out-Null
     $sessionBefore = LaneSession
 
     # a 6-second turn: the swap happens squarely inside it. The turn must actually BE in
