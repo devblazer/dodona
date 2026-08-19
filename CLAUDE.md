@@ -564,8 +564,24 @@ TextBox class handler eats Enter before an instance `KeyDown`, so the handler is
 `PreviewKeyDown` and `tests/ui-use-acceptance.ps1` now proves Enter still sends.
 
 Poses are deterministic fixtures (`full`, `badges`, `blocked`, `feed`, `collapsed`,
-`tray`, `overlay`, `long`, `two`, `twelve`, `bands`, `merged-feed`, `boot-zero`). `--pose` needs a `--root`
+`tray`, `overlay`, `long`, `two`, `twelve`, `bands`, `merged-feed`, `boot-zero`, `ask`,
+`ask-group`). `--pose` needs a `--root`
 or `--shell`; a bare launch (no `--root`, no `--workspace`) is the shell.
+
+**The window ASKS things now, and it is not a dialog** (docs/LOCATIONS-PLAN.md Phase 4, D-L4).
+A question is an `open` row in a `questions` table — the concierge's, or a workspace's — and the
+ask is *rendering that row*: an in-window overlay live, `ui dump`'s `ask` key headless, and **one
+answer path** shared by both (`dodona ui answer <choice>` lands in the same method a button click
+lands in, and sends the same daemon command `dodona answer` / `dodona concierge-answer` sends).
+`Esc` puts it down without answering; the row stays open and the feed still carries it.
+
+- **Never make it a modal.** A test window is forbidden from producing one, so a modal ask would
+  be permanently untestable — which is why `PickerWindow` and `StartLaneWindow` have no coverage
+  at all, and why D-L4 rejected one.
+- **Never let it become a folder picker** (§3.1). The choices are names the system already knows;
+  `ui-use:the_ask_offers_no_filesystem_navigation` goes red if a path appears in one.
+- **With one project there is nothing to ask, so no overlay may appear.** The operator's own
+  machine is a one-project workspace, and two `ui-use` checks pin it.
 
 ## 3.1 No folder UI, ever (operator directive, 2026-08-18)
 

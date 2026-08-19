@@ -45,6 +45,12 @@
          reaches, and two implementations of "which project is this lane in" would be two
          answers to the question docs/LOCATIONS-PLAN.md Phase 1 exists to make answerable. -->
     <Compile Include="..\Dodona\Projects.cs" Link="Projects.cs" />
+    <!-- The asking component's pure half (docs/LOCATIONS-PLAN.md Phase 4, D-L4). Linked for
+         the strongest form of the same reason: the daemon WRITES a question's candidates and
+         the window PARSES them, and the whole of D-L4 is that there is one component over one
+         row. Two parsers of `questions.candidates` would be the two-systems divergence Phase 4
+         exists to prevent, and only one of them would ever be tested. -->
+    <Compile Include="..\Dodona\Ask.cs" Link="Ask.cs" />
     <!-- Ver too, and for the same reason: the UI is its own build with its own hot swap
          (§13), so it has to be able to say which build it is. Ver.Build reads
          typeof(Ver).Assembly, so compiled in here it reports the UI's identity, not the

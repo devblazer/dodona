@@ -19,6 +19,12 @@ static class Poses
         // a deterministic pose (CLAUDE.md §3), and these are the three states a screenshot
         // could not otherwise reach without two live daemons and a concierge.
         "bands", "merged-feed", "boot-zero",
+        // The ask (docs/LOCATIONS-PLAN.md Phase 4). Two poses because the two SCOPES are the
+        // thing a person could get wrong at a glance -- a workspace question about the work in
+        // front of them, and a group-scope one that belongs to no workspace's column (§6) --
+        // and because reaching either from live state needs a refused ticket or a stumped
+        // concierge. Every new affordance owes a deterministic pose (CLAUDE.md §3).
+        "ask", "ask-group",
     };
 
     static PaneSnap Pane(long id, string title, string presence, int badge = 0, bool blocked = false,
@@ -220,6 +226,38 @@ static class Poses
                 }, null)
                 {
                     FocusedWorkspace = "", FocusedWorkspaceName = "",
+                }, null, null);
+
+            // ---- the ask, over a live grid (P4.2) ------------------------------------------
+            // Over a grid on purpose: the failure a screenshot catches here is an overlay that
+            // reads as a modal blocking the machine rather than a question laid over work that
+            // is still running. The choices are NAMES the system already knows -- never a
+            // folder tree, never a Browse button (CLAUDE.md §3.1).
+            case "ask":
+                return (new Snapshot(SixPanes(), new(), Feed(3), null)
+                {
+                    Ask = new AskSnap("dodona-dev-3f9a", "dodona-dev", 7,
+                        "shaders has no git repo, so \"tighten the foam shader\" cannot become a ticket. Create one?",
+                        new List<AskChoiceSnap>
+                        {
+                            new("yes", "create a git repo in shaders", "git init, then commit what is already there"),
+                            new("no", "not now", "lanes keep working without git; only tickets need a repo"),
+                        }),
+                }, null, null);
+
+            // ---- the same component, group scope. Only the label and the choices differ ----
+            case "ask-group":
+                return (new Snapshot(SixPanes(), new(), Feed(3), null)
+                {
+                    Bands = Bands(),
+                    Ask = new AskSnap(Dodona.Instance.ConciergeId, "[dodona]", 12,
+                        "not sure which workspace “sort out the beacon rotation gearbox” is for.",
+                        new List<AskChoiceSnap>
+                        {
+                            new("dodona-dev", "dodona-dev", null),
+                            new("personal", "personal", null),
+                            new("work", "work", null),
+                        }),
                 }, null, null);
 
             default:

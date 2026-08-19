@@ -250,6 +250,37 @@ sealed class StoreReader : IDisposable
         return set;
     }
 
+    /// <summary>An open question in this workspace, oldest first — the ask overlay's source
+    /// (LOCATIONS-PLAN P4.1, D-L4). A ROW, so the ask survives the window closing and every
+    /// window over this workspace shows the same one.
+    ///
+    /// The catch is load-bearing, not defensive habit: the `questions` table is created by the
+    /// daemon and this reader is read-only, so a UI launched against a store no daemon has ever
+    /// opened — or against an `--attach`ed copy of an older store — names a table that is not
+    /// there. Returning EMPTY is the right answer to "is anything being asked"; throwing here
+    /// would take the whole ask down, and rule 12 of this phase is that the overlay failing must
+    /// never take the window with it (the same reason a corrupt `ui.json` is silently ignored:
+    /// the box you would use to complain lives inside the window).</summary>
+    public List<QuestionR> OpenQuestions()
+    {
+        var list = new List<QuestionR>();
+        if (!Open()) return list;
+        try
+        {
+            using var c = _db!.CreateCommand();
+            c.CommandText = "SELECT id, ts, input, candidates FROM questions WHERE state = 'open' ORDER BY id;";
+            using var r = c.ExecuteReader();
+            while (r.Read()) list.Add(new QuestionR(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3)));
+        }
+        catch { /* no questions table (older store, or no daemon has opened it yet): nothing is being asked */ }
+        return list;
+    }
+
+    /// <summary>Only the four columns an ask RENDERS. `state` is in the WHERE clause and
+    /// `kind`/`subject` are the daemon's business — a reader that pulled them would invite a
+    /// window that branched on kind, which is how one component becomes two.</summary>
+    public record QuestionR(long Id, string Ts, string Input, string Candidates);
+
     public string? Kv(string key)
     {
         if (!Open()) return null;

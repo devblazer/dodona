@@ -288,6 +288,122 @@ sealed class Store : IDisposable, ILaneSink
                 PRAGMA user_version = 9;
                 """);
         }
+
+        // ---- questions: a workspace-scope ask, as a row (LOCATIONS-PLAN P4.1/P4.5) ----------
+        //
+        // Deliberately NOT behind a `Ver.Schema` bump, and that is a decision rather than an
+        // oversight. `Ver.Schema` exists for ONE purpose: the daemon refuses to hot-swap DOWN
+        // across it (Daemon.cs:1249), because an older binary must not take over a store whose
+        // rows it would misread. This table is purely additive — no older binary names it, no
+        // older code path reads it — so there is nothing for that refusal to protect, while a
+        // bump would have cost a version number in a wave where Phase 5 has already been
+        // assigned v10 for `lanes.project` (the plan's P5.1 note: "two changes would have
+        // collided on one version number"). IF NOT EXISTS makes it self-healing in both
+        // directions: a store made by a newer binary and reopened by an older one is unharmed,
+        // and the next newer open re-creates whatever is missing.
+        //
+        // The seven columns before `kind` are byte-identical to ConciergeStore's `questions`,
+        // and that identity is the whole of D-L4: ONE row shape means one component renders
+        // both scopes and one answer verb answers both. `kind`/`subject` are appended, not
+        // interleaved, and the UI never reads them — they tell the DAEMON what answering means
+        // (run repo-init on which project), which is not a rendering concern.
+        Exec("""
+            CREATE TABLE IF NOT EXISTS questions(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                input TEXT NOT NULL,
+                candidates TEXT NOT NULL,           -- JSON [{id,name,why}] — Ask.Choices parses it
+                state TEXT NOT NULL,                -- open | answered | withdrawn
+                answer TEXT,
+                answered_ts TEXT,
+                kind TEXT NOT NULL DEFAULT '',      -- what answering DOES (Ask.KindRepoInit)
+                subject TEXT NOT NULL DEFAULT ''    -- what it acts on (a project path)
+            );
+            """);
+    }
+
+    // ------------------------------------------------------- questions (P4.1)
+
+    /// <summary>The seven columns a question renders from. Same record shape as
+    /// <c>ConciergeStore.QuestionRow</c> plus what the daemon needs to ACT on an answer, and
+    /// the duplication is deliberate: the two stores are separate authorities (§2 forbids a
+    /// workspace daemon reading the concierge's), so sharing a type would be the first step
+    /// towards sharing a connection.</summary>
+    public record QuestionRow(long Id, string Ts, string Input, string Candidates, string State,
+                              string? Answer, string Kind, string Subject);
+
+    const string QuestionCols = "id, ts, input, candidates, state, answer, kind, subject";
+
+    static QuestionRow ReadQuestion(SqliteDataReader r) => new(
+        r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4),
+        r.IsDBNull(5) ? null : r.GetString(5), r.GetString(6), r.GetString(7));
+
+    /// <summary>Open a question. Returns its id — which is what the answer command takes, and
+    /// what the announcement must carry so the operator can answer it from anywhere.</summary>
+    public long QuestionOpen(string input, string candidatesJson, string kind = "", string subject = "")
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "INSERT INTO questions(ts, input, candidates, state, kind, subject) " +
+                            "VALUES ($ts,$i,$c,'open',$k,$s);";
+            c.Parameters.AddWithValue("$ts", Now());
+            c.Parameters.AddWithValue("$i", input);
+            c.Parameters.AddWithValue("$c", candidatesJson);
+            c.Parameters.AddWithValue("$k", kind);
+            c.Parameters.AddWithValue("$s", subject);
+            c.ExecuteNonQuery();
+            // A SEPARATE command for the id: `INSERT …; SELECT last_insert_rowid();` in one
+            // Microsoft.Data.Sqlite command returns nothing without NextResult() (CLAUDE.md §0.2).
+            using var q = _db.CreateCommand();
+            q.CommandText = "SELECT last_insert_rowid();";
+            return Convert.ToInt64(q.ExecuteScalar()!);
+        }
+    }
+
+    public QuestionRow? Question(long id)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = $"SELECT {QuestionCols} FROM questions WHERE id = $i;";
+            c.Parameters.AddWithValue("$i", id);
+            using var r = c.ExecuteReader();
+            return r.Read() ? ReadQuestion(r) : null;
+        }
+    }
+
+    /// <summary>Every unanswered question, oldest first — oldest because the operator should be
+    /// asked in the order they created the uncertainty, not last-in-first-out.</summary>
+    public List<QuestionRow> OpenQuestions()
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = $"SELECT {QuestionCols} FROM questions WHERE state = 'open' ORDER BY id;";
+            var list = new List<QuestionRow>();
+            using var r = c.ExecuteReader();
+            while (r.Read()) list.Add(ReadQuestion(r));
+            return list;
+        }
+    }
+
+    /// <summary>Record the answer. Guarded on `state = 'open'`, so answering twice is a
+    /// refusal rather than a second action — the concierge's `QuestionAnswer` has the same
+    /// guard and `concierge:answering_twice_is_refused` is the check that pins it.</summary>
+    public bool QuestionAnswer(long id, string answer, string state = "answered")
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "UPDATE questions SET state = $st, answer = $a, answered_ts = $ts " +
+                            "WHERE id = $i AND state = 'open';";
+            c.Parameters.AddWithValue("$st", state);
+            c.Parameters.AddWithValue("$a", answer);
+            c.Parameters.AddWithValue("$ts", Now());
+            c.Parameters.AddWithValue("$i", id);
+            return c.ExecuteNonQuery() > 0;
+        }
     }
 
     // ------------------------------------------------------- repo identity (P0.3)

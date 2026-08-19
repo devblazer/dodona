@@ -100,6 +100,11 @@ $daemon2 = $null
 $shellUi = $null
 $bareUi = $null
 $uiCopy = $null
+# The ask section (Phase 4) runs a THIRD workspace over a project with no git repo, plus its
+# own window. Tracked here so the scoped cleanup can stop both by pid (CLAUDE.md §4).
+$daemon3 = $null
+$askUi = $null
+$ws3 = $null
 try {
     # Where this workspace keeps its state. Not `<root>\.dodona` any more: a workspace
     # is named rather than located, so the suite asks the binary (see tests/_workspace.ps1).
@@ -150,6 +155,20 @@ try {
     Check 'a_one_project_workspace_shows_no_project_tag' `
         ($ps.Count -ge 1 -and @($ps | Where-Object { "$($_.project)" -ne '' }).Count -eq 0) `
         (($ps | ForEach-Object { "$($_.title)=[$($_.project)]" }) -join ' ')
+
+    # ---- NOTHING IS ASKED, so NO OVERLAY APPEARS (LOCATIONS-PLAN Phase 4, rule 2) ----------
+    # The operator's own machine is a ONE-project workspace. With one project there is nothing to
+    # ask -- no "which project", no missing repo (this root is a git repo) -- so the ask overlay
+    # must never be on screen, and `ui dump`'s new `ask` key must be null rather than an empty
+    # object. A spurious overlay would be the FIRST thing they saw, over the work they were
+    # looking at, and dismissing something you never asked for is the worst possible introduction
+    # to an affordance whose whole job is to be trustworthy.
+    #
+    # A REGRESSION check in the same family as `a_one_project_workspace_shows_no_project_tag`
+    # above: it goes red the moment asking becomes unconditional.
+    Check 'a_one_project_workspace_is_never_asked_anything' ($null -eq $d.ask) ($d.ask | ConvertTo-Json -Compress)
+    Check 'the_dump_reports_an_ask_field_at_all' `
+        ($null -ne $d.PSObject.Properties['ask']) 'ui dump has no `ask` key: the ask is unobservable'
 
 
     $lanes = @($d.slots | Where-Object { -not $_.empty })
@@ -515,6 +534,16 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     Wait-Until { $null -ne ($script:bz = ShellDumpOrNull) } 30000 'the bare launch answers the SHELL pipe' | Out-Null
     Check 'bare_launch_is_the_shell_booted_to_zero' ($null -ne $bz -and $bz.bootToZero -eq $true) `
         ($(if ($null -eq $bz) { 'shell pipe did not answer' } else { $bz | ConvertTo-Json -Compress -Depth 3 }))
+    # ---- P4.4: THE ASK IS UNREACHABLE FROM A BARE LAUNCH -----------------------------------
+    # The check above exists because the FOLDER PICKER used to answer a bare launch: a dialog in
+    # the front door, asking where you wanted to work, contradicting the entire workspace design
+    # (WORKSPACES-CONCIERGE.md §6.1). Phase 4 adds an overlay that asks things, so it has to be
+    # held to the same line: a question appears ONLY in response to something the operator typed.
+    # Nothing has been typed at this point and no question row exists anywhere, so a bare launch
+    # must open a window that asks nothing. If this goes red, the front door has regressed to a
+    # dialog by a new route -- one Dodona itself opened rather than one it inherited.
+    Check 'a_bare_launch_is_never_asked_anything' ($null -ne $bz -and $null -eq $bz.ask) `
+        ($bz.ask | ConvertTo-Json -Compress)
     (& $dodona ui close --shell) | Out-Null
     Wait-Until { $null -eq (ShellDumpOrNull) } 20000 'the bare shell window is gone' | Out-Null
     if ($bareUi -and -not $bareUi.HasExited) { try { Stop-Process -Id $bareUi.Id -Force } catch { } }
@@ -619,6 +648,193 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     Wait-Until { $null -eq (ShellDumpOrNull) } 20000 'the shell window is gone' | Out-Null
     Dodona @("stop-daemon") | Out-Null
     (& $dodona stop-daemon --workspace $ws2.Id) | Out-Null
+
+    # =====================================================================================
+    # THE ASK: ONE COMPONENT, TWO RENDER MODES, ONE ANSWER PATH
+    # (docs/LOCATIONS-PLAN.md Phase 4 — P4.1/P4.2/P4.3/P4.5, decision D-L4)
+    #
+    # Driven the way a person drives it, because that is what this suite is for. `PickerWindow`
+    # and `StartLaneWindow` have ZERO coverage between them for exactly one reason: they are
+    # dialogs, `ui dump` had no field for a dialog, and a test window is forbidden from producing
+    # a modal at all (MainWindow.IsTestWindow — it renders off-screen so it cannot steal the
+    # keyboard, and a MessageBox would block until somebody clicked, which in an automated
+    # capture is forever). So the ask is an OVERLAY plus a `ui dump` key, and these checks are
+    # what make asking observable for the first time.
+    #
+    # The question used here is P4.5's: a project with no git repo. That one is produced by a
+    # real code path with no model call and no Phase 3 -- `ticket-create` refusing for want of a
+    # repository -- which is why it is the fixture. The ROUTER's rung-4 "we do not know the
+    # project, so ask" is Phase 3's to produce; every assertion below is on the QUESTION ROW and
+    # the ANSWER PATH rather than on which rung opened it, so it holds for that one too.
+    #
+    # ONE project in this workspace, so rule 2 still holds: the overlay appears because a row
+    # says a question is open, never because the workspace has more than one of anything.
+    # =====================================================================================
+    $root3 = Join-Path (Use-SuiteTemp) ("dodona-uiask-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force "$root3\src" | Out-Null
+    Set-Content "$root3\src\thing.cs" "// thing"
+    Set-Content "$root3\dodona.json" (@{ main = 'main'; agent = $fake } | ConvertTo-Json)
+    # NO `git init`. That is the whole fixture: a project Dodona can run lanes in and cannot cut
+    # a ticket from (Repos.ForClaims refuses), which is the state P4.5 turns into a question.
+    $ws3 = Get-WorkspacePaths $dodona $root3
+    $daemon3 = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws3.Id -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon3.out" -RedirectStandardError "$out\daemon3.err"
+    Wait-Daemon $ws3.CtlPipe | Out-Null
+
+    function Ask3([string[]]$a) {
+        $ErrorActionPreference = 'Continue'
+        (& $dodona ($a + @('--workspace', $ws3.Id))) | Out-String
+    }
+    function AskDumpOrNull() { try { (& $dodona ui dump --workspace $ws3.Id) | Out-String | ConvertFrom-Json } catch { $null } }
+    # TOLERANT ON PURPOSE, and only here. `Invoke-StoreSql` throws on a sqlite error, which is
+    # right everywhere else — a query naming a column that does not exist must not come back
+    # empty and be mistaken for a zero (check-authoring §3). But `dev prove` runs THIS section
+    # against a HEAD whose store has no `questions` table at all, and a throw would abort the
+    # suite and report every check below as MISSING instead of PROVEN. So a missing table reads
+    # as "nothing is being asked", which is the honest answer, and **every assertion below fails
+    # on an empty result** — none of them is an `-eq 0` that an empty string could satisfy. The
+    # waits carry deadlines and return false, so the check that follows fails on its own terms.
+    # TRIMMED, because `Invoke-StoreSql` ends in `| Out-String` and therefore returns
+    # "repo-init`r`n" — and `-eq 'repo-init'` on that is false. Five checks here failed on their
+    # first run for exactly that and nothing else, which is a false RED and costs the same as a
+    # false green: the product was correct and the detail string proved it ("answered|yes" while
+    # the assertion said the state was not `answered`).
+    function Q3([string]$sql) { try { "$(Invoke-StoreSql $ws3.Store $sql)".Trim() } catch { '' } }
+    # `git` in a folder that is not a repo writes "fatal: not a git repository" to STDERR, and
+    # under this suite's `$ErrorActionPreference = 'Stop'` a native command's stderr line becomes
+    # a NativeCommandError that ABORTS THE SUITE (CLAUDE.md §0.2). That is not hypothetical: the
+    # first `dev prove` run of this section reached the last-but-four check, died there, printed no
+    # tally, and reported all 23 perfectly good checks as MISSING rather than PROVEN — the same
+    # failure the header of this file describes happening inside `finally`. 'Continue' is scoped
+    # to the function, which is the pattern `Dodona` and `Ask3` above already use.
+    function Git3([string[]]$a) {
+        $ErrorActionPreference = 'Continue'
+        (& git -C $root3 @a 2>$null) | Out-String
+    }
+
+    $askUi = Start-Process $ui -ArgumentList "--workspace", $ws3.Id, "--test-window" -PassThru
+    Wait-Until { $null -ne (AskDumpOrNull) } 30000 'the ask window answers ui dump' | Out-Null
+
+    # ---- a refusal becomes a QUESTION, not an instruction (P4.5) --------------------------
+    # Before this, ticket-create printed "(lanes work without git; only tickets need a
+    # repository)" and left the operator to go and type `dodona repo-init` -- a GUI telling a
+    # person to use the CLI, the same original sin as "undo: dodona lane-stop 3" printed in the
+    # feed at somebody who has a mouse.
+    $tc = Ask3 @('ticket-create', '--title', 'polish the thing', '--claim', 'path:src/thing.cs')
+    Check 'ticket_create_without_a_repo_still_refuses' ($tc -match 'error') $tc.Trim()
+    Wait-Until { (Q3 "SELECT COUNT(*) FROM questions WHERE state='open'") -ge 1 } 20000 'a question row is open' | Out-Null
+    $qid = (Q3 "SELECT id FROM questions WHERE state='open' ORDER BY id LIMIT 1")
+    Check 'the_refusal_opens_a_question_row' ("$qid" -match '^\d+$') "questions rows: $(Q3 'SELECT id, state, kind FROM questions')"
+    Check 'the_question_is_about_this_project' `
+        ((Q3 "SELECT kind FROM questions WHERE id=$qid") -eq 'repo-init') (Q3 "SELECT kind, subject FROM questions WHERE id=$qid")
+    # A row, so it survives the window closing -- the argument ConciergeStore's class note makes
+    # for questions being rows at all: a pending question that evaporated would make asking worse
+    # than guessing.
+    $qlist = Ask3 @('questions')
+    Check 'the_question_is_listed_by_the_cli_too' ($qlist -match 'no git repo') $qlist.Trim()
+
+    # ---- RENDER MODE 1: the in-window overlay, reported through `ui dump` (P4.2) ----------
+    Wait-Until { ($script:a3 = AskDumpOrNull) -and $script:a3.ask -and "$($script:a3.ask.id)" -eq "$qid" } 20000 'the window renders the question' | Out-Null
+    $a3 = AskDumpOrNull
+    Check 'the_window_renders_the_open_question' ($null -ne $a3.ask -and "$($a3.ask.id)" -eq "$qid") ($a3.ask | ConvertTo-Json -Compress)
+    Check 'the_ask_is_on_screen' ($a3.ask.shown -eq $true) ($a3.ask | ConvertTo-Json -Compress)
+    Check 'the_ask_carries_the_question_text' ($a3.ask.question -match 'no git repo') $a3.ask.question
+    $vals = @($a3.ask.choices).value
+    Check 'the_ask_carries_its_choices' (($vals -contains 'yes') -and ($vals -contains 'no')) ($vals -join ',')
+    # No FOLDER anywhere in it (CLAUDE.md §3.1, operator directive, and this phase's rule 1). The
+    # choices are things the system already knows; if a path or a drive letter ever appears in a
+    # choice VALUE, the overlay has started becoming the file picker that was deliberately deleted.
+    # `-ge 1` first, deliberately: an EMPTY choice list contains no paths either, so without it
+    # this check stays green against a build with no ask at all -- which is the vacuous shape
+    # `dev prove` exists to catch, and it caught exactly this one.
+    Check 'the_ask_offers_no_filesystem_navigation' `
+        ($vals.Count -ge 1 -and @($vals | Where-Object { $_ -match '[\\/]' -or $_ -match '^[A-Za-z]:' }).Count -eq 0) ($vals -join ',')
+
+    # ---- IT IS NOT A MODAL, and that is checkable ------------------------------------------
+    # A MessageBox would block the dispatcher thread until somebody clicked it, so the ui pipe
+    # would stop answering -- which is precisely why a modal ask is PERMANENTLY untestable and
+    # why D-L4 rejected one. The window answering a dump WHILE a question is up is the proof
+    # that it did not become one. The grid is still there behind it, too: a question is laid
+    # over work that keeps running, not a machine that has stopped.
+    # Three things at once, because "not a modal" needs all three and any one alone is VACUOUS:
+    # the pipe still ANSWERS (a MessageBox blocks the dispatcher thread until somebody clicks,
+    # which in an automated capture is forever), the question is ON SCREEN at the same moment,
+    # and the WORK IS STILL THERE BEHIND IT -- same window, same input box, same feed. A dialog
+    # would satisfy none of the last two.
+    $live = AskDumpOrNull
+    Check 'the_ask_is_not_a_modal' `
+        ($null -ne $live -and $null -ne $live.ask -and $live.ask.shown -eq $true -and $null -ne $live.input -and $live.window.h -gt 0) `
+        ($(if ($null -eq $live) { 'the ui pipe stopped answering while a question was up' } else { "ask=$($null -ne $live.ask) h=$($live.window.h)" }))
+    (& $dodona ui screenshot --out "$out\ask-live.png" --workspace $ws3.Id) | Out-Null
+    Check 'the_ask_renders_to_a_screenshot' (Test-Path "$out\ask-live.png") ''
+
+    # ---- THE AFFORDANCE A PERSON CLICKS carries the value the verb takes (P4.3) -----------
+    # This is the mechanical link between the pixels and the answer path: the BUTTON in the live
+    # window is named `ask:<value>`, and `ui answer <value>` takes that same value into the same
+    # method (MainWindow.AnswerAsk). Without this, "one answer path" would be a claim about code
+    # nobody had looked at from the outside -- the exact shape of failure ui-use exists for.
+    Reset-UiWindow
+    $askWin = UiWindow "Dodona*$(Split-Path $root3 -Leaf)"
+    Check 'the_ask_window_is_findable' ($null -ne $askWin) "no window titled Dodona*$(Split-Path $root3 -Leaf)"
+    Check 'a_choice_is_a_real_button_a_person_can_click' ($null -ne (ByName $askWin 'ask:yes')) `
+        'no automation element named ask:yes -- the choices are not clickable affordances'
+    Check 'the_button_value_is_the_verb_value' `
+        (($null -ne (ByName $askWin 'ask:yes')) -and ($vals -contains 'yes')) ($vals -join ',')
+
+    # ---- ESCAPE PUTS IT DOWN, and loses nothing --------------------------------------------
+    # An overlay that cannot be put down is a modal in all but name, and §0.1's standing
+    # directive ("never hung, halted, stuck") applies to the operator's screen too. Dismissing is
+    # VIEW state: the row stays open, `dodona questions` still lists it, and it is still
+    # answerable. `ui key escape` lands in Window_KeyDown's own body, not a copy of it.
+    $esc = (& $dodona ui key escape --workspace $ws3.Id) | Out-String
+    Wait-Until { ($script:a3 = AskDumpOrNull) -and $script:a3.ask -and $script:a3.ask.shown -eq $false } 20000 'escape puts the ask down' | Out-Null
+    $a3 = AskDumpOrNull
+    Check 'escape_puts_the_ask_down' ($a3.ask.shown -eq $false -and $a3.ask.dismissed -eq $true) "esc='$($esc.Trim())' ask=$($a3.ask | ConvertTo-Json -Compress)"
+    Check 'putting_it_down_does_not_answer_it' ((Q3 "SELECT state FROM questions WHERE id=$qid") -eq 'open') (Q3 "SELECT state FROM questions WHERE id=$qid")
+
+    # ---- RENDER MODE 2 uses THE SAME ANSWER PATH (P4.3) ------------------------------------
+    # `ui answer` goes through MainWindow.AnswerAsk -- the method the button's Click handler
+    # calls -- which sends the daemon the same `answer` command `dodona answer` sends. One path,
+    # so there is no second implementation to leave untested. And the effect is the real one:
+    # `git init` plus the first commit, run by the SAME RepoInitOp the `repo-init` command runs.
+    $ans = (& $dodona ui answer yes --workspace $ws3.Id) | Out-String
+    Check 'the_ui_answer_verb_reaches_the_ask' ($ans -match 'answered') $ans.Trim()
+    Wait-Until { (Q3 "SELECT state FROM questions WHERE id=$qid") -eq 'answered' } 30000 'the question is answered in the store' | Out-Null
+    Check 'answering_records_the_answer_on_the_row' ((Q3 "SELECT state FROM questions WHERE id=$qid") -eq 'answered') (Q3 "SELECT state, answer FROM questions WHERE id=$qid")
+    Wait-Until { Test-Path "$root3\.git" } 30000 'the project became a git repo' | Out-Null
+    Check 'answering_yes_actually_creates_the_repo' (Test-Path "$root3\.git") "no .git in $root3"
+    Check 'the_repo_has_the_first_commit' ((Git3 @('rev-parse', 'HEAD')) -match '[0-9a-f]{40}') (Git3 @('rev-parse', 'HEAD'))
+    Check 'answering_is_announced_in_the_feed' ((Ask3 @('tail', '1')) -match 'git repository ready' -or (Q3 "SELECT COUNT(*) FROM pane_events WHERE body LIKE '%git repository ready%'") -ge 1) `
+        (Q3 "SELECT COUNT(*) FROM pane_events WHERE body LIKE '%git repository ready%'")
+
+    # ---- THE OVERLAY GOES AWAY BECAUSE THE ROW CLOSED, not because it was told ------------
+    # m3 doctrine: the UI owns nothing and a view is a replay of rows. Answering through ANY
+    # surface -- this verb, a click, `dodona answer`, another window -- closes the row, and every
+    # window over this workspace stops asking within one 250ms tick.
+    Wait-Until { ($script:a3 = AskDumpOrNull) -and $null -eq $script:a3.ask } 20000 'the overlay follows the row closing' | Out-Null
+    Check 'the_overlay_closes_when_the_row_closes' ($null -eq (AskDumpOrNull).ask) ((AskDumpOrNull).ask | ConvertTo-Json -Compress)
+
+    # ---- answering twice is refused, the same guard the concierge's questions have ---------
+    # ONE invocation, landed in a variable. The first draft called `answer` twice -- once for the
+    # condition and once for the detail -- and `answer` MUTATES: under a deliberate break the
+    # first call succeeded, so the assertion saw no error while the detail printed "already
+    # answered". A check whose detail is not the value it asserted on is a check that lies about
+    # why it failed.
+    $twice = Ask3 @('answer', "$qid", 'yes')
+    Check 'answering_the_same_question_twice_is_refused' ($twice -match 'error') $twice.Trim()
+    # A choice the question does not offer is REFUSED, never guessed. Asking exists because
+    # guessing was wrong; a fuzzy answer would put the guess back at the one moment the operator
+    # had actually told us the truth.
+    $bogus = Ask3 @('answer', "$qid", 'maybe')
+    Check 'an_answer_the_question_never_offered_is_refused' ($bogus -match 'error') $bogus.Trim()
+
+    # ---- and the ticket now works, which is what the operator was trying to do -------------
+    $tc2 = Ask3 @('ticket-create', '--title', 'polish the thing', '--claim', 'path:src/thing.cs')
+    Check 'the_ticket_the_question_was_blocking_now_works' ($tc2 -notmatch '^error' -and $tc2 -match 'ticket') $tc2.Trim()
+
+    (& $dodona ui close --workspace $ws3.Id) | Out-Null
+    Wait-Until { $null -eq (AskDumpOrNull) } 20000 'the ask window is gone' | Out-Null
+    (& $dodona stop-daemon --workspace $ws3.Id) | Out-Null
 }
 finally {
     # 'Continue' FOR THE WHOLE CLEANUP, and this is not a style choice -- it is the fix for a
@@ -631,7 +847,7 @@ finally {
     # nothing. 59 checks were computed and thrown away, silently, on 2026-08-19's baseline run.
     # A cleanup block must never be abortable by a diagnostic line.
     $ErrorActionPreference = 'Continue'
-    foreach ($proc in $uiProc, $shellUi, $bareUi, $daemon, $daemon2) {
+    foreach ($proc in $uiProc, $shellUi, $bareUi, $askUi, $daemon, $daemon2, $daemon3) {
         if ($proc -and -not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force } catch { } }
     }
     # The swap successor is a NEW pid the variables above never saw — resolve it by the
@@ -647,6 +863,7 @@ finally {
     # Both workspaces' shims, each resolved from its OWN workspace directory.
     Stop-WorkspaceShims $wsDir
     if ($ws2) { Stop-WorkspaceShims $ws2.Dir }
+    if ($ws3) { Stop-WorkspaceShims $ws3.Dir }
     Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
     # The shell's input box starts a concierge on demand (§4: boot-to-zero must not be a dead
     # end), so this suite is responsible for stopping it -- a concierge is machine-global, and

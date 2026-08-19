@@ -162,9 +162,19 @@ public partial class MainWindow : Window
                 {
                     "enter" or "return" => InputKey(false),
                     "shift+enter" or "shift+return" => InputKey(true),
-                    _ => $"error: unknown key '{k}' (enter | shift+enter)",
+                    // Escape lands in Window_KeyDown's own body, not a copy of it: putting the ask
+                    // down and closing the transcript overlay are one decision made in one place,
+                    // and a test that drove a parallel path would prove nothing about the key.
+                    "escape" or "esc" => EscapePressed(),
+                    _ => $"error: unknown key '{k}' (enter | shift+enter | escape)",
                 };
             }
+            // Pick an answer to the ask — the SAME method the button's Click handler calls
+            // (LOCATIONS-PLAN P4.3). The whole point of Phase 4 is that the live overlay and the
+            // headless dump are two renderings of one component with ONE answer path; a verb that
+            // talked to the daemon by itself would have built the second system.
+            case "answer":
+                return AnswerAsk(e.GetProperty("answer").GetString() ?? "");
             case "input-resize":
             {
                 var reset = e.TryGetProperty("reset", out var rs) && rs.ValueKind == JsonValueKind.True;
@@ -195,6 +205,27 @@ public partial class MainWindow : Window
             window = new { w = (int)Width, h = (int)Height, title = Title, active = IsActive, root = _root },
             pose = _vm.PoseName,
             overlay = _vm.OverlayPane?.Title,
+            // THE ASK (LOCATIONS-PLAN P4.2). `ui dump` had NO field for a dialog, which is why
+            // PickerWindow and StartLaneWindow are entirely untested — this key is what makes
+            // asking checkable at all, and it is the headless half of the one component: the
+            // overlay above renders these exact values.
+            //
+            // `null` when nothing is being asked, which is the ordinary state and the only state a
+            // ONE-project workspace ever has (there is nothing to ask, so no overlay may appear).
+            // `shown` is false while the operator has put it down with Escape — the ROW is still
+            // open and this still reports it, because "is anything being asked" and "is it on
+            // screen" are two honest questions and conflating them is how a dismissal starts
+            // looking like an answer.
+            ask = _vm.Ask is null ? null : (object)new
+            {
+                id = _vm.Ask.Id,
+                scope = _vm.Ask.Scope,
+                scopeLabel = _vm.Ask.ScopeLabel,
+                question = _vm.Ask.Question,
+                shown = _vm.AskVisible == Visibility.Visible,
+                dismissed = _vm.AskDismissed,
+                choices = _vm.Ask.Choices.Select(c => new { value = c.Value, label = c.Label, why = c.Why }).ToList(),
+            },
             // The workspace dimension §6 asks for. `workspace` is which one holds the grid,
             // `bands` is every other awake one, and `bootToZero` is the real state of having
             // none awake at all -- so a dump can answer "which of my lives is on screen"
@@ -342,6 +373,10 @@ public partial class MainWindow : Window
         {
             _vm.PoseName = null;
             _vm.OverlayPane = null;
+            // A posed ask is a fixture, not a question: leaving it up after `pose live` would put
+            // a decision on screen that no row anywhere is waiting for. The next tick sets the
+            // real one, if there is one.
+            _vm.Ask = null;
             if (_shell.FocusedPoller is Poller fp) fp.OverlayTitle = null;
             _shell.Invalidate();
             return "pose live (store polling resumed)";
@@ -638,8 +673,79 @@ public partial class MainWindow : Window
 
     void Window_KeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Escape && _vm.OverlayPane is not null) { SetOverlay(null); e.Handled = true; }
+        if (e.Key == Key.Escape) { EscapePressed(); e.Handled = true; }
         if (e.Key == Key.P && Keyboard.Modifiers == ModifierKeys.Control) { OpenPicker(); e.Handled = true; }
+    }
+
+    /// <summary>What Escape means, in one place — the key handler and `ui key escape` both land
+    /// here. The ask goes down FIRST because it is on top and it is the thing the operator most
+    /// wants out of the way; the row stays open, so nothing is lost and it comes back on the next
+    /// tick if they want it (MainVm.DismissAsk carries the reasoning).</summary>
+    string EscapePressed()
+    {
+        if (_vm.AskVisible == Visibility.Visible) { _vm.DismissAsk(); return "ask put down"; }
+        if (_vm.OverlayPane is not null) { SetOverlay(null); return "overlay off"; }
+        return "nothing to close";
+    }
+
+    /// <summary>
+    /// THE ANSWER PATH — the one both render modes share (LOCATIONS-PLAN P4.3, D-L4).
+    ///
+    /// A button click and `dodona ui answer <choice>` both arrive here, and here sends the SAME
+    /// daemon command the CLI's `dodona answer` / `dodona concierge-answer` sends. That is what
+    /// makes "only pixels diverge" a fact about the code: there is no second place that could
+    /// answer a question differently, and no surface that is answering a question the other
+    /// cannot.
+    ///
+    /// Pipe-addressed by the question's SCOPE (§6): a workspace question goes to that workspace's
+    /// control pipe, a group-scope one to the concierge's. Different ids come from different
+    /// tables, so guessing here would answer question 3 in the wrong store.
+    ///
+    /// A choice the question does not offer is REFUSED rather than sent. `new:NAME` is the one
+    /// exception and it is passed through, because the concierge accepts it and a candidate list
+    /// can never enumerate it — an overlay strictly less capable than the command line it replaces
+    /// is the divergence D-L4 exists to prevent.
+    /// </summary>
+    public string AnswerAsk(string choice)
+    {
+        if (_vm.Ask is not AskView ask) return "error: nothing is being asked";
+        var value = choice.Trim();
+        if (value.Length == 0) return "error: ui answer <choice>";
+        if (!Dodona.Ask.IsFreeForm(value))
+        {
+            var match = ask.Choices.FirstOrDefault(c => c.Value.Equals(value, StringComparison.OrdinalIgnoreCase))
+                     ?? ask.Choices.FirstOrDefault(c => c.Label.Equals(value, StringComparison.OrdinalIgnoreCase));
+            if (match is null)
+                return $"error: '{value}' is not one of: {string.Join(" / ", ask.Choices.Select(c => c.Value))}";
+            value = match.Value;
+        }
+
+        var req = new { cmd = "answer", id = ask.Id, answer = value };
+        var scope = ask.Scope;
+        // Off the UI thread, exactly like Send: a pipe round trip on the dispatcher thread would
+        // freeze the window while a daemon ran `git init`.
+        Task.Run(() =>
+        {
+            // A question outlives the process that asked it — that is the whole argument for it
+            // being a row (ConciergeStore's class note). So whichever daemon owns it may well be
+            // gone by the time the operator answers, and answering must bring it back rather than
+            // fail. Same start-on-demand doctrine the input box already follows (§13).
+            var reason = scope == Instance.ConciergeId
+                ? DaemonClient.EnsureConcierge()
+                : DaemonClient.Ensure(_root, scope);
+            var reply = reason ?? DaemonClient.Send(scope, req);
+            Dispatcher.BeginInvoke(() => _vm.Status = reply);
+        });
+        return $"answered {ask.Id}: {value}";
+    }
+
+    /// <summary>A click on a choice. One line, because everything it could get wrong lives in
+    /// <see cref="AnswerAsk"/> where the verb can reach it too.</summary>
+    void AskChoice_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not AskChoiceView c) return;
+        AnswerAsk(c.Value);
+        e.Handled = true;
     }
 
     /// <summary>The workspace switcher (Ctrl+P, or the header's name). Workspace NAMES

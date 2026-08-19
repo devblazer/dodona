@@ -229,7 +229,50 @@ sealed class Shell : IDisposable
             Bands = bands,
             FocusedWorkspace = focused?.Id ?? "",
             FocusedWorkspaceName = focused?.Name ?? "",
+            Ask = OpenAsk(focused),
         };
+    }
+
+    /// <summary>
+    /// The one question to render, or null (LOCATIONS-PLAN Phase 4). **Two stores, one row
+    /// shape** — the FOCUSED workspace's own open questions first, then the concierge's. They
+    /// must stay two stores: a workspace daemon may never read the concierge's (§2), and the
+    /// concierge's `questions` has no column for scope, so scope IS which store the row is in
+    /// (D-L11 and the plan's correction to P4.1). This method is the "normalised at the edge"
+    /// part; everything downstream sees one shape and one answer path.
+    ///
+    /// **Focused workspace first** because a question about the work in front of you is more
+    /// urgent than one about which life a sentence belonged to, and because a group-scope
+    /// question has by definition already been navigated past — the operator is looking at a
+    /// workspace. Oldest-first within each store: they are asked in the order the uncertainty
+    /// was created.
+    ///
+    /// **Exactly ONE at a time.** A stack of overlays is a queue of modals, and the affordance
+    /// this replaces was a single row in the feed. Answering one reveals the next on the
+    /// following tick, which is a rhythm rather than a pile.
+    ///
+    /// **A banded workspace's question is deliberately NOT shown.** It would put a decision
+    /// about a workspace the operator is not looking at on top of the one they are — and the
+    /// band already carries its badge, which is how a workspace says "you are needed here" (§6).
+    /// </summary>
+    AskSnap? OpenAsk(Open? focused)
+    {
+        try
+        {
+            if (focused is not null && focused.Reader.OpenQuestions().FirstOrDefault() is { } q)
+                return Build(focused.Id, focused.Name, q);
+            if (_concierge.OpenQuestions().FirstOrDefault() is { } cq)
+                // `[dodona]` is the label the merged feed already gives the concierge's own voice:
+                // a question about WHICH workspace belongs to no workspace's column by definition.
+                return Build(Instance.ConciergeId, "[dodona]", cq);
+        }
+        catch { /* a store mid-migration or a busy reader: nothing is being asked THIS tick */ }
+        return null;
+
+        static AskSnap Build(string scope, string label, StoreReader.QuestionR q) => new(
+            scope, label, q.Id, q.Input,
+            Dodona.Ask.Choices(q.Candidates)
+                .Select(c => new AskChoiceSnap(c.Value, c.Label, c.Why)).ToList());
     }
 
     string _lastJson = "";

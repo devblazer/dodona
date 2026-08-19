@@ -1250,3 +1250,101 @@ public class LiveProjectEvidenceTests
     public void Management_lanes_and_dead_rows_are_not_evidence() =>
         Assert.Empty(Projects.Live(Two, Lanes(), new[] { 3L, 4L }, new[] { 3L, 4L }, Nothing));
 }
+
+/// <summary>
+/// The asking component's pure half (docs/LOCATIONS-PLAN.md Phase 4, decision D-L4).
+///
+/// These are the only part of asking that is a FUNCTION, and they belong on the 1-second `unit`
+/// loop for a specific reason: the daemon WRITES `questions.candidates` and the window PARSES
+/// it, and the whole of D-L4 is that there is one component over one row. A parser that
+/// disagreed with the writer would put the divergence in the one place no acceptance check
+/// looks — inside a string.
+///
+/// `dev prove unit:&lt;check&gt;` REFUSES by design (`Do-Prove`): a pure function HEAD does not
+/// contain cannot be failed by HEAD, so the acceptance checks in `ui-use` are what carry the
+/// proof for this phase and these carry the algebra.
+/// </summary>
+public class AskTests
+{
+    [Fact]
+    public void The_daemons_own_candidates_parse_back_to_the_choices_it_meant()
+    {
+        var choices = Ask.Choices(Ask.RepoInitCandidates("shaders"));
+        Assert.Equal(new[] { "yes", "no" }, choices.Select(c => c.Value));
+        Assert.Contains("shaders", choices[0].Label);
+        Assert.False(string.IsNullOrEmpty(choices[1].Why));
+    }
+
+    /// <summary>The concierge's own shape, written by `Concierge.Ask` since before this file
+    /// existed: `[{id,name}]` with no `why`. One parser has to read both, or the overlay would
+    /// render group-scope questions with no buttons.</summary>
+    [Fact]
+    public void The_concierges_candidate_shape_parses_too()
+    {
+        var choices = Ask.Choices("""[{"id":"lighthouse-71c4","name":"lighthouse"},{"id":"work-5e07","name":"work"}]""");
+        Assert.Equal(2, choices.Count);
+        Assert.Equal("lighthouse-71c4", choices[0].Value);
+        Assert.Equal("lighthouse", choices[0].Label);
+        Assert.Null(choices[0].Why);
+    }
+
+    /// <summary>Rule 12 of this phase: a malformed question row must not take the window with
+    /// it, the same reasoning that makes a corrupt `ui.json` silently ignored — the box you
+    /// would use to complain lives inside the window. Every one of these is a blob the overlay
+    /// must survive, and none of them may throw.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("not json at all")]
+    [InlineData("{\"id\":\"yes\"}")]          // an object, not an array
+    [InlineData("[1,2,3]")]                    // an array of the wrong thing
+    [InlineData("[{}]")]                       // an object with neither half
+    [InlineData("[{\"id\":\"\",\"name\":\"\"}]")]
+    public void A_malformed_candidates_blob_is_no_choices_and_never_an_exception(string? blob)
+    {
+        Assert.Empty(Ask.Choices(blob));
+    }
+
+    /// <summary>Either half alone is answerable: a candidate with a name and no id is answered BY
+    /// the name (`dodona concierge-answer &lt;id&gt; &lt;name&gt;` has always accepted that).</summary>
+    [Fact]
+    public void Either_half_alone_still_renders_something_answerable()
+    {
+        Assert.Equal("work", Ask.Choices("""[{"name":"work"}]""").Single().Value);
+        Assert.Equal("w-1", Ask.Choices("""[{"id":"w-1"}]""").Single().Label);
+    }
+
+    [Fact]
+    public void An_answer_matches_by_value_or_by_label_case_insensitively()
+    {
+        var choices = Ask.Choices(Ask.RepoInitCandidates("shaders"));
+        Assert.Equal("yes", Ask.Match(choices, "YES")!.Value);
+        Assert.Equal("no", Ask.Match(choices, "Not Now")!.Value);
+    }
+
+    /// <summary>Asking exists because guessing was wrong. A near-miss answer must therefore be
+    /// refused rather than resolved — the one moment the operator actually told us the truth is
+    /// the worst possible moment to start inferring.</summary>
+    [Theory]
+    [InlineData("maybe")]
+    [InlineData("y")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void An_answer_the_question_never_offered_matches_nothing(string? picked)
+    {
+        Assert.Null(Ask.Match(Ask.Choices(Ask.RepoInitCandidates("shaders")), picked));
+    }
+
+    /// <summary>`new:NAME` is the concierge's "none of these, make one". A candidate list can
+    /// never enumerate it, so a strict match would make the overlay strictly less capable than
+    /// the command line it replaces — which is exactly the divergence D-L4 forbids.</summary>
+    [Fact]
+    public void New_name_is_free_form_and_passes_through()
+    {
+        Assert.True(Ask.IsFreeForm("new:harbour"));
+        Assert.True(Ask.IsFreeForm("  NEW:harbour"));
+        Assert.False(Ask.IsFreeForm("harbour"));
+        Assert.False(Ask.IsFreeForm(null));
+    }
+}

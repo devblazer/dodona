@@ -431,5 +431,75 @@
                 </Grid>
             </Border>
         </Border>
+
+        <!-- ══ THE ASK (docs/LOCATIONS-PLAN.md Phase 4, decision D-L4) ══
+             One component, two render modes: these pixels, and `ui dump`'s `ask` key. Both read
+             the SAME open `questions` row and both answer through the SAME method
+             (MainWindow.AnswerAsk → the daemon's `answer` command), so only pixels diverge.
+
+             NOT A MODAL, and that is the decision rather than a style choice: a test window is
+             forbidden from producing one (see MainWindow.IsTestWindow), which would make a modal
+             ask permanently untestable — and `PickerWindow` and `StartLaneWindow` being dialogs
+             is precisely why they have no coverage at all.
+
+             NOT A FOLDER PICKER either (CLAUDE.md §3.1, operator directive). The choices are
+             NAMES the system already knows — projects and workspaces — never a filesystem tree
+             to navigate, never a Browse button, never a path in chrome. If this ever grows a
+             folder list, it has become the thing that was deliberately deleted in 2026-08-18.
+
+             Last in the Grid, so it renders ABOVE the transcript overlay: a question is a
+             decision the operator has to make, and a maximised transcript is something they were
+             reading. Escape puts it down without answering (MainVm.DismissAsk) — the row stays
+             open and the feed still carries it, because an overlay that cannot be put down is a
+             modal in all but name. -->
+        <Border Visibility="{Binding AskVisible}" Background="#E6121417">
+            <Border MaxWidth="620" VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Background="#FF1F2227" CornerRadius="8" BorderBrush="#FFC79A63" BorderThickness="2"
+                    Padding="20" AutomationProperties.Name="ask-overlay">
+                <StackPanel>
+                    <!-- Dodona's own voice: the trunk colour and a round chip, the same way a
+                         system feed row says "this is not a seventh lane" (Ink.System). -->
+                    <DockPanel Margin="0,0,0,12">
+                        <Ellipse Width="10" Height="10" Fill="#FFC79A63" VerticalAlignment="Center"/>
+                        <TextBlock DockPanel.Dock="Right" Text="Esc to put this down — it stays in the feed"
+                                   FontSize="11" Foreground="#FF8A9099" VerticalAlignment="Center"
+                                   HorizontalAlignment="Right"/>
+                        <TextBlock Text="{Binding Ask.ScopeLabel}" Margin="8,0,0,0" FontSize="11"
+                                   Foreground="#FF8A9099" VerticalAlignment="Center"
+                                   Visibility="{Binding Ask.ScopeVisibility}"/>
+                    </DockPanel>
+                    <TextBlock Text="{Binding Ask.Question}" FontSize="17" TextWrapping="Wrap"
+                               Foreground="#FFE6ECF4"/>
+                    <ItemsControl ItemsSource="{Binding Ask.Choices}" Margin="0,16,0,0">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <!-- A BUTTON, not a line of text telling the operator to go and
+                                     type a command. "undo: dodona lane-stop 3" printed at a GUI
+                                     user was this project's original sin, and P4.5 is the same
+                                     mistake one layer down: a refusal that instructed. -->
+                                <Button Margin="0,0,0,8" Padding="12,8" HorizontalContentAlignment="Left"
+                                        Background="#FF2A3037" Foreground="#FFE6ECF4" BorderBrush="#FF3A424C"
+                                        BorderThickness="1" Cursor="Hand"
+                                        AutomationProperties.Name="{Binding AutomationName}"
+                                        Click="AskChoice_Click">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Label}" FontSize="14" TextWrapping="Wrap"/>
+                                        <TextBlock Text="{Binding Why}" FontSize="11" Margin="0,3,0,0"
+                                                   Foreground="#FF8A9099" TextWrapping="Wrap"
+                                                   Visibility="{Binding WhyVisibility}"/>
+                                    </StackPanel>
+                                </Button>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <!-- A candidates blob that will not parse still renders the question, and says
+                         how to answer it. Silence would be the silent degrade CLAUDE.md §3 calls
+                         a bug. -->
+                    <TextBlock Visibility="{Binding Ask.NoChoicesVisibility}" FontSize="11"
+                               Foreground="#FFE0A94E" TextWrapping="Wrap" Margin="0,12,0,0"
+                               Text="This question offered no readable choices — answer it in words with `dodona answer`."/>
+                </StackPanel>
+            </Border>
+        </Border>
     </Grid>
 </Window>
