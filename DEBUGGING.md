@@ -265,7 +265,11 @@ not badge, toast, or set presence — blocked-on-you is code-derived from ticket
 today, and handing a small model the badge is a policy decision `docs/LANE-LIFECYCLE.md`
 §4 has not taken.
 
-## The schema (v7 — `PRAGMA user_version`)
+## The schema (v9 — `PRAGMA user_version`)
+
+*(This heading said v7 while the store was on v8. It is `Ver.Schema` in
+`src/Dodona/Ver.cs` and the highest `PRAGMA user_version` in `Store.Migrate`; those two
+are the authority and they must agree.)*
 
 - **`lanes`** — `id, title, state (alive|unreachable|dead), pipe_name, session_id,
   created_ts`. The session_id is the resume handle; the pipe is the reattach handle.
@@ -279,18 +283,37 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   applies to announcements only (the decision feed persists until acked — acked rows
   grey out, never disappear).
 - **`tickets`** — `id, lane_id, title, branch (ticket/<id>), worktree, state
-  (open|landed|abandoned), merge_mode (on-approval|auto), approved, repo, created_ts,
-  landed_ts`. A branch is a thing that lands; that is what a ticket is. `repo` is the
-  workspace-relative repository name, `.` for the workspace root itself.
+  (open|landed|abandoned), merge_mode (on-approval|auto), approved, repo, repo_path,
+  created_ts, landed_ts`. A branch is a thing that lands; that is what a ticket is.
+  **Two repository columns, and the distinction is load-bearing (v9, P0.1):** `repo` is
+  the workspace-relative DISPLAY name (`.` for the workspace root itself), frozen at
+  creation because the ticket's `claims` rows were written relative to it — an open
+  ticket's claim namespace must not move underneath it. `repo_path` is the IDENTITY: the
+  canonical path (`Repos.Key`, i.e. `Instance.Canonical`), which is what every operation
+  on a ticket's repository resolves through (`Daemon.RepoOf`). Empty only on a pre-v9 row
+  whose name resolved to nothing at migration time — those are announced, never dropped.
+  The reason: `repo` is recomputed by `Repos.Discover` on every call, by a rule that
+  changes with project count, so the same repository is `.` in a one-project workspace and
+  `proj` once a second project is attached.
 - **`claims`** — `ticket_id, kind (path|newfile|subtree|symbol), value`. Deleted in the
   same transaction that marks the ticket landed — a lingering claim row for a landed
   ticket is a bug. Values are normalized: forward slashes, lowercase, no leading slash.
-- **`merge_token`** — one row **per repository**, keyed by `repo`: `holder_ticket,
-  generation, granted_ts, expires_ts, main_sha`. Rows appear on first use. Expired
-  holders are reclaimed at the next request; `generation` increments per grant.
-  `main_sha` is what that repository's main was when the grant happened.
-- **`token_queue`** — FIFO of tickets waiting, `repo`-scoped: the head of `engine`'s
-  queue is independent of `tools`'.
+- **`merge_token`** — one row **per repository**, keyed by **`repo_path` COLLATE NOCASE**
+  (v9): `repo` (display only, refreshed on read), `holder_ticket, generation, granted_ts,
+  expires_ts, main_sha`. Rows appear on first use. Expired holders are reclaimed at the
+  next request; `generation` increments per grant. `main_sha` is what that repository's
+  main was when the grant happened.
+  **It was keyed by `repo` until v9, and that was a live double-fast-forward bug**: the
+  display name changes with project count, so one repository could hold a `.` row and a
+  `proj` row at once and two tickets could each be told `granted` over the same `main`.
+  Binary collation was a second route to the same thing (`Engine` vs `engine` after a
+  folder rename), which is why every key column is `COLLATE NOCASE`.
+  A key of the form `#unresolved:<name>` is a v6-era row whose name no longer resolves to
+  any repository in the workspace. It is deliberately unmergeable and cannot be granted;
+  `repo_path_unresolved` in `events` names it.
+- **`token_queue`** — FIFO of tickets waiting, scoped by `repo_path` (same identity as the
+  token, v9; `repo` is retained for display): the head of `engine`'s queue is independent
+  of `tools`'.
 - **`routing_decisions`** — every routed input (§4/§5): `ts, input, tier, target_lane,
   delivered_lane, confidence, retargeted, undone`. `tier` is the VERDICT that decided it:
   `prefix` | `generic` | `addendum` | `new-task` | `first` | `focus` | `ask`. A row with
@@ -319,7 +342,13 @@ today, and handing a small model the badge is a policy decision `docs/LANE-LIFEC
   `ticket_approved`, `token_granted`, `token_queued`, `token_refused_unapproved`,
   `token_released`, `token_expired_reclaimed`, `claim_backstop_refused`, `landed`,
   `land_refused`, `land_inconsistent`, `verify_green`, `verify_red`, `worktree_pruned`,
-  `worktree_prune_failed`, `ticket_git_failed`. Routing kinds: `classified` (with
+  `worktree_prune_failed`, `ticket_git_failed`, `claim_extend_refused` (a `claim-extend`
+  whose claims were outside the ticket's own repository), `token_refused_no_repo` (the
+  ticket's repository has left the workspace — the token is refused rather than aimed at
+  the first project). Repo-identity kinds (v9): `store_backed_up` /
+  `store_backup_failed` (a migration copied the store first, and where to), plus
+  `repo_path_stamped`, `merge_token_merged` (**two token rows over one `main` were folded
+  into one — that is the incident, on disk**) and `repo_path_unresolved`. Routing kinds: `classified` (with
   latency, kind and reason), `classified_escalated` (the expensive tier was asked),
   `routed_addendum` (with its `direct`/`tweak` reason), `routed_new_task`,
   `routing_clarification` (held and asked — **nothing was delivered**),

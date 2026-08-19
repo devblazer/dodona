@@ -153,6 +153,108 @@ sealed class Daemon
 
     Config ConfigFor(string repoName) => Config.For(_primary, RepoPath(repoName));
 
+    /// <summary>
+    /// The repository a ticket belongs to, resolved by IDENTITY (P0.1). Everything that acts
+    /// on a ticket's repository goes through here: the gate deployment, claim-check, the merge
+    /// backstop and the land.
+    ///
+    /// Two halves, and both matter:
+    ///
+    /// **Located by path.** `Repos.ByName(repos, t.Repo)` was the old answer and it silently
+    /// stopped working the moment a second project was attached, because the naming rule
+    /// changes with project count: the pre-existing ticket still says "." while discovery now
+    /// calls that repository `proj`, so the lookup returned null — and every caller had a
+    /// different bad fallback for null. The gate skipped redeployment (`continue`), so
+    /// enforcement layer 1 quietly died; `LandOp` fell back to `_primary`, so a fast-forward
+    /// could be executed against THE WRONG REPOSITORY. And when `leaf~2` was recycled onto a
+    /// different folder, the name RESOLVED — to a repo the ticket had never been in.
+    ///
+    /// **Named as it was born.** The returned ref carries the ticket's own recorded name, not
+    /// the live one, because <see cref="RepoRef.ClaimPrefix"/> is derived from it and the
+    /// ticket's claims are stored workspace-relative to the name in force when they were
+    /// written. An open ticket's claim namespace must not move underneath it; where it IS is a
+    /// lookup, what it is CALLED is history. (Reconciling names across tickets is Phase 0b.)
+    ///
+    /// Null means "this workspace no longer contains that repository" — a real answer, and
+    /// every caller must say so out loud rather than substitute a folder of its own choosing.
+    /// </summary>
+    RepoRef? RepoOf(Store.TicketRow t)
+    {
+        var repos = Repositories();
+        if (t.RepoPath.Length > 0)
+            return Repos.ByPath(repos, t.RepoPath) is RepoRef byPath ? byPath with { Name = t.Repo } : null;
+        // A pre-schema-9 row that StampRepoPaths could not resolve: the name is all there is.
+        return Repos.ByName(repos, t.Repo);
+    }
+
+    /// <summary>The merge token's key for a ticket — read off the TICKET ROW, not from a
+    /// lookup, so a repository that has been renamed, re-prefixed or detached cannot make one
+    /// ticket ask for a second token over the same `main` (P0.2). The `#unresolved:` form is
+    /// for a pre-v9 row that never resolved: it keeps that ticket's own token row rather than
+    /// letting it share a real repository's by accident.</summary>
+    Store.RepoId TokenIdOf(Store.TicketRow t) =>
+        new(t.RepoPath.Length > 0 ? t.RepoPath
+            : RepoOf(t) is RepoRef r ? Repos.Key(r.Path) : "#unresolved:" + t.Repo,
+            t.Repo);
+
+    /// <summary>
+    /// Finish schema 9 (P0.3): stamp every pre-v9 ticket and token row with the repository
+    /// PATH its name resolves to, and announce the backup that made the migration undoable.
+    ///
+    /// It runs here rather than in <c>Store.Migrate</c> because resolving a name needs the
+    /// registry's member list and a filesystem walk, and the store deliberately knows about
+    /// neither. Idempotent: on an already-stamped store it is two indexed scans.
+    ///
+    /// Nothing is dropped and nothing is guessed. A name that resolves to no repository keeps
+    /// its row and is ANNOUNCED — the operator has to be able to see that ticket 4 is stranded,
+    /// because the alternative (letting it resolve to whatever the name means today) is how a
+    /// recycled `leaf~2` inherits another repository's merge token.
+    /// </summary>
+    void MigrateRepoIdentity()
+    {
+        if (_store.PreMigrationBackup is string bak)
+        {
+            _store.Event("store_backed_up", null, $"cold start: schema v{_store.SchemaAtOpen} -> v{Ver.Schema}, backup {bak}");
+            Announce($"[dodona] store migrated v{_store.SchemaAtOpen} -> v{Ver.Schema}; backed up first — undo: dodona stop-daemon, then restore {bak} over store.db");
+        }
+        else if (_store.PreMigrationBackupError is string err)
+        {
+            _store.Event("store_backup_failed", null, $"schema v{_store.SchemaAtOpen} -> v{Ver.Schema}: {err}");
+            Announce($"[dodona] store migrated v{_store.SchemaAtOpen} -> v{Ver.Schema} but COULD NOT BE BACKED UP FIRST ({err}) — the migration is not undoable");
+        }
+
+        try
+        {
+            var repos = Repositories();
+            var members = Members();
+            var report = _store.StampRepoPaths(name =>
+            {
+                if (Repos.ByName(repos, name) is RepoRef r) return Repos.Key(r.Path);
+                // "." only ever existed while the workspace had exactly ONE project and that
+                // project WAS the repository (Repos.Under's empty prefix, which is what keeps
+                // the one-project case byte-identical). Attaching a second project renames it,
+                // after which "." resolves to nothing at all — so the historical meaning is
+                // honoured explicitly here. This is the case that repairs the live defect:
+                // the old ticket's "." and the new ticket's `proj` fold onto one token row.
+                if (name is "." or "" && members.Count > 0 && Repos.ByPath(repos, members[0].Path) is RepoRef first)
+                    return Repos.Key(first.Path);
+                return null;
+            });
+            foreach (var line in report.Stamped) _store.Event("repo_path_stamped", null, line);
+            foreach (var line in report.Merged)
+            {
+                _store.Event("merge_token_merged", null, line);
+                Announce($"[dodona] {line}");
+            }
+            foreach (var line in report.Unresolved)
+            {
+                _store.Event("repo_path_unresolved", null, line);
+                Announce($"[dodona] repo identity: {line}");
+            }
+        }
+        catch (Exception ex) { _store.Event("repo_path_stamp_failed", null, ex.Message); }
+    }
+
     Daemon(string primary, string wsId, string wsName, string ctlPipe, Store store)
     {
         _primary = primary;
@@ -239,6 +341,7 @@ sealed class Daemon
             (predecessorPid > 0 ? $" successor_of={predecessorPid}" : ""));
         Console.WriteLine($"dodona daemon: workspace {_wsName} ({_instanceId}), ctl pipe {_ctlPipe}, " +
                           $"pid {Environment.ProcessId}, build {Ver.Build}, store {Paths.Store(_instanceId)}");
+        MigrateRepoIdentity();
 
         // Reconcile (design §12): rows are the claim; the pipe is the proof. A successor
         // is adopting shims the predecessor only just let go of, so give them room.
@@ -395,11 +498,24 @@ sealed class Daemon
         // ticket buys a gate that always points at the build actually running.
         try
         {
-            var repos = Repositories();
             foreach (var t in _store.Tickets().Where(t => t.State == "open" && t.Worktree.Length > 0 && Directory.Exists(t.Worktree)))
             {
-                var repo = Repos.ByName(repos, t.Repo);
-                if (repo is null) { _store.Event("gate_redeploy_failed", null, $"ticket {t.Id}: repo '{t.Repo}' not found"); continue; }
+                // RESOLVED BY PATH, AND NEVER SKIPPED (P0.1). This read `Repos.ByName(repos,
+                // t.Repo)` and `continue`d on null — so the moment a second project was
+                // attached and the repository stopped being called ".", every pre-existing
+                // ticket lost gate redeployment silently, GcOldBuilds deleted the exe its
+                // stale gate invoked, and enforcement layer 1 failed OPEN. A `continue` here
+                // is the fail-open, so there is not one any more: a repository that has left
+                // the workspace still gets its gate rewritten from the recorded path, because
+                // a gate is a restriction and deploying one can only ever be safer.
+                var repo = RepoOf(t)
+                        ?? (t.RepoPath.Length > 0 ? new RepoRef(t.Repo, t.RepoPath, t.RepoPath) : null);
+                if (repo is null)
+                {
+                    _store.Event("gate_redeploy_failed", null, $"ticket {t.Id}: repo '{t.Repo}' resolves to nothing and no path was recorded");
+                    Announce($"[dodona] ticket {t.Id}'s claim gate could not be redeployed: repo '{t.Repo}' resolves to nothing — that agent is UNGATED until it is fixed");
+                    continue;
+                }
                 try { DeployGate(t.Worktree, t.Id, repo); _store.Event("gate_redeployed", null, $"ticket {t.Id}: {t.Worktree}"); }
                 catch (Exception ex) { _store.Event("gate_redeploy_failed", null, $"ticket {t.Id}: {ex.Message}"); }
             }
@@ -726,6 +842,22 @@ sealed class Daemon
                         w.WriteLine("##exit 1");
                         break;
                     }
+                    // NAMING THE REPO USED TO SKIP CLAIM VALIDATION ENTIRELY (P0.6). The
+                    // inference branch below has always refused claims that span repositories,
+                    // because a ticket lands by fast-forwarding ONE main — but `--repo X` went
+                    // straight past it, so `--repo tools --claim path:engine/sim.cs` created a
+                    // ticket in `tools` holding a claim over `engine`. Everything downstream
+                    // then disagreed about which repository it was talking about: the gate
+                    // prefixed the claim with `tools/`, the merge backstop diffed `tools`, and
+                    // the land fast-forwarded `tools` while the agent edited `engine`.
+                    var mismatch = Repos.CheckClaims(repos, repo, claims);
+                    if (mismatch is not null)
+                    {
+                        _store.Event("ticket_repo_unresolved", null, $"'{title}': {mismatch}");
+                        w.WriteLine($"error: {mismatch}");
+                        w.WriteLine("##exit 1");
+                        break;
+                    }
                 }
                 else
                 {
@@ -776,7 +908,9 @@ sealed class Daemon
                     break;
                 }
 
-                var (id, conflicts) = _store.TicketCreate(null, title, mode, repo.Name, claims);
+                // Both: the display name the claims were written relative to, and the canonical
+                // path that says WHICH repository this is whatever it gets called later (P0.1).
+                var (id, conflicts) = _store.TicketCreate(null, title, mode, repo.Name, Repos.Key(repo.Path), claims);
                 if (id < 0)
                 {
                     _store.Event("claim_conflict", null, $"'{title}': {string.Join(" | ", conflicts)}");
@@ -820,7 +954,7 @@ sealed class Daemon
                 // one repository — so a path resolved against the worktree must be put
                 // back into workspace terms before it can be matched. For a single-repo
                 // project the prefix is empty and this is exactly the old behaviour.
-                var ticketRepo = Repos.ByName(Repositories(), t.Repo);
+                var ticketRepo = RepoOf(t);
                 var prefix = ticketRepo?.ClaimPrefix ?? "";
                 var full = Path.GetFullPath(path, t.Worktree).Replace('\\', '/');
                 string? rel = null;
@@ -854,7 +988,44 @@ sealed class Daemon
             {
                 var tid = e.GetProperty("ticket").GetInt64();
                 var specs = e.GetProperty("claims").EnumerateArray().Select(x => x.GetString()!).ToList();
-                var claims = specs.Select(Claims.Parse).Where(p => p is not null).Select(p => p!.Value).ToList();
+                // THIS USED TO BE `.Where(p => p is not null)` AND NOTHING ELSE (P0.5): every
+                // spec it could not parse was dropped in silence and the reply was still
+                // "extended ticket N" with exit 0 — so `--claim src/water` (no `path:`) widened
+                // nothing while telling the agent it had. All of them unparseable meant an
+                // empty list, an insert of nothing, and a success message. `ticket-create` has
+                // always refused a bad spec by name; this now does too.
+                var claims = new List<(string, string)>();
+                foreach (var s in specs)
+                {
+                    var parsed = Claims.Parse(s);
+                    if (parsed is null) { w.WriteLine($"error: bad claim spec '{s}' (use path:|new:|subtree:|symbol:)"); w.WriteLine("##exit 1"); return false; }
+                    claims.Add(parsed.Value);
+                }
+                if (claims.Count == 0) { w.WriteLine("error: at least one --claim required"); w.WriteLine("##exit 1"); break; }
+
+                // AND IT HAD NO REPOSITORY AT ALL. `Store.ClaimExtend` takes a ticket id, so an
+                // extension could widen an open ticket into a DIFFERENT repository than the one
+                // it lands in — the same hole P0.6 leaves in `ticket-create --repo`, reached
+                // from the other side. A ticket's repo is fetched here and the new claims are
+                // held to it.
+                var xt = _store.Ticket(tid);
+                if (xt is null || xt.State != "open") { w.WriteLine($"error: ticket {tid} not open"); w.WriteLine("##exit 1"); break; }
+                var xRepo = RepoOf(xt);
+                if (xRepo is null)
+                {
+                    w.WriteLine($"error: ticket {tid}'s repository is no longer in this workspace ({(xt.RepoPath.Length > 0 ? xt.RepoPath : $"'{xt.Repo}'")})");
+                    w.WriteLine("##exit 1");
+                    break;
+                }
+                var xMismatch = Repos.CheckClaims(Repositories(), xRepo, claims);
+                if (xMismatch is not null)
+                {
+                    _store.Event("claim_extend_refused", null, $"ticket {tid}: {xMismatch}");
+                    w.WriteLine($"error: {xMismatch}");
+                    w.WriteLine("##exit 1");
+                    break;
+                }
+
                 var conflicts = _store.ClaimExtend(tid, claims);
                 if (conflicts.Count > 0)
                 {
@@ -925,8 +1096,13 @@ sealed class Daemon
                 foreach (var r in found)
                 {
                     var cfg = Config.For(_primary, r.Path);
-                    var tok = _store.TokenRead(r.Name);
-                    var open = _store.Tickets().Count(t => t.Repo == r.Name && t.State == "open");
+                    var key = Repos.Key(r.Path);
+                    var tok = _store.TokenRead(new Store.RepoId(key, r.Name));
+                    // Counted by identity, not by name: a ticket created before this repository
+                    // was renamed (or re-prefixed by an attach) is still one of its tickets.
+                    var open = _store.Tickets().Count(t => t.State == "open" &&
+                        (t.RepoPath.Length > 0 ? t.RepoPath.Equals(key, StringComparison.OrdinalIgnoreCase)
+                                               : t.Repo.Equals(r.Name, StringComparison.OrdinalIgnoreCase)));
                     w.WriteLine($"{r.Name,-14} main={cfg.Main,-8} open-tickets={open}  token={(tok.Holder?.ToString() ?? "free"),-6} verify={cfg.Verify.Length} step(s)  {r.Path}");
                 }
                 break;
@@ -957,9 +1133,23 @@ sealed class Daemon
                 // Merge-time backstop (§6 layer 2): diff the branch against its merge
                 // base; any touched path outside the claim refuses the token. This
                 // catches everything the fail-open hook gate cannot see.
-                var reqRepo = Repos.ByName(Repositories(), t.Repo);
-                var reqPath = reqRepo?.Path ?? _primary;
-                var reqPrefix = reqRepo?.ClaimPrefix ?? "";
+                // REFUSED, NOT SUBSTITUTED. `reqRepo?.Path ?? _primary` meant a ticket whose
+                // repository had left the workspace got its branch diffed against the FIRST
+                // project's main — a diff of two unrelated histories, which is either every
+                // file or none, and either way the backstop stopped answering the question it
+                // was asked. There is no safe default for "which repository is this", so the
+                // token is refused and the reason names the path that was recorded.
+                var reqRepo = RepoOf(t);
+                if (reqRepo is null)
+                {
+                    _store.Event("token_refused_no_repo", null, $"ticket {tid}: repo '{t.Repo}' ({t.RepoPath}) is not in this workspace");
+                    w.WriteLine($"refused: ticket {tid}'s repository is no longer in this workspace ({(t.RepoPath.Length > 0 ? t.RepoPath : $"'{t.Repo}'")})");
+                    w.WriteLine("         re-attach it (dodona workspace-attach --member <path>) or abandon the ticket");
+                    w.WriteLine("##exit 1");
+                    break;
+                }
+                var reqPath = reqRepo.Path;
+                var reqPrefix = reqRepo.ClaimPrefix;
                 var reqCfg = Config.For(_primary, reqPath);
                 var (dc, diff) = Git.Run(reqPath, "diff", "--name-only", $"{reqCfg.Main}...{t.Branch}");
                 if (dc == 0 && diff.Length > 0)
@@ -979,7 +1169,7 @@ sealed class Daemon
                     }
                 }
 
-                var (status, gen, pos) = _store.TokenRequest(tid, t.Repo, lease, () => Git.Sha(reqPath, reqCfg.Main));
+                var (status, gen, pos) = _store.TokenRequest(tid, TokenIdOf(t), lease, () => Git.Sha(reqPath, reqCfg.Main));
                 w.WriteLine(status == "granted"
                     ? $"granted ticket {tid} generation {gen}{RepoTag(t.Repo)}"
                     : $"queued ticket {tid} position {pos}{RepoTag(t.Repo)}");
@@ -991,7 +1181,7 @@ sealed class Daemon
                 var lease = e.TryGetProperty("lease", out var ls) ? ls.GetInt32() : 120;
                 var rt = _store.Ticket(tid);
                 if (rt is null) { w.WriteLine($"error: no ticket {tid}"); break; }
-                if (_store.TokenRenew(tid, rt.Repo, lease)) w.WriteLine($"renewed ticket {tid}");
+                if (_store.TokenRenew(tid, TokenIdOf(rt), lease)) w.WriteLine($"renewed ticket {tid}");
                 else { w.WriteLine($"refused: ticket {tid} is not the live holder"); w.WriteLine("##exit 1"); }
                 break;
             }
@@ -1000,7 +1190,7 @@ sealed class Daemon
                 var tid = e.GetProperty("ticket").GetInt64();
                 var rt = _store.Ticket(tid);
                 if (rt is null) { w.WriteLine($"error: no ticket {tid}"); break; }
-                _store.TokenRelease(tid, rt.Repo);
+                _store.TokenRelease(tid, TokenIdOf(rt));
                 w.WriteLine("released");
                 break;
             }
@@ -1009,7 +1199,14 @@ sealed class Daemon
                 // One token per repository: they land in parallel, so they report in
                 // parallel too.
                 var tokens = _store.TokensAll();
-                if (tokens.Count == 0) tokens = new List<Store.TokenRow> { _store.TokenRead(".") };
+                if (tokens.Count == 0)
+                {
+                    // Nothing has ever been landed here. Materialise the one for the repository
+                    // this workspace has, so the reading is a reading rather than a blank.
+                    var only = Repositories().FirstOrDefault();
+                    tokens = new List<Store.TokenRow> { _store.TokenRead(
+                        only is null ? new Store.RepoId("#unresolved:.", ".") : new Store.RepoId(Repos.Key(only.Path), only.Name)) };
+                }
                 var manyRepos = tokens.Any(x => x.Repo != ".");
                 foreach (var tok in tokens)
                     w.WriteLine($"{(manyRepos ? $"repo={tok.Repo,-12} " : "")}holder={(tok.Holder?.ToString() ?? "none")} generation={tok.Generation} expires={tok.ExpiresTs ?? "-"} main={(tok.MainSha is { Length: >= 8 } s ? s[..8] : "-")}");
@@ -2608,12 +2805,25 @@ sealed class Daemon
         var t = _store.Ticket(tid);
         if (t is null || t.State != "open") return $"refused: ticket {tid} not open";
 
-        var repo = Repos.ByName(Repositories(), t.Repo);
-        var repoPath = repo?.Path ?? _primary;
+        // THE FALLBACK HERE USED TO BE `_primary`, AND IT COULD FAST-FORWARD THE WRONG MAIN.
+        // `Repos.ByName(repos, t.Repo)` returns null as soon as the naming rule moves under an
+        // open ticket — attach a second project and every "." ticket resolves to nothing — and
+        // the land then ran `git merge --ff-only ticket/N` in the FIRST PROJECT'S repository.
+        // A ref advance is the one irreversible act in this system, so there is no default for
+        // "which repository": it is the recorded one or it is a refusal (P0.1).
+        var repo = RepoOf(t);
+        if (repo is null)
+        {
+            _store.Event("land_refused", null, $"ticket {tid}: repo '{t.Repo}' ({t.RepoPath}) is not in this workspace");
+            return $"refused: ticket {tid}'s repository is no longer in this workspace " +
+                   $"({(t.RepoPath.Length > 0 ? t.RepoPath : $"'{t.Repo}'")}) — re-attach it or abandon the ticket";
+        }
+        var repoPath = repo.Path;
         var cfg = Config.For(_primary, repoPath);
         var where = t.Repo == "." ? "project root" : $"repository {t.Repo}";
 
-        var tok = _store.TokenRead(t.Repo);
+        var tokenId = TokenIdOf(t);
+        var tok = _store.TokenRead(tokenId);
         if (tok.Holder != tid) { _store.Event("land_refused", null, $"ticket {tid}: not holder of {t.Repo} (holder={tok.Holder?.ToString() ?? "none"})"); return $"refused: ticket {tid} does not hold {t.Repo}'s merge token"; }
         if (tok.ExpiresTs is not null && DateTime.Parse(tok.ExpiresTs).ToUniversalTime() < DateTime.UtcNow)
         { _store.Event("land_refused", null, $"ticket {tid}: lease expired"); return "refused: merge-token lease expired; re-request"; }
@@ -2628,7 +2838,7 @@ sealed class Daemon
             return $"refused: not fast-forward — rebase {t.Branch} onto {cfg.Main} and re-verify first. {mergeOut}";
         }
 
-        if (!_store.LandCommit(tid, t.Repo, out var reason))
+        if (!_store.LandCommit(tid, tokenId, out var reason))
         {
             // Merge advanced main but the fence refused in the same instant (lease raced
             // out). Reconcile-from-git heals: branch is an ancestor of main.

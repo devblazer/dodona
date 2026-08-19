@@ -26,7 +26,7 @@ namespace Dodona;
 /// </summary>
 static class Ver
 {
-    public const int Schema = 8;
+    public const int Schema = 9;   // v9: repo identity is a path, not a display name (P0.1/P0.2)
     public const int ShimProtocol = 1;
 
     public static string Build { get; } = Compute();

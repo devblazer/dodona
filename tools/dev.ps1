@@ -926,10 +926,36 @@ function Do-Prove {
         # still be the one that runs. Also drops the previous proof's <suite>-output directories.
         Remove-Item "$wt\tests\*" -Recurse -Force -ErrorAction SilentlyContinue
         Copy-Item "$repo\tests\*" "$wt\tests\" -Recurse -Force
+        # WHAT GETS BUILT DEPENDS ON WHAT IS BEING PROVED, and that is not an optimisation.
+        #
+        # `tests\` comes from the working tree and `src\` comes from HEAD, so a new UNIT test that
+        # names a method the fix introduces cannot compile against HEAD -- by construction, not by
+        # mistake. Building the whole solution made that a hard `HEAD does not build` abort, which
+        # blocked proving EVERY acceptance check in the same change: the lane that added
+        # `Repos.Key` and an m1 check could prove neither, and the failure named nine CS0117s in a
+        # test project that no acceptance suite even loads. Measured on P0: 12 checks, 2 suites,
+        # zero verdicts.
+        #
+        # An acceptance suite runs the three EXECUTABLES. So unless `unit` is one of the suites
+        # being proved, Dodona.Tests is not built at all and its compile errors are irrelevant.
+        # When `unit` IS being proved, the solution is built and a new-API test still cannot be
+        # judged -- that limit is inherent, and it is stated in the abort below rather than left
+        # for the next reader to rediscover from a CS0117.
+        $provingUnit = $suiteNames -contains 'unit'
+        $target = if ($provingUnit) { @("$wt\Dodona.sln") } else {
+            @("$wt\src\Dodona\Dodona.csproj", "$wt\src\DodonaShim\DodonaShim.csproj",
+              "$wt\src\DodonaFakeAgent\DodonaFakeAgent.csproj", "$wt\src\DodonaUi\DodonaUi.csproj")
+        }
         Say $(if ($reused) { "building HEAD (incremental) ..." } else { "building HEAD (cold, first proof at this commit) ..." })
-        $b = & dotnet build "$wt\Dodona.sln" -c Release 2>&1
-        Add-Content -Path $log -Value $b -Encoding utf8
-        if ($LASTEXITCODE -ne 0) { Abort "HEAD does not build, so it cannot be used as a baseline" "commit a buildable baseline first; see $log" }
+        foreach ($t in $target) {
+            $b = & dotnet build $t -c Release 2>&1
+            Add-Content -Path $log -Value $b -Encoding utf8
+            if ($LASTEXITCODE -ne 0) {
+                Abort "HEAD does not build, so it cannot be used as a baseline: $(Split-Path -Leaf $t)" `
+                    $(if ($provingUnit) { 'proving the unit suite builds Dodona.Tests against HEAD src -- a test that names an API your fix ADDS cannot compile there, and so cannot be proven at all. Prove the acceptance checks instead, and say in your report that the unit tests could not be.' }
+                      else { "commit a buildable baseline first; see $log" })
+            }
+        }
 
         # THROUGH Start-Suite/Complete-Suite, not `& powershell ... 2>&1`. This line was the
         # SAME HANG that was fixed in Run-Suite and missed here, which is exactly the

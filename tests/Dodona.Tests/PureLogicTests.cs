@@ -279,6 +279,96 @@ public class ReposForClaimsTests
 }
 
 /// <summary>
+/// Repo IDENTITY, as opposed to repo naming (P0.1). A display name is recomputed by
+/// `Repos.Discover` on every call and the rule changes with project count — one project that is
+/// a repo is named ".", and attaching a second renames that same repository to its leaf. Keying
+/// anything durable on that name meant two merge-token rows over one `main`, which is the double
+/// fast-forward this whole system exists to prevent. So identity is the canonical path.
+///
+/// These are pure: `Instance.Canonical` falls back to `Path.GetFullPath` for a path that does
+/// not exist, so no filesystem fixture is needed.
+/// </summary>
+public class ReposIdentityTests
+{
+    static RepoRef R(string name, string path) => new(name, path, @"C:\ws");
+
+    /// <summary>The whole defect in one assertion: the SAME folder under the two names the
+    /// naming rule gives it before and after an attach must be one key.</summary>
+    [Fact]
+    public void The_same_folder_under_two_names_has_one_key()
+    {
+        var before = R(".", @"C:\ws\proj");
+        var after = R("proj", @"C:\ws\proj");
+        Assert.Equal(Repos.Key(before.Path), Repos.Key(after.Path));
+    }
+
+    /// <summary>Repo names and paths come from live disk casing while SQLite `=` and PRIMARY KEY
+    /// are binary-collated (P0.4) — so a rename that only changes case must not become a second
+    /// identity. The store's key columns are COLLATE NOCASE for the same reason.</summary>
+    [Fact]
+    public void Case_is_not_a_different_repository()
+    {
+        var repos = new List<RepoRef> { R("engine", @"C:\ws\Engine") };
+        Assert.NotNull(Repos.ByPath(repos, @"c:\ws\engine"));
+    }
+
+    [Fact]
+    public void A_path_no_longer_in_the_workspace_resolves_to_nothing()
+    {
+        var repos = new List<RepoRef> { R("twin", @"C:\ws\p1\twin"), R("twin~2", @"C:\ws\p3\twin") };
+        // The `leaf~2` recycling route: the NAME still resolves, to a stranger. The path does not.
+        Assert.NotNull(Repos.ByName(repos, "twin~2"));
+        Assert.Null(Repos.ByPath(repos, @"C:\ws\p2\twin"));
+    }
+
+    [Fact]
+    public void An_empty_recorded_path_is_not_a_match_for_anything()
+    {
+        var repos = new List<RepoRef> { R("engine", @"C:\ws\engine") };
+        Assert.Null(Repos.ByPath(repos, ""));
+    }
+
+    /// <summary>`--repo X` used to skip claim validation entirely (P0.6), so a ticket could be
+    /// created in `tools` holding a claim over `engine`.</summary>
+    [Fact]
+    public void A_claim_in_another_repo_is_refused_for_the_named_one()
+    {
+        var repos = new List<RepoRef> { R("engine", @"C:\ws\engine"), R("tools", @"C:\ws\tools") };
+        var err = Repos.CheckClaims(repos, repos[1], new List<(string, string)> { ("path", "engine/sim.cs") });
+        Assert.NotNull(err);
+        Assert.Contains("engine", err);
+        Assert.Contains("tools", err);
+    }
+
+    [Fact]
+    public void Claims_in_the_named_repo_are_accepted()
+    {
+        var repos = new List<RepoRef> { R("engine", @"C:\ws\engine"), R("tools", @"C:\ws\tools") };
+        Assert.Null(Repos.CheckClaims(repos, repos[1], new List<(string, string)> { ("subtree", "tools/src") }));
+    }
+
+    /// <summary>Symbols name no path, so they name no repository — skipped here exactly as
+    /// ForClaims skips them. Narrowing them is Phase 0b's business, not this one's.</summary>
+    [Fact]
+    public void A_symbol_claim_is_not_held_to_the_named_repo()
+    {
+        var repos = new List<RepoRef> { R("engine", @"C:\ws\engine"), R("tools", @"C:\ws\tools") };
+        Assert.Null(Repos.CheckClaims(repos, repos[1], new List<(string, string)> { ("symbol", "Config") }));
+    }
+
+    /// <summary>THE ONE-PROJECT CASE IS UNCHANGED, and that is the property the whole workspace
+    /// migration rested on: the root repo swallows every path, so a single-repo workspace can
+    /// never see this refusal.</summary>
+    [Fact]
+    public void One_repository_can_never_produce_a_mismatch()
+    {
+        var root = new List<RepoRef> { new(".", @"C:\ws", @"C:\ws") };
+        Assert.Null(Repos.CheckClaims(root, root[0],
+            new List<(string, string)> { ("path", "src/a.cs"), ("subtree", "anything/at/all") }));
+    }
+}
+
+/// <summary>
 /// The two routing decisions made in CODE rather than by a model (WORKSPACES-CONCIERGE.md
 /// §5.1). Everything else now WAITS for a verdict, so these two are what keep "stop" instant.
 /// </summary>

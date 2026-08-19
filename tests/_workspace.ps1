@@ -358,6 +358,51 @@ for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is No
     }
 }
 
+# Run SQL that CHANGES the store, committed. The read-only twin above is what you want almost
+# always -- this exists for one job: standing a store back UP in an older schema shape so a
+# migration can be run over it for real.
+#
+# A migration is the one piece of code that can only be tested against a store that predates it,
+# and a fresh suite always creates the newest schema. Without this the v9 repo-identity migration
+# (P0.3) would have had to be believed rather than seen, and it is the migration that BLOCKS
+# ROLLBACK: the daemon refuses to hot-swap down across a schema version, so getting it wrong
+# costs the operator their store.
+#
+# The same UTF-8 and stderr rules as Invoke-StoreSql, for the same recorded reasons. `commit()`
+# is explicit because python's sqlite3 has not implicitly committed DDL since 3.6 -- without it
+# this function would silently do nothing, which is the shape of failure this file exists to
+# prevent.
+function Invoke-StoreExec([string]$db, [string]$sql) {
+    if (-not $db) { throw 'Invoke-StoreExec: no store path' }
+    $prevEnc = [Console]::OutputEncoding
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $env:PYTHONIOENCODING = 'utf-8'
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $errFile = Join-Path ([System.IO.Path]::GetTempPath()) ("dodona-exec-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + ".err")
+    $env:DODONA_TEST_SQL = $sql
+    $env:DODONA_TEST_DB = $db
+    try {
+        python -c "
+import sqlite3, os
+db = sqlite3.connect(os.environ['DODONA_TEST_DB'])
+db.executescript(os.environ['DODONA_TEST_SQL'])
+db.commit()
+db.close()
+" 2> $errFile | Out-Null
+        $err = ''
+        if (Test-Path $errFile) { $err = (Get-Content $errFile -Raw -ErrorAction SilentlyContinue) }
+        if ($err) { $err = ($err -replace '\s+', ' ').Trim() }
+        if ($err) { throw "store exec FAILED: $err  --  sql: $sql" }
+    }
+    finally {
+        $ErrorActionPreference = $prev
+        [Console]::OutputEncoding = $prevEnc
+        Remove-Item env:DODONA_TEST_SQL, env:DODONA_TEST_DB, env:PYTHONIOENCODING -ErrorAction SilentlyContinue
+        Remove-Item $errFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # ---------------------------------------------------------------- pipes that BLINK
 
 # Is this pipe REALLY gone? Two absences, 150 ms apart.

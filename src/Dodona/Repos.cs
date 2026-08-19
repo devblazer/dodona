@@ -113,6 +113,61 @@ static class Repos
             ?? (wanted is "." or "" ? repos.FirstOrDefault(r => r.IsRoot) : null);
     }
 
+    /// <summary>
+    /// A repository's IDENTITY — its canonical path (P0.1). <see cref="RepoRef.Name"/> is a
+    /// DISPLAY name and it is not stable: it is recomputed by <see cref="Discover"/> on every
+    /// call, and the rule changes with project count, so the *same repository* is called "."
+    /// in a one-project workspace and `proj` the moment a second project is attached. A
+    /// merge token keyed by that name is therefore two rows for one `main` — two agents each
+    /// believing they hold the token, both fast-forwarding the same branch, which is the
+    /// exact race this system exists to prevent (found 2026-08-19; nothing of ours caused it).
+    ///
+    /// <see cref="Instance.Canonical"/> is the same folding the registry already dedupes
+    /// members by, so one repository has exactly one key however it is spelled.
+    /// </summary>
+    public static string Key(string repoPath) => Instance.Canonical(repoPath);
+
+    /// <summary>Resolve a repository by identity rather than by display name. This is what a
+    /// ticket must use: its name was frozen when it was created and the naming rule has been
+    /// free to change underneath it ever since, while its path has not.</summary>
+    public static RepoRef? ByPath(List<RepoRef> repos, string repoPath)
+    {
+        if (repoPath.Length == 0) return null;
+        var want = Key(repoPath);
+        return repos.FirstOrDefault(r => Key(r.Path).Equals(want, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Are these claims all inside <paramref name="named"/>? Asked when the caller named the
+    /// repository itself (`ticket-create --repo X`, and every `claim-extend`), which used to
+    /// skip <see cref="ForClaims"/> ENTIRELY — so `--repo tools --claim path:engine/sim.cs`
+    /// created a ticket in `tools` holding a claim over `engine`, and the gate, the merge
+    /// backstop and the land all then disagreed about which repository they were talking
+    /// about (P0.6). Returns null when every claim belongs, or the refusal to print.
+    ///
+    /// Symbol claims carry no path and so name no repository — they are skipped here exactly
+    /// as <see cref="ForClaims"/> skips them. Narrowing them is Phase 0b's business.
+    ///
+    /// In a one-repository workspace the root repo swallows every path, so this can only
+    /// return null: the ordinary case is unchanged, which is the property the whole
+    /// workspace migration rests on.
+    /// </summary>
+    public static string? CheckClaims(List<RepoRef> repos, RepoRef named, List<(string Kind, string Value)> claims)
+    {
+        var strays = new List<string>();
+        foreach (var (kind, value) in claims)
+        {
+            if (kind == "symbol") continue;
+            var r = ForPath(repos, value);
+            if (r is null) strays.Add($"{kind}:{value} is in no repository");
+            else if (!r.Name.Equals(named.Name, StringComparison.OrdinalIgnoreCase))
+                strays.Add($"{kind}:{value} is in repository {r.Name}");
+        }
+        if (strays.Count == 0) return null;
+        return $"these claims are not in repository {named.Name}: {string.Join("; ", strays)} — " +
+               "a ticket lands by fast-forwarding one repository, so its claims must all live in that one";
+    }
+
     /// <summary>Which repository a claim path falls in. Claims are workspace-relative, so
     /// the path already says — no extra syntax, and the claim algebra is untouched.</summary>
     public static RepoRef? ForPath(List<RepoRef> repos, string claimValue)

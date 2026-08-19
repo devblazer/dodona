@@ -81,6 +81,28 @@ rows ([Repos.cs:69](../src/Dodona/Repos.cs#L69)); and repo names come from live 
 **Becomes impossible:** two merge tokens over one `main`; a ticket whose gate silently stops
 being redeployed; a recycled `~2` name inheriting another repo's tickets.
 
+**Delivered 2026-08-19, and three corrections to the text above** (from verifying every citation
+before changing what it pointed at):
+
+- **A fourth route, which this plan did not name, and it is the worst one.** `LandOp`'s repo
+  lookup fell back to `_primary`: `var repoPath = repo?.Path ?? _primary`. So a ticket whose name
+  had drifted did not merely share a token — the daemon ran `git merge --ff-only ticket/N` **in
+  the first project's repository**. A ref advance is the one irreversible act in this system and
+  it had a default. There is none now: unresolvable is a refusal, in `LandOp`, `token-request`
+  and `claim-extend` alike.
+- **The line numbers are consistently one or two low** (`Repos.cs:82` is at 83, `:63` at 65–72,
+  `:69` at 70, `:141` at 142; `Daemon.cs:401` at 402, `:719` at 721). Every claim they support
+  holds. `PureLogicTests.cs` is at `tests/Dodona.Tests/PureLogicTests.cs`, and `:339-371` is
+  `InstanceCanonicalTests`, as stated. `Daemon.cs:857` is exact.
+- **Schema 9 is spent.** P5.1's `lanes.project` is **v10**.
+
+**How the two identities divide, because the next phase will have to know:** a ticket's
+`repo_path` is WHERE it is and `repo` is what it was CALLED when its claims were written. The
+name is frozen for an open ticket on purpose — its `claims` rows are workspace-relative to it,
+so refreshing the name would move its claim namespace underneath it and its own gate would start
+denying its own files. Reconciling names ACROSS tickets is Phase 0b's job, and P0.3's migration
+announces every row it could not resolve rather than guessing.
+
 **Prove red first:** attach a second project to a `"."` workspace, then show the pre-existing
 ticket still resolves to **one** token; detach-and-reattach cannot transfer open tickets between
 repos; `--repo tools --claim path:engine/...` is refused.
@@ -165,6 +187,7 @@ in; a store relocated because an agent ran `dodona tickets`.
 | P1.2 | A lane's project appears in `dodona status` and in `ui dump`'s slot shape. A wrong project is currently invisible to a person as well as to a check. |
 | P1.3 | Extract the cwd precedence decision (ticket worktree → recorded cwd → first project, [Daemon.cs:549](../src/Dodona/Daemon.cs#L549), [:1779](../src/Dodona/Daemon.cs#L1779)) into a **static**, like `IsObviousGeneric` and `LanePrefix`. Three nullable strings, no I/O — it belongs on the 1-second `unit` loop. |
 | P1.4 | A check that `registry.db` is under `DODONA_HOME`. |
+| P1.6 | **Done 2026-08-19 (Phase 0), recorded here because it is a `dev prove` fix, not a Phase 0 one.** `dev prove` built `Dodona.sln` in its HEAD worktree, which includes `Dodona.Tests` — and `prove` copies `tests\` from the WORKING tree over HEAD's `src\`. So a unit test naming a method the fix introduces cannot compile there, by construction, and the whole proof aborted with `HEAD does not build` plus nine `CS0117`s in a project no acceptance suite loads. Measured: 12 checks across 2 suites, **zero verdicts**, for a change whose acceptance checks were all provable. It now builds the four executables unless `unit` is itself among the suites being proved. The residual limit is inherent and the abort message states it: **a unit test for a NEW API can never be proven red**, so prove the acceptance check and say so in the report. |
 
 **Becomes impossible:** landing any later phase unobserved.
 

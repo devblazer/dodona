@@ -14,6 +14,20 @@ sealed class Store : IDisposable, ILaneSink
     readonly SqliteConnection _db;
     readonly object _lock = new();
 
+    /// <summary>Where this store was copied to before a migration ran, or null when nothing
+    /// migrated. The daemon announces it, because the ONLY undo for a half-applied migration
+    /// is that file — and the swap path has backed up since §14 was revised while a plain
+    /// COLD START (stop-daemon, then start a newer build) migrated with no copy at all. Same
+    /// migration, same irreversibility, no backup: the gap was invisible because the loud
+    /// path was the one that had been thought about.</summary>
+    public string? PreMigrationBackup { get; private set; }
+    /// <summary>Why the pre-migration copy could not be made. Non-null means the migration
+    /// ran anyway and is not undoable — announced, never silently swallowed, and never a
+    /// reason to refuse to start (CLAUDE.md §0.1: nothing parks behind a human).</summary>
+    public string? PreMigrationBackupError { get; private set; }
+    /// <summary>The schema this store was on when it was opened. 0 for a brand-new file.</summary>
+    public long SchemaAtOpen { get; private set; }
+
     public Store(string path)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -21,6 +35,18 @@ sealed class Store : IDisposable, ILaneSink
         _db.Open();
         Exec("PRAGMA journal_mode=WAL;");
         Exec("PRAGMA synchronous=FULL;");
+        lock (_lock) { using var c = _db.CreateCommand(); c.CommandText = "PRAGMA user_version;"; SchemaAtOpen = (long)c.ExecuteScalar()!; }
+        // A store that is ABOUT to be migrated gets copied first, and the copy is announced
+        // rather than merely written: the daemon refuses to hot-swap DOWN across a schema
+        // version (Daemon.SwapDecision), so a migration is a one-way door for the operator
+        // unless they know where the key is. SchemaAtOpen == 0 is a new file, which has
+        // nothing to lose.
+        if (SchemaAtOpen > 0 && SchemaAtOpen < Ver.Schema)
+        {
+            var bak = $"{path}.pre-v{SchemaAtOpen}";
+            try { Backup(bak); PreMigrationBackup = bak; }
+            catch (Exception ex) { PreMigrationBackupError = ex.Message; }
+        }
         Migrate();
     }
 
@@ -215,6 +241,197 @@ sealed class Store : IDisposable, ILaneSink
                 PRAGMA user_version = 8;
                 """);
         }
+        if (v < 9)
+        {
+            // A repository is identified by its PATH, not by its display name (P0.1/P0.2).
+            // v6 keyed the merge token on `repo`, the workspace-relative display name — and
+            // that name is recomputed from the registry and the filesystem on every call,
+            // by a rule that CHANGES WITH PROJECT COUNT: one project that is a repo is
+            // named ".", and attaching a second renames that same repository to its leaf.
+            // `tickets.repo` is written once and never updated, so after an attach the
+            // pre-existing ticket asked for token "." while a new one asked for token
+            // "proj" — two rows over one `main`, both landing in the same folder. Two
+            // agents could each be told "granted" and both fast-forward. `leaf~2` is
+            // recyclable on top of that, so a later-attached repo could inherit another
+            // repo's open tickets and its token outright.
+            //
+            // COLLATE NOCASE on every key column is not tidiness (P0.4): repo names and
+            // paths come from live disk casing while SQLite `=` and PRIMARY KEY are
+            // binary-collated, so `Engine` and `engine` were two tokens over one main by
+            // exactly the same mechanism, reached by renaming a folder.
+            //
+            // The path itself cannot be computed HERE — it needs the registry's member list
+            // and a filesystem walk, and the store deliberately knows about neither. So
+            // every carried-over row is keyed by a `#unresolved:<name>` placeholder that is
+            // unique (the old name was a PRIMARY KEY), can never collide with a canonical
+            // absolute path, and is visibly unfinished. StampRepoPaths resolves them at
+            // daemon start, where repo discovery lives, and MERGES rows that turn out to be
+            // the same repository — which is the live two-token defect being repaired, out
+            // loud, rather than merely prevented from recurring.
+            Exec("""
+                ALTER TABLE tickets ADD COLUMN repo_path TEXT NOT NULL DEFAULT '' COLLATE NOCASE;
+                ALTER TABLE token_queue ADD COLUMN repo_path TEXT NOT NULL DEFAULT '' COLLATE NOCASE;
+                UPDATE token_queue SET repo_path = '#unresolved:' || repo;
+                CREATE TABLE merge_token_v9(
+                    repo_path TEXT PRIMARY KEY COLLATE NOCASE,
+                    repo TEXT NOT NULL DEFAULT '',
+                    holder_ticket INTEGER,
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    granted_ts TEXT,
+                    expires_ts TEXT,
+                    main_sha TEXT
+                );
+                INSERT INTO merge_token_v9(repo_path, repo, holder_ticket, generation, granted_ts, expires_ts, main_sha)
+                    SELECT '#unresolved:' || repo, repo, holder_ticket, generation, granted_ts, expires_ts, main_sha FROM merge_token;
+                DROP TABLE merge_token;
+                ALTER TABLE merge_token_v9 RENAME TO merge_token;
+                PRAGMA user_version = 9;
+                """);
+        }
+    }
+
+    // ------------------------------------------------------- repo identity (P0.3)
+
+    /// <summary>What <see cref="StampRepoPaths"/> did, so the daemon can announce it. Every
+    /// list is a line a person may need to read: a row that could not be resolved is
+    /// ANNOUNCED, never silently dropped and never silently left to resolve to whatever the
+    /// name happens to mean now.</summary>
+    public sealed record StampReport(List<string> Stamped, List<string> Unresolved, List<string> Merged);
+
+    /// <summary>
+    /// Fill in <c>repo_path</c> for rows written before schema 9, using a resolver that knows
+    /// the workspace's repositories (the daemon owns discovery; the store must not).
+    ///
+    /// Idempotent, and safe to run on every start: it only touches rows that are still
+    /// unstamped, so it costs one indexed scan on an already-migrated store.
+    ///
+    /// The MERGE is the point. Two token rows whose names resolve to one path are the live
+    /// two-token defect materialised, so they are folded into one: the highest generation
+    /// wins (a fencing counter must never go backwards) and a holder is preserved rather
+    /// than dropped — losing a holder would hand the token to a second agent, which is the
+    /// thing being fixed. Both rows holding at once is the incident itself; it is reported
+    /// with both ticket numbers.
+    /// </summary>
+    public StampReport StampRepoPaths(Func<string, string?> resolve)
+    {
+        var report = new StampReport(new List<string>(), new List<string>(), new List<string>());
+        lock (_lock)
+        {
+            using var tx = _db.BeginTransaction();
+
+            // -- tickets
+            var pending = new List<(long Id, string Repo)>();
+            using (var c = _db.CreateCommand())
+            {
+                c.Transaction = tx;
+                c.CommandText = "SELECT id, repo FROM tickets WHERE repo_path = '';";
+                using var r = c.ExecuteReader();
+                while (r.Read()) pending.Add((r.GetInt64(0), r.GetString(1)));
+            }
+            foreach (var (id, name) in pending)
+            {
+                var path = resolve(name);
+                if (path is null) { report.Unresolved.Add($"ticket {id}: repo '{name}' resolves to no repository in this workspace"); continue; }
+                using var u = _db.CreateCommand();
+                u.Transaction = tx;
+                u.CommandText = "UPDATE tickets SET repo_path = $p WHERE id = $id;";
+                u.Parameters.AddWithValue("$p", path);
+                u.Parameters.AddWithValue("$id", id);
+                u.ExecuteNonQuery();
+                report.Stamped.Add($"ticket {id}: '{name}' -> {path}");
+            }
+
+            // -- merge tokens (the two-token repair)
+            var placeholders = new List<(string Key, string Repo, long? Holder, long Gen, string? Granted)>();
+            using (var c = _db.CreateCommand())
+            {
+                c.Transaction = tx;
+                c.CommandText = "SELECT repo_path, repo, holder_ticket, generation, granted_ts FROM merge_token WHERE repo_path LIKE '#unresolved:%';";
+                using var r = c.ExecuteReader();
+                while (r.Read())
+                    placeholders.Add((r.GetString(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetInt64(2),
+                                      r.GetInt64(3), r.IsDBNull(4) ? null : r.GetString(4)));
+            }
+            foreach (var p in placeholders)
+            {
+                var path = resolve(p.Repo);
+                if (path is null) { report.Unresolved.Add($"merge token '{p.Repo}' resolves to no repository in this workspace — it keeps its own row and cannot be granted"); continue; }
+
+                (long? Holder, long Gen, string? Granted)? existing = null;
+                using (var c = _db.CreateCommand())
+                {
+                    c.Transaction = tx;
+                    c.CommandText = "SELECT holder_ticket, generation, granted_ts FROM merge_token WHERE repo_path = $p;";
+                    c.Parameters.AddWithValue("$p", path);
+                    using var r = c.ExecuteReader();
+                    if (r.Read()) existing = (r.IsDBNull(0) ? null : r.GetInt64(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2));
+                }
+
+                if (existing is null)
+                {
+                    using var u = _db.CreateCommand();
+                    u.Transaction = tx;
+                    u.CommandText = "UPDATE merge_token SET repo_path = $p WHERE repo_path = $k;";
+                    u.Parameters.AddWithValue("$p", path);
+                    u.Parameters.AddWithValue("$k", p.Key);
+                    u.ExecuteNonQuery();
+                    report.Stamped.Add($"merge token '{p.Repo}' -> {path}");
+                    continue;
+                }
+
+                var e = existing.Value;
+                long? holder = e.Holder ?? p.Holder;
+                if (e.Holder is not null && p.Holder is not null)
+                {
+                    // Both rows held. This is the race, on disk. Keep the later grant and say so.
+                    var pLater = p.Granted is not null && (e.Granted is null || DateTime.Parse(p.Granted) > DateTime.Parse(e.Granted));
+                    holder = pLater ? p.Holder : e.Holder;
+                    report.Merged.Add($"TWO MERGE TOKENS over {path}: tickets {e.Holder} and {p.Holder} both held one — kept {holder}");
+                }
+                else report.Merged.Add($"merge token '{p.Repo}' was a second row over {path} — folded into one");
+
+                using (var u = _db.CreateCommand())
+                {
+                    u.Transaction = tx;
+                    u.CommandText = "UPDATE merge_token SET holder_ticket = $h, generation = MAX(generation, $g) WHERE repo_path = $p;";
+                    u.Parameters.AddWithValue("$h", (object?)holder ?? DBNull.Value);
+                    u.Parameters.AddWithValue("$g", p.Gen);
+                    u.Parameters.AddWithValue("$p", path);
+                    u.ExecuteNonQuery();
+                }
+                using (var d = _db.CreateCommand())
+                {
+                    d.Transaction = tx;
+                    d.CommandText = "DELETE FROM merge_token WHERE repo_path = $k;";
+                    d.Parameters.AddWithValue("$k", p.Key);
+                    d.ExecuteNonQuery();
+                }
+            }
+
+            // -- the queue follows the token it queues for
+            var queued = new List<(long Ticket, string Repo)>();
+            using (var c = _db.CreateCommand())
+            {
+                c.Transaction = tx;
+                c.CommandText = "SELECT ticket_id, repo FROM token_queue WHERE repo_path LIKE '#unresolved:%';";
+                using var r = c.ExecuteReader();
+                while (r.Read()) queued.Add((r.GetInt64(0), r.GetString(1)));
+            }
+            foreach (var (ticket, name) in queued)
+            {
+                var path = resolve(name);
+                if (path is null) { report.Unresolved.Add($"queued ticket {ticket}: repo '{name}' resolves to no repository"); continue; }
+                using var u = _db.CreateCommand();
+                u.Transaction = tx;
+                u.CommandText = "UPDATE token_queue SET repo_path = $p WHERE ticket_id = $t;";
+                u.Parameters.AddWithValue("$p", path);
+                u.Parameters.AddWithValue("$t", ticket);
+                u.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+        }
+        return report;
     }
 
     static string Now() => DateTime.UtcNow.ToString("o");
@@ -477,14 +694,19 @@ sealed class Store : IDisposable, ILaneSink
 
     // ------------------------------------------------------------- tickets & claims
 
+    /// <summary><paramref name="Repo"/> is the DISPLAY name, frozen at creation — the claims
+    /// in the claims table were written workspace-relative to it, so it is the ticket's claim
+    /// namespace and must not move underneath an open ticket. <paramref name="RepoPath"/> is
+    /// the IDENTITY: which repository this is, whatever it is called today (P0.1). Empty only
+    /// for a row written before schema 9 whose name no longer resolves to anything.</summary>
     public record TicketRow(long Id, long? LaneId, string Title, string Branch, string Worktree,
-                            string State, string MergeMode, bool Approved, string Repo);
+                            string State, string MergeMode, bool Approved, string Repo, string RepoPath);
 
     /// <summary>Check-and-insert in ONE transaction (§6, §12): claims are intersected
     /// against every open ticket's claims; no overlap → ticket + claims inserted;
     /// overlap → nothing inserted, conflicts returned.</summary>
     public (long Id, List<string> Conflicts) TicketCreate(long? laneId, string title, string mode, string repo,
-                                                          List<(string Kind, string Value)> claims)
+                                                          string repoPath, List<(string Kind, string Value)> claims)
     {
         lock (_lock)
         {
@@ -494,11 +716,12 @@ sealed class Store : IDisposable, ILaneSink
 
             using var c = _db.CreateCommand();
             c.Transaction = tx;
-            c.CommandText = "INSERT INTO tickets(lane_id, title, merge_mode, repo, created_ts) VALUES ($l, $t, $m, $r, $ts); SELECT last_insert_rowid();";
+            c.CommandText = "INSERT INTO tickets(lane_id, title, merge_mode, repo, repo_path, created_ts) VALUES ($l, $t, $m, $r, $rp, $ts); SELECT last_insert_rowid();";
             c.Parameters.AddWithValue("$l", (object?)laneId ?? DBNull.Value);
             c.Parameters.AddWithValue("$t", title);
             c.Parameters.AddWithValue("$m", mode);
             c.Parameters.AddWithValue("$r", repo);
+            c.Parameters.AddWithValue("$rp", repoPath);
             c.Parameters.AddWithValue("$ts", Now());
             var id = (long)c.ExecuteScalar()!;
             InsertClaims(tx, id, claims);
@@ -585,11 +808,11 @@ sealed class Store : IDisposable, ILaneSink
     public void TicketState(long id, string state) => Set("UPDATE tickets SET state = $v WHERE id = $id;", id, state);
     public void TicketApprove(long id) => Set("UPDATE tickets SET approved = 1 WHERE id = $id AND $v = $v;", id, "1");
 
-    const string TicketCols = "id, lane_id, title, branch, worktree, state, merge_mode, approved, repo";
+    const string TicketCols = "id, lane_id, title, branch, worktree, state, merge_mode, approved, repo, repo_path";
 
     static TicketRow ReadTicket(SqliteDataReader r) =>
         new(r.GetInt64(0), r.IsDBNull(1) ? null : r.GetInt64(1), r.GetString(2), r.GetString(3),
-            r.GetString(4), r.GetString(5), r.GetString(6), r.GetInt64(7) == 1, r.GetString(8));
+            r.GetString(4), r.GetString(5), r.GetString(6), r.GetInt64(7) == 1, r.GetString(8), r.GetString(9));
 
     public TicketRow? Ticket(long id)
     {
@@ -632,9 +855,21 @@ sealed class Store : IDisposable, ILaneSink
 
     // ------------------------------------------------------------- merge token (§7)
 
-    public record TokenRow(string Repo, long? Holder, long Generation, string? ExpiresTs, string? MainSha);
+    /// <summary>
+    /// How every token operation names a repository (P0.2). <paramref name="Path"/> is the
+    /// KEY — the canonical path, from <c>Repos.Key</c> — and <paramref name="Name"/> is only
+    /// ever shown to a person.
+    ///
+    /// They are one parameter rather than two because keying the token on the display name is
+    /// precisely the defect being fixed: the name is recomputed on every call by a rule that
+    /// changes with project count, so "." and "proj" were two token rows over one `main`.
+    /// A call site that has only a name now cannot compile.
+    /// </summary>
+    public readonly record struct RepoId(string Path, string Name);
 
-    public TokenRow TokenRead(string repo)
+    public record TokenRow(string RepoPath, string Repo, long? Holder, long Generation, string? ExpiresTs, string? MainSha);
+
+    public TokenRow TokenRead(RepoId repo)
     {
         lock (_lock) { return ReadToken(null, repo); }
     }
@@ -646,33 +881,42 @@ sealed class Store : IDisposable, ILaneSink
         {
             var list = new List<TokenRow>();
             using var c = _db.CreateCommand();
-            c.CommandText = "SELECT repo, holder_ticket, generation, expires_ts, main_sha FROM merge_token ORDER BY repo;";
+            c.CommandText = "SELECT repo_path, repo, holder_ticket, generation, expires_ts, main_sha FROM merge_token ORDER BY repo;";
             using var r = c.ExecuteReader();
             while (r.Read())
-                list.Add(new TokenRow(r.GetString(0), r.IsDBNull(1) ? null : r.GetInt64(1), r.GetInt64(2),
-                                      r.IsDBNull(3) ? null : r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4)));
+                list.Add(new TokenRow(r.GetString(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetInt64(2), r.GetInt64(3),
+                                      r.IsDBNull(4) ? null : r.GetString(4), r.IsDBNull(5) ? null : r.GetString(5)));
             return list;
         }
     }
 
-    TokenRow ReadToken(SqliteTransaction? tx, string repo)
+    TokenRow ReadToken(SqliteTransaction? tx, RepoId repo)
     {
         // Rows appear on first use: a repository that has never been landed in has no
         // token row, which is indistinguishable from a free one.
+        //
+        // The display name is refreshed on every read, deliberately: the row's identity is
+        // its path, so the name is free to follow whatever the repository is called today
+        // without ever splitting the row in two. A TICKET's name is the opposite — frozen,
+        // because its claims were written relative to it.
         using (var ins = _db.CreateCommand())
         {
             if (tx is not null) ins.Transaction = tx;
-            ins.CommandText = "INSERT OR IGNORE INTO merge_token(repo, generation) VALUES ($r, 0);";
-            ins.Parameters.AddWithValue("$r", repo);
+            ins.CommandText = """
+                INSERT OR IGNORE INTO merge_token(repo_path, repo, generation) VALUES ($p, $r, 0);
+                UPDATE merge_token SET repo = $r WHERE repo_path = $p AND repo <> $r;
+                """;
+            ins.Parameters.AddWithValue("$p", repo.Path);
+            ins.Parameters.AddWithValue("$r", repo.Name);
             ins.ExecuteNonQuery();
         }
         using var c = _db.CreateCommand();
         if (tx is not null) c.Transaction = tx;
-        c.CommandText = "SELECT holder_ticket, generation, expires_ts, main_sha FROM merge_token WHERE repo = $r;";
-        c.Parameters.AddWithValue("$r", repo);
+        c.CommandText = "SELECT holder_ticket, generation, expires_ts, main_sha FROM merge_token WHERE repo_path = $p;";
+        c.Parameters.AddWithValue("$p", repo.Path);
         using var r2 = c.ExecuteReader();
         r2.Read();
-        return new TokenRow(repo, r2.IsDBNull(0) ? null : r2.GetInt64(0), r2.GetInt64(1),
+        return new TokenRow(repo.Path, repo.Name, r2.IsDBNull(0) ? null : r2.GetInt64(0), r2.GetInt64(1),
                             r2.IsDBNull(2) ? null : r2.GetString(2), r2.IsDBNull(3) ? null : r2.GetString(3));
     }
 
@@ -680,7 +924,7 @@ sealed class Store : IDisposable, ILaneSink
 
     /// <summary>Request the merge token. Lease + FIFO in one transaction. An expired
     /// holder is reclaimed here — a crashed holder cannot wedge the queue (§7, §12).</summary>
-    public (string Status, long Generation, int Position) TokenRequest(long ticketId, string repo, int leaseSec, Func<string> mainSha)
+    public (string Status, long Generation, int Position) TokenRequest(long ticketId, RepoId repo, int leaseSec, Func<string> mainSha)
     {
         lock (_lock)
         {
@@ -689,8 +933,8 @@ sealed class Store : IDisposable, ILaneSink
 
             if (t.Holder is not null && Expired(t))
             {
-                TxSet(tx, "UPDATE merge_token SET holder_ticket = NULL WHERE repo = $r;", repo);
-                TxEvent(tx, "token_expired_reclaimed", $"{repo}: was ticket {t.Holder}");
+                TxSet(tx, "UPDATE merge_token SET holder_ticket = NULL WHERE repo_path = $p;", repo.Path);
+                TxEvent(tx, "token_expired_reclaimed", $"{repo.Name}: was ticket {t.Holder}");
                 t = t with { Holder = null };
             }
 
@@ -704,9 +948,10 @@ sealed class Store : IDisposable, ILaneSink
             using (var c = _db.CreateCommand())
             {
                 c.Transaction = tx;
-                c.CommandText = "INSERT OR IGNORE INTO token_queue(ticket_id, repo, enqueued_ts) VALUES ($t, $r, $ts);";
+                c.CommandText = "INSERT OR IGNORE INTO token_queue(ticket_id, repo, repo_path, enqueued_ts) VALUES ($t, $r, $p, $ts);";
                 c.Parameters.AddWithValue("$t", ticketId);
-                c.Parameters.AddWithValue("$r", repo);
+                c.Parameters.AddWithValue("$r", repo.Name);
+                c.Parameters.AddWithValue("$p", repo.Path);
                 c.Parameters.AddWithValue("$ts", Now());
                 c.ExecuteNonQuery();
             }
@@ -715,8 +960,8 @@ sealed class Store : IDisposable, ILaneSink
             using (var c = _db.CreateCommand())
             {
                 c.Transaction = tx;
-                c.CommandText = "SELECT ticket_id FROM token_queue WHERE repo = $r ORDER BY id LIMIT 1;";
-                c.Parameters.AddWithValue("$r", repo);
+                c.CommandText = "SELECT ticket_id FROM token_queue WHERE repo_path = $p ORDER BY id LIMIT 1;";
+                c.Parameters.AddWithValue("$p", repo.Path);
                 head = (long)c.ExecuteScalar()!;
             }
 
@@ -728,16 +973,16 @@ sealed class Store : IDisposable, ILaneSink
                 c.CommandText = """
                     DELETE FROM token_queue WHERE ticket_id = $t;
                     UPDATE merge_token SET holder_ticket = $t, generation = generation + 1,
-                        granted_ts = $ts, expires_ts = $exp, main_sha = $sha WHERE repo = $r;
+                        granted_ts = $ts, expires_ts = $exp, main_sha = $sha WHERE repo_path = $p;
                     """;
                 c.Parameters.AddWithValue("$t", ticketId);
-                c.Parameters.AddWithValue("$r", repo);
+                c.Parameters.AddWithValue("$p", repo.Path);
                 c.Parameters.AddWithValue("$ts", Now());
                 c.Parameters.AddWithValue("$exp", DateTime.UtcNow.AddSeconds(leaseSec).ToString("o"));
                 c.Parameters.AddWithValue("$sha", sha);
                 c.ExecuteNonQuery();
                 var gen = ReadToken(tx, repo).Generation;
-                TxEvent(tx, "token_granted", $"ticket {ticketId} repo {repo} gen {gen} main {sha[..8]} lease {leaseSec}s");
+                TxEvent(tx, "token_granted", $"ticket {ticketId} repo {repo.Name} gen {gen} main {sha[..8]} lease {leaseSec}s");
                 tx.Commit();
                 return ("granted", gen, 0);
             }
@@ -748,19 +993,19 @@ sealed class Store : IDisposable, ILaneSink
                 c.Transaction = tx;
                 c.CommandText = """
                     SELECT COUNT(*) FROM token_queue
-                    WHERE repo = $r AND id <= (SELECT id FROM token_queue WHERE ticket_id = $t);
+                    WHERE repo_path = $p AND id <= (SELECT id FROM token_queue WHERE ticket_id = $t);
                     """;
                 c.Parameters.AddWithValue("$t", ticketId);
-                c.Parameters.AddWithValue("$r", repo);
+                c.Parameters.AddWithValue("$p", repo.Path);
                 pos = Convert.ToInt32(c.ExecuteScalar());
             }
-            TxEvent(tx, "token_queued", $"ticket {ticketId} repo {repo} position {pos}");
+            TxEvent(tx, "token_queued", $"ticket {ticketId} repo {repo.Name} position {pos}");
             tx.Commit();
             return ("queued", t.Generation, pos);
         }
     }
 
-    public bool TokenRenew(long ticketId, string repo, int leaseSec)
+    public bool TokenRenew(long ticketId, RepoId repo, int leaseSec)
     {
         lock (_lock)
         {
@@ -769,16 +1014,16 @@ sealed class Store : IDisposable, ILaneSink
             if (t.Holder != ticketId || Expired(t)) { tx.Rollback(); return false; }
             using var c = _db.CreateCommand();
             c.Transaction = tx;
-            c.CommandText = "UPDATE merge_token SET expires_ts = $exp WHERE repo = $r;";
+            c.CommandText = "UPDATE merge_token SET expires_ts = $exp WHERE repo_path = $p;";
             c.Parameters.AddWithValue("$exp", DateTime.UtcNow.AddSeconds(leaseSec).ToString("o"));
-            c.Parameters.AddWithValue("$r", repo);
+            c.Parameters.AddWithValue("$p", repo.Path);
             c.ExecuteNonQuery();
             tx.Commit();
             return true;
         }
     }
 
-    public void TokenRelease(long ticketId, string repo)
+    public void TokenRelease(long ticketId, RepoId repo)
     {
         lock (_lock)
         {
@@ -786,8 +1031,8 @@ sealed class Store : IDisposable, ILaneSink
             var t = ReadToken(tx, repo);
             if (t.Holder == ticketId)
             {
-                TxSet(tx, "UPDATE merge_token SET holder_ticket = NULL WHERE repo = $r;", repo);
-                TxEvent(tx, "token_released", $"ticket {ticketId} repo {repo}");
+                TxSet(tx, "UPDATE merge_token SET holder_ticket = NULL WHERE repo_path = $p;", repo.Path);
+                TxEvent(tx, "token_released", $"ticket {ticketId} repo {repo.Name}");
             }
             tx.Commit();
         }
@@ -796,13 +1041,13 @@ sealed class Store : IDisposable, ILaneSink
     /// <summary>The land fence + commit, one transaction (§7): holder identity and lease
     /// re-checked HERE, in the same transaction that records the land and frees the
     /// claims. Returns false if the fence refuses.</summary>
-    public bool LandCommit(long ticketId, string repo, out string reason)
+    public bool LandCommit(long ticketId, RepoId repo, out string reason)
     {
         lock (_lock)
         {
             using var tx = _db.BeginTransaction();
             var t = ReadToken(tx, repo);
-            if (t.Holder != ticketId) { reason = $"token holder for {repo} is {(t.Holder?.ToString() ?? "nobody")}, not ticket {ticketId}"; tx.Rollback(); return false; }
+            if (t.Holder != ticketId) { reason = $"token holder for {repo.Name} is {(t.Holder?.ToString() ?? "nobody")}, not ticket {ticketId}"; tx.Rollback(); return false; }
             if (Expired(t)) { reason = "lease expired"; tx.Rollback(); return false; }
 
             using (var c = _db.CreateCommand())
@@ -812,14 +1057,14 @@ sealed class Store : IDisposable, ILaneSink
                     UPDATE tickets SET state = 'landed', landed_ts = $ts WHERE id = $t;
                     DELETE FROM claims WHERE ticket_id = $t;
                     DELETE FROM token_queue WHERE ticket_id = $t;
-                    UPDATE merge_token SET holder_ticket = NULL WHERE repo = $r;
+                    UPDATE merge_token SET holder_ticket = NULL WHERE repo_path = $p;
                     """;
                 c.Parameters.AddWithValue("$t", ticketId);
-                c.Parameters.AddWithValue("$r", repo);
+                c.Parameters.AddWithValue("$p", repo.Path);
                 c.Parameters.AddWithValue("$ts", Now());
                 c.ExecuteNonQuery();
             }
-            TxEvent(tx, "landed", $"ticket {ticketId} repo {repo} gen {t.Generation}; claims released");
+            TxEvent(tx, "landed", $"ticket {ticketId} repo {repo.Name} gen {t.Generation}; claims released");
             tx.Commit();
             reason = "";
             return true;
@@ -911,12 +1156,13 @@ sealed class Store : IDisposable, ILaneSink
         c.ExecuteNonQuery();
     }
 
-    void TxSet(SqliteTransaction tx, string sql, string repo)
+    /// <summary>One statement inside a transaction, bound to one repo-path parameter (<c>$p</c>).</summary>
+    void TxSet(SqliteTransaction tx, string sql, string repoPath)
     {
         using var c = _db.CreateCommand();
         c.Transaction = tx;
         c.CommandText = sql;
-        c.Parameters.AddWithValue("$r", repo);
+        c.Parameters.AddWithValue("$p", repoPath);
         c.ExecuteNonQuery();
     }
 

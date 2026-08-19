@@ -118,6 +118,27 @@ try {
     $q = Dodona @("token-request", "3")
     Check 'same_repo_still_serializes' ($q -match 'queued ticket 3') $q
 
+    # ---- naming the repo does not buy a way past claim validation (P0.6) ----
+    # `--repo X` skipped Repos.ForClaims ENTIRELY, so this created a ticket in `tools` holding a
+    # claim over `engine` -- and then the gate prefixed the claim with `tools/`, the merge
+    # backstop diffed `tools`, and the land fast-forwarded `tools`, while the agent edited
+    # `engine`. Every one of those disagreed silently. The inference path has always refused a
+    # cross-repo claim; naming the repo went straight past the refusal.
+    $wrongRepo = Dodona @("ticket-create", "--title", "WRONGREPO", "--repo", "tools", "--claim", "path:engine/src/main.cs")
+    Check 'named_repo_still_validates_its_claims' `
+        ($DODONA_EXIT -ne 0 -and $wrongRepo -match 'not in repository tools' -and $wrongRepo -match 'engine') $wrongRepo
+    # (the ordinary case -- a claim that IS in the named repo -- is asserted in the `pair`
+    # fixture below, where creating a ticket cannot shift the ticket ids these checks hardcode)
+
+    # ---- claim-extend cannot widen a ticket into a different repository (P0.5) ----
+    # Store.ClaimExtend takes only a ticket id, and the daemon never looked the repo up -- so an
+    # extension could hand ticket 3 (in `engine`) a claim over `tools`, which is the same hole
+    # P0.6 leaves in ticket-create, reached from the other side. A ticket lands by
+    # fast-forwarding ONE repository; its claims have to stay in that one.
+    $xRepo = Dodona @("claim-extend", "3", "--claim", "path:tools/src/main.cs")
+    Check 'claim_extend_cannot_cross_repositories' `
+        ($DODONA_EXIT -ne 0 -and $xRepo -match 'not in repository engine') $xRepo
+
     # ---- landing goes to that repository's main, and only that one ----
     $l1 = Dodona @("land", "1")
     Check 'lands_in_its_own_repo' ($l1 -match 'landed ticket 1 on engine/main') $l1
@@ -202,6 +223,20 @@ for r in db.execute('''SELECT detail FROM events WHERE kind='ticket_created' ORD
         Wait-Daemon (& $dodona where --workspace $wsId --json | Out-String | ConvertFrom-Json).ctlPipe | Out-Null
         $p
     }
+
+    # Stop a daemon and WAIT FOR THE CTL PIPE TO GO. A daemon that has been asked to stop still
+    # holds `Global\dodona-<id>` for a moment, and a non-successor start makes exactly ONE attempt
+    # at that mutex -- so an immediate restart loses the race, prints "another daemon already
+    # owns workspace", and every check after it fails for a reason that has nothing to do with
+    # what it was testing. The repo-identity section below restarts three times, and it also
+    # rewrites the store file with python between two of them, which cannot be done while a
+    # writer holds it.
+    function StopDaemonFor([string]$wsId) {
+        $ctl = (& $dodona where --workspace $wsId --json | Out-String | ConvertFrom-Json).ctlPipe
+        DodonaBare @("stop-daemon", "--workspace", $wsId) | Out-Null
+        Wait-Until { -not (Test-DodonaPipe $ctl) } 15000 "the daemon for $wsId is down" | Out-Null
+    }
+    function RestartDaemonFor([string]$wsId) { StopDaemonFor $wsId; StartDaemonFor $wsId }
 
     function DodonaBare([string[]]$a) {
         $ErrorActionPreference = 'Continue'
@@ -350,7 +385,181 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
     Check 'multi_member_ticket_names_its_repo' ($pt -match [regex]::Escape((Split-Path -Leaf $twoA))) $pt
     Check 'multi_member_worktree_sits_beside_its_own_member' `
         ((Test-Path "$twoA\.dodona\wt\t1") -and -not (Test-Path "$twoB\.dodona\wt\t1")) $pt
+    # ...and naming the repo explicitly works, when the claim really is in it (P0.6's other half)
+    $ptNamed = DodonaBare @("ticket-create", "--title", "NAMED", "--repo", (Split-Path -Leaf $twoB),
+                            "--claim", "path:$(Split-Path -Leaf $twoB)/src/main.cs", "--workspace", $pair)
+    Check 'named_repo_accepts_its_own_claims' ($ptNamed -match [regex]::Escape((Split-Path -Leaf $twoB))) $ptNamed
     DodonaBare @("stop-daemon", "--workspace", $pair) | Out-Null
+
+    # =====================================================================================
+    # REPO IDENTITY: A TICKET'S REPOSITORY IS A PATH, NOT A NAME (P0.1/P0.2/P0.3)
+    #
+    # This was BROKEN IN PRODUCTION, with no changes from us, and it is the double
+    # fast-forward this whole system exists to prevent:
+    #
+    #   Repos.Discover recomputes repo names on every call, and the rule CHANGES WITH
+    #   PROJECT COUNT -- one project that is a repo is named "." (Repos.Under's empty
+    #   prefix), and attaching a second project renames that same repository to its leaf.
+    #   tickets.repo is written once and never updated. So after an attach the pre-existing
+    #   ticket asked for merge token "." while a new ticket in the SAME repository asked for
+    #   token "<leaf>": two rows over one main, two agents each told "granted", both able to
+    #   fast-forward the same branch.
+    #
+    # A red check in this section is a correctness incident, not a flaky test.
+    # =====================================================================================
+    $driftA = Join-Path (Use-SuiteTemp) ("dodona-drA-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $driftB = Join-Path (Use-SuiteTemp) ("dodona-drB-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    foreach ($r in $driftA, $driftB) {
+        New-Item -ItemType Directory -Force "$r\src\one", "$r\src\two" | Out-Null
+        Set-Content "$r\src\one\a.cs" "// one"
+        Set-Content "$r\src\two\b.cs" "// two"
+        Set-Content "$r\.gitignore" ".dodona/"
+        git -C $r init -b main -q
+        git -C $r add -A
+        git -C $r -c user.email=t@t -c user.name=t commit -q -m init
+    }
+    # ONE project, and it IS a repository: the degenerate case, named "."
+    DodonaBare @("workspace-create", "--name", "drift", "--member", $driftA) | Out-Null
+    $drift = ((DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.name -eq 'drift' }).id
+    $driftStore = (& $dodona where --workspace $drift --json | Out-String | ConvertFrom-Json).store
+    StartDaemonFor $drift | Out-Null
+    $dt1 = DodonaBare @("ticket-create", "--title", "DRIFT1", "--claim", "subtree:src/one", "--workspace", $drift)
+    Check 'a_lone_project_that_is_a_repo_is_still_named_dot' `
+        ((Invoke-StoreSql $driftStore "SELECT repo FROM tickets WHERE id = 1").Trim() -eq '.') $dt1
+
+    # THE ATTACH. Nothing about the repository changed; only what discovery calls it.
+    DodonaBare @("workspace-attach", "--member", $driftB, "--workspace", $drift) | Out-Null
+    $leafA = Split-Path -Leaf $driftA
+    $driftRepos = DodonaBare @("repos", "--workspace", $drift)
+    Check 'attaching_a_second_project_renames_the_first_repository' `
+        ($driftRepos -match [regex]::Escape($leafA) -and $driftRepos -notmatch '(?m)^\s*\.\s') $driftRepos
+
+    # A second ticket in THE SAME REPOSITORY, created under its new name. Its claim does not
+    # overlap ticket 1's -- and after the rename it CANNOT be seen to, because "src/one" and
+    # "<leaf>/src/two" no longer share a prefix (that half is Phase 0b's problem). So both
+    # tickets are open in one repository, which is exactly the state the merge token exists for.
+    $dt2 = DodonaBare @("ticket-create", "--title", "DRIFT2", "--claim", "subtree:$leafA/src/two", "--workspace", $drift)
+    Check 'second_ticket_lands_in_the_same_repository_under_its_new_name' ($dt2 -match 'ticket 2') $dt2
+    DodonaBare @("approve", "1", "--workspace", $drift) | Out-Null
+    DodonaBare @("approve", "2", "--workspace", $drift) | Out-Null
+    $dg1 = DodonaBare @("token-request", "1", "--lease", "300", "--workspace", $drift)
+    $dg2 = DodonaBare @("token-request", "2", "--lease", "300", "--workspace", $drift)
+    # THE CHECK THIS SECTION EXISTS FOR. Under the defect both are "granted".
+    Check 'one_repository_grants_one_merge_token_after_a_rename' `
+        ($dg1 -match 'granted ticket 1' -and $dg2 -match 'queued ticket 2') "$dg1 | $dg2"
+    # The same fact read off the store rather than off the CLI: ONE holder, because there is one
+    # repository. Counted by holders rather than by rows on purpose -- `repos` materialises a
+    # token row per repository, so a bare row count says nothing, while a second HOLDER is the
+    # incident itself. Under the defect there are two.
+    Check 'two_tickets_in_one_repository_cannot_both_hold_the_token' `
+        ([int]((Invoke-StoreSql $driftStore "SELECT COUNT(*) FROM merge_token WHERE holder_ticket IS NOT NULL").Trim()) -eq 1) `
+        (Invoke-StoreSql $driftStore "SELECT * FROM merge_token")
+
+    # The gate must keep being redeployed for the drifted ticket. `Repos.ByName(repos, '.')`
+    # returned null once the rename happened, and reconcile's answer to null was `continue` --
+    # so enforcement layer 1 silently stopped being refreshed, GcOldBuilds deleted the exe the
+    # stale gate invoked, and the gate then failed OPEN. Found live 2026-08-18 for a different
+    # reason; the rename is a second route into it.
+    RestartDaemonFor $drift | Out-Null
+    Check 'a_drifted_ticket_keeps_its_claim_gate_redeployed' `
+        ([int]((Invoke-StoreSql $driftStore "SELECT COUNT(*) FROM events WHERE kind = 'gate_redeploy_failed'").Trim()) -eq 0 -and
+         [int]((Invoke-StoreSql $driftStore "SELECT COUNT(*) FROM events WHERE kind = 'gate_redeployed'").Trim()) -ge 1) `
+        (Invoke-StoreSql $driftStore "SELECT kind, detail FROM events WHERE kind LIKE 'gate_redeploy%'")
+    # and its claims still mean what they meant when they were written: the ticket keeps the
+    # name it was born with, so its claim prefix does not move underneath it
+    $dCovered = DodonaBare @("claim-check", "1", "$driftA\.dodona\wt\t1\src\one\a.cs", "--workspace", $drift)
+    Check 'a_drifted_tickets_claims_still_cover_its_own_files' ($DODONA_EXIT -eq 0 -and $dCovered -match 'covered:') $dCovered
+
+    # ---- the migration itself (P0.3), run on a store that predates it ----
+    # A migration can only be tested against a store that predates it, and a suite always builds
+    # the newest schema -- so this stands the store back UP in the v8 shape (merge token keyed by
+    # NAME, no repo_path anywhere) and then gives it the two rows the defect produced in the
+    # field: "<leaf>" from after the attach, and "." from before it. Two names, one repository,
+    # two tokens over one main. Then the daemon starts and repairs them.
+    #
+    # The revert is conditional because this same suite must also run against a build that has no
+    # v9 (that is what `dev prove` does): there the store is already v8 and DROP COLUMN repo_path
+    # would fail, killing the suite instead of failing the checks.
+    StopDaemonFor $drift
+    if ([int]((Invoke-StoreSql $driftStore "PRAGMA user_version").Trim()) -ge 9) {
+        Invoke-StoreExec $driftStore @"
+ALTER TABLE tickets DROP COLUMN repo_path;
+ALTER TABLE token_queue DROP COLUMN repo_path;
+CREATE TABLE merge_token_v8(
+    repo TEXT PRIMARY KEY, holder_ticket INTEGER, generation INTEGER NOT NULL DEFAULT 0,
+    granted_ts TEXT, expires_ts TEXT, main_sha TEXT);
+INSERT INTO merge_token_v8(repo, holder_ticket, generation, granted_ts, expires_ts, main_sha)
+    SELECT repo, holder_ticket, generation, granted_ts, expires_ts, main_sha FROM merge_token;
+DROP TABLE merge_token;
+ALTER TABLE merge_token_v8 RENAME TO merge_token;
+PRAGMA user_version = 8;
+"@
+    }
+    # The pre-attach row, with a HIGHER generation than the live one: the fencing counter must
+    # not go backwards across a merge, or a stale generation re-authorises a dead grant.
+    #
+    # OR IGNORE, and the reason is the defect itself: against a build that keys the token on the
+    # display NAME, this row already exists -- ticket 1 still says "." so its token-request made
+    # one, right beside the "<leaf>" row ticket 2 made for the same repository. Two rows, two
+    # holders, one main. Inserting unconditionally would abort the suite on a UNIQUE violation
+    # instead of letting the checks below report it.
+    Invoke-StoreExec $driftStore "INSERT OR IGNORE INTO merge_token(repo, generation) VALUES ('.', 4);"
+    StartDaemonFor $drift | Out-Null
+    # A query naming a column this build does not have must FAIL THE CHECK, not kill the suite --
+    # everything below here would otherwise never run against an older build, and `dev prove`
+    # would report MISSING (unproven) where the honest answer is red. Empty is never a pass: the
+    # comparisons below all reject it.
+    function DriftSql([string]$sql) { try { Invoke-StoreSql $driftStore $sql } catch { '' } }
+    Check 'a_pre_v9_store_is_copied_before_it_is_migrated' `
+        ((Test-Path "$driftStore.pre-v8") -and
+         (DriftSql "SELECT detail FROM events WHERE kind = 'store_backed_up'") -match 'pre-v8') `
+        (DriftSql "SELECT kind, detail FROM events WHERE kind LIKE 'store_back%'")
+    Check 'a_pre_v9_ticket_is_stamped_with_its_repository_path' `
+        ((DriftSql "SELECT repo_path FROM tickets WHERE id = 1").Trim().Length -gt 0) `
+        (DriftSql "SELECT id, repo FROM tickets")
+    # THE REPAIR: two names, one repository, one row -- and it says so out loud, because an
+    # operator whose store held two tokens over one main needs to know that happened.
+    Check 'two_token_rows_over_one_repository_are_merged_and_announced' `
+        ([int]((DriftSql "SELECT COUNT(*) FROM merge_token").Trim()) -eq 2 -and
+         [int]((DriftSql "SELECT COUNT(*) FROM events WHERE kind = 'merge_token_merged'").Trim()) -ge 1) `
+        (DriftSql "SELECT repo, holder_ticket, generation FROM merge_token")
+    Check 'the_merged_token_keeps_the_highest_generation' `
+        ([int]((DriftSql "SELECT generation FROM merge_token WHERE holder_ticket = 1").Trim()) -ge 4) `
+        (DriftSql "SELECT repo, holder_ticket, generation FROM merge_token")
+    StopDaemonFor $drift
+
+    # ---- a RECYCLED repo name cannot inherit another repository's ticket (P0.1) ----
+    # `leaf~2` is handed out by position: two projects with the same folder leaf make the second
+    # one `leaf~2`. Detach it and attach a DIFFERENT project with the same leaf, and the name
+    # `leaf~2` now points at a repository the ticket has never been in -- so the old ticket's
+    # token, its claim gate and its LAND all silently moved to a stranger's `main`.
+    $twinRoot = Join-Path (Use-SuiteTemp) ("dodona-twins-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $twin1 = "$twinRoot\p1\twin"; $twin2 = "$twinRoot\p2\twin"; $twin3 = "$twinRoot\p3\twin"
+    foreach ($r in $twin1, $twin2, $twin3) {
+        New-Item -ItemType Directory -Force "$r\src" | Out-Null
+        Set-Content "$r\src\main.cs" "// $r"
+        Set-Content "$r\.gitignore" ".dodona/"
+        git -C $r init -b main -q
+        git -C $r add -A
+        git -C $r -c user.email=t@t -c user.name=t commit -q -m init
+    }
+    DodonaBare @("workspace-create", "--name", "recycle", "--member", $twin1, "--member", $twin2) | Out-Null
+    $recycle = ((DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.name -eq 'recycle' }).id
+    StartDaemonFor $recycle | Out-Null
+    $rt1 = DodonaBare @("ticket-create", "--title", "RECYCLED", "--claim", "subtree:twin~2/src", "--workspace", $recycle)
+    Check 'a_colliding_leaf_gets_the_tilde_name' ($rt1 -match 'repo twin~2') $rt1
+    DodonaBare @("workspace-detach", "--member", $twin2, "--workspace", $recycle) | Out-Null
+    DodonaBare @("workspace-attach", "--member", $twin3, "--workspace", $recycle) | Out-Null
+    $recRepos = DodonaBare @("repos", "--workspace", $recycle)
+    Check 'the_tilde_name_is_recycled_onto_the_new_project' `
+        ($recRepos -match 'twin~2' -and $recRepos -match [regex]::Escape($twin3)) $recRepos
+    DodonaBare @("approve", "1", "--workspace", $recycle) | Out-Null
+    $recTok = DodonaBare @("token-request", "1", "--lease", "300", "--workspace", $recycle)
+    # Under the defect this is "granted" -- for a repository the ticket was never in, whose main
+    # the land would then have tried to fast-forward with a branch from a different history.
+    Check 'a_recycled_repo_name_cannot_inherit_another_repos_ticket' `
+        ($DODONA_EXIT -ne 0 -and $recTok -match 'no longer in this workspace') $recTok
+    StopDaemonFor $recycle
 
     # ---- forget removes the registry rows and keeps every transcript (§12) ----
     $forgotten = DodonaBare @("workspace-forget", "--workspace", $twin)

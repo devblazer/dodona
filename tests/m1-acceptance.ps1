@@ -82,6 +82,21 @@ try {
     Check 'disjoint_parallel' ($t2 -match 'ticket (\d+) branch') $t2
     if ($t2 -match 'ticket (\d+) ') { $t2id = $Matches[1] } else { $t2id = 0 }
 
+    # ---- claim-extend must not report success for a claim it silently dropped (P0.5) ----
+    # `specs.Select(Claims.Parse).Where(p => p is not null)` threw away every spec it could not
+    # parse and then printed "extended ticket 1" with exit 0. So an agent that wrote
+    # `--claim src/water/new.cs` (no `path:`) was told its claim had been widened, wrote the file,
+    # and hit the gate -- or worse, was allowed to believe the claim covered work it did not.
+    # All specs unparseable meant an empty list, an insert of nothing, and a success message.
+    # ticket-create has always named a bad spec and refused; this now does too.
+    $badExtend = Dodona @("claim-extend", "1", "--claim", "src/water/new.cs")
+    Check 'claim_extend_refuses_a_spec_it_cannot_parse' `
+        ($DODONA_EXIT -ne 0 -and $badExtend -match 'bad claim spec' -and $badExtend -notmatch 'extended ticket') $badExtend
+    # and one good spec among bad ones does not smuggle the bad ones through as a success
+    $mixedExtend = Dodona @("claim-extend", "1", "--claim", "path:src/water/ok.cs", "--claim", "nonsense")
+    Check 'claim_extend_refuses_the_whole_batch_on_one_bad_spec' `
+        ($DODONA_EXIT -ne 0 -and $mixedExtend -notmatch 'extended ticket') $mixedExtend
+
     # ---- 4. hook gate: allow inside claim, deny outside (§6 layer 1) ----
     $wt1 = "$root\.dodona\wt\t1"
     $inJson  = @{ tool_name = 'Write'; tool_input = @{ file_path = "$wt1\src\water\sim.cs" } } | ConvertTo-Json -Compress
