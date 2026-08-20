@@ -1,6 +1,6 @@
 # Review and merge — the ordinary developer flow, with a manager as the reviewer
 
-Status: **R1, R2 and R3 BUILT** (2026-08-20); R4-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
+Status: **R1, R2, R3 and R3.5 BUILT** (2026-08-20); R4-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
 path in code and measuring what the manager is actually told today.
 
 The authority for how a ticket's work gets reviewed and lands on main. It **supersedes
@@ -210,6 +210,52 @@ whole flow** (§10's race — the in-worktree merge and the fast-forward must no
 window in which main can move), and **a land that fails must still leave the worktree clean and
 main untouched**, which is harder to guarantee once the failure is reported asynchronously.
 
+### BUILT, 2026-08-20 — and the shape it settled into
+
+Measured with a real concurrent call, not reasoned about, because reasoning about which thread runs
+what is exactly what kept this invisible. The fixture's verify sleeps ~7 s and `land-status`
+confirms the land is still running at the moment each probe is answered:
+
+| | before | after |
+|---|---|---|
+| `dodona land` returns | when the whole land finishes | **142 ms** |
+| `dodona status` during a land | after the land finishes (~20 s here, 4.6 min under the full gate) | **131 ms** |
+| `dodona say` during a land | ditto — the agent never hears it | **161 ms**, and the agent received it |
+
+Four things worth knowing before touching it:
+
+- **The cheap gate stayed ON the pipe.** `LandGate` — ticket open, repository resolvable, token
+  held, lease alive, trunk actually checked out — costs milliseconds, so those refusals still
+  arrive on the caller's own reply with a non-zero exit. Only past that point does the reply become
+  *landing…*. That is what made §8's "the existing land checks pass unchanged" true rather than
+  aspirational: all 88 of `m1`'s checks passed on the first run against the new protocol.
+- **`dodona land` still blocks the SHELL, deliberately.** The daemon is free; the caller is not.
+  A `land` that returned 0 the instant it started would report success for a land that goes on to be
+  refused, putting a fail-open in every script and every agent that lands and checks the exit code.
+  So the CLI polls `land-status` and exits with the land's own verdict, bounded by
+  `DODONA_LAND_WAIT_SEC` (900 s) whose timeout says in as many words that it is *not* a refusal.
+  `--no-wait` is the opt-in for fire-and-forget — and it is also what makes the asynchrony reachable
+  from a check at all (CLAUDE.md §3.1: an affordance no verb can reach is where the next defect
+  lives).
+- **Two new races existed the moment the land left the pipe, because the serial pipe had been
+  preventing them for free.** A second `land` for a ticket already landing is refused by name; and a
+  `stop-daemon` can now arrive mid-land, which announces and records `land_interrupted` rather than
+  vanishing — re-running `land` is idempotent, since the trunk moves only in the last step. A hot
+  SWAP needed no new guard, but only because of the first constraint above: `Blockers` already
+  refuses to swap while a merge token is held, and the token is held across the whole flow. Break
+  that constraint and a swap starts cutting lands in half, silently.
+- **R4 INHERITS A TIGHT I7 BUDGET, AND SHOULD READ THIS FIRST.** Proving the asynchrony needs a
+  verify that genuinely takes seconds, so `m1`'s fixture sleeps ~7 s once: m1 went **20 s → 29.5 s**
+  and it is a `SoloSuites` member, so that lands on the wall clock directly. `dev gate` measured
+  **292.8 s against the 300 s I7 budget** on 2026-08-20 — passing, with 7 s of headroom. R4 and R5
+  add checks to the same suite. Do not silently raise the budget to make room, and do not delete
+  coverage to fit: measure, and if earned coverage growth pushes past 300 s, raise it against that
+  measurement the way the 120 s → 180 s raise was justified (CLAUDE.md §1).
+- **`_lanes` had to become a `ConcurrentDictionary`.** The land's tail retires the lane, so a plain
+  `Dictionary` was now written from a background thread for minutes at a time while the control pipe
+  read and wrote the same buckets. `_brainLo` already carried that reasoning for the same reason;
+  `_lanes` only became unsafe when something long-running left the pipe.
+
 ## 6. Where the human still is
 
 Unchanged, and deliberately: `approve` gates `token-request`, and this repo stays
@@ -238,7 +284,7 @@ more there, not less: it is what a human reviewer reads first.
 | **R1 — BUILT** | §3's flow: `land` merges main into the branch, re-verifies **in the worktree**, then fast-forwards. Verify moves ahead of the merge (absorbs `WORK-ISOLATION` P4). | `m1`: a ticket whose main has moved lands without human intervention; a red verify leaves main's sha **unchanged**. `dev prove` first — the phase most likely to look green against the old order. |
 | **R2 — BUILT** | D-R4's silent-drop check. | `m1`: a branch that resolves by reverting a file main changed is refused, and the message names the file. Fixture: land one ticket, then have a second resolve by discarding it. |
 | **R3 — BUILT** | D-R5: retire the three refusals (**four**, see below). Re-aim `m1`'s two gate checks and `m2`'s backstop check rather than deleting them. | `m1`: two tickets over one path both get created; an agent writes freely across its own worktree; the gate still refuses the **shared checkout** (layer 1 untouched). |
-| **R3.5** | D-R14: the land comes OFF the serial control pipe. `land` returns *landing…* and the outcome arrives as an announcement; the token stays held across the whole flow and a failure still leaves main untouched. | `m1`: a land whose verify takes seconds does not block a concurrent `status`/`say` on the same daemon; the outcome still reaches the caller; the existing land checks pass unchanged against the new reply shape. |
+| **R3.5 — BUILT** | D-R14: the land comes OFF the serial control pipe. `land` returns *landing…* and the outcome arrives as an announcement; the token stays held across the whole flow and a failure still leaves main untouched. | `m1`: a land whose verify takes seconds does not block a concurrent `status`/`say` on the same daemon; the outcome still reaches the caller; the existing land checks pass unchanged against the new reply shape. **All three held, measured** — see D-R14. |
 | **R4** | D-R8's record, assembled at completion. Gated on the worktree having changed (D-R13). | `m1`: a finished ticket produces exactly one record carrying diffstat, verify result, drop-check and the agent's report; a chatty lane produces no second one. |
 | **R5** | D-R9/D-R10/D-R12: the manager reads it, may send back, bounded at three, and **cannot approve**. | `brain`: a send-back reaches the lane as input; the fourth round goes to the operator; a manager "approval" grants **nothing**. |
 | **R6** | D-R11: the write-up renders in the approval ask (absorbs `WORK-ISOLATION` P5). | `ui-use`: the ask carries the summary and answering it grants the token, at a live window. |
@@ -359,7 +405,10 @@ an empty chair until R5, and that is the honest reason R4–R6 are not optional 
 
   The asynchronous land is still worth doing — but for its own reason, which is that a land must
   not freeze the daemon, **not** as a way to afford the full gate. It now HAS its own decision and
-  phase: **D-R14 and R3.5**, scheduled before R4. Landing it does not reopen this question. Note that the verify cost is **not** doubled the way
+  phase: **D-R14 and R3.5, landed 2026-08-20**. Landing it did not reopen this question, and
+  `dodona.json`'s `//verify` block now says so at the point of use — the freeze argument is
+  repaired there rather than deleted, precisely so a future reader cannot mistake a repaired
+  argument for permission to widen the array back. Note that the verify cost is **not** doubled the way
   this question assumed: R1 does not add a verify, it *moves* the one that already existed from
   after the ref advance to before it. What is genuinely new is that the agent's own verify during
   development and the land's verify are now two runs of the same thing.
@@ -419,6 +468,32 @@ plan shipped without one and handing it off meant re-deriving everything (`a403f
   `m2:backstop_refuses_outside_claim`. Point them at layer 1 — the shared checkout is still refused —
   and at the new facts. A suite that keeps its count while asserting less is this project's
   most-repeated failure.
+
+### R3.5 — the land off the pipe (BUILT; this is the map R4 builds on)
+
+- **`LandBegin(long tid, out bool started)`** (`Daemon.cs`) — what `case "land"` calls now. The
+  cheap gate, then `Task.Run(...)`, then the *landing…* reply. Its doc comment carries the protocol
+  and the two constraints; read it before adding anything to the land path.
+- **`LandGate(long tid, out LandPlan? plan)`** — the milliseconds that stay on the pipe. Returns a
+  refusal string, or null plus the `LandPlan` the expensive half runs on (`Ticket`, `RepoPath`,
+  `Cfg`, `TokenId`, resolved once so the two halves cannot disagree about which repository).
+- **`LandFlow(LandPlan plan, out bool ok)`** — the old `LandOp` body from the in-worktree merge
+  onward, unchanged in content and order. **R4's record assembles here or beside here**, which is
+  the reason D-R14 came first: this is off the pipe, and `LandOp` was not.
+- **`LandRun`** + **`_lands`** (`ConcurrentDictionary<long, LandRun>`) — one land, in flight or
+  finished, in memory only. `Done` is volatile and written last, so a reader that sees it also sees
+  `Ok` and `Message`.
+- **`case "land-status"`** (`Daemon.cs`) — `state=running elapsed=Ns` | `state=done ok=0|1` plus the
+  outcome | `state=none`. **It must never summon a daemon** (CLAUDE.md §3.2).
+- **`LandCli(long tid)`** (`Program.cs`) — the polling client, and `--no-wait`. `Client` grew an
+  optional `capture` list (so the poll does not print every tick) and a `neverSummon` flag (inside
+  `LandCli` the parsed `cmd` is still `"land"`, so the name-based no-summon test would miss it).
+  `--no-wait` had to be added to `boolFlags` — a valueless flag that is not declared there eats the
+  next argument, which is the incident that comment records.
+- **`_lanes` is a `ConcurrentDictionary`** now, and `.Remove(k)` became `.TryRemove(k, out _)` at
+  eight sites.
+- **`Blockers(NewBuild nb)`** — unchanged, and it is what stops a swap cutting a land in half. It
+  covers an in-flight land only because the token is held throughout.
 
 ### R4 — the completion record
 

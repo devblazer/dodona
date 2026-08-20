@@ -218,7 +218,8 @@ async Task<int> Dispatch() => cmd switch
     "token-renew" => Client(new { cmd = "token-renew", ticket = long.Parse(pos[0]), lease = int.Parse(One("lease") ?? "120") }),
     "token-release" => Client(new { cmd = "token-release", ticket = long.Parse(pos[0]) }),
     "token-status" => Client(new { cmd = "token-status" }),
-    "land" => Client(new { cmd = "land", ticket = long.Parse(pos[0]) }),
+    "land" => LandCli(long.Parse(pos[0])),
+    "land-status" => pos.Count > 0 ? Client(new { cmd = "land-status", ticket = long.Parse(pos[0]) }) : Fail("land-status <ticket>"),
     "ack" => Client(new { cmd = "ack", id = long.Parse(pos[0]) }),
     "undo-route" => Client(new { cmd = "undo-route", id = long.Parse(pos[0]) }),
     "ui" => Ui(),
@@ -1448,9 +1449,55 @@ int UiHeard()
         : Client(new { verb = "heard", text = words, partial, epoch = long.Parse(epochArg) }, UiPipeName());
 }
 
+// `dodona land <ticket>`, over R3.5's asynchronous protocol (D-R14). The daemon answers
+// `landing…` in milliseconds and does the merge, the verify and the fast-forward on its own
+// task — so the app stays answerable during a land, which is the whole point of the phase.
+//
+// THIS STILL BLOCKS, AND THAT IS DELIBERATE. The daemon is free; the shell is not, because a
+// `dodona land` that returned 0 the instant it started would report success for a land that goes
+// on to be refused — and every script and every agent that lands and checks the exit code would
+// have a fail-open in it. So the outcome is polled and the exit code is the land's. `--no-wait`
+// is the opt-in for a caller that genuinely wants to fire and forget (and it is what makes the
+// asynchrony reachable from a check at all: an affordance no verb can reach is where the next
+// defect lives, CLAUDE.md §3.1).
+//
+// The wait is bounded, per §0.1 — a wait with no deadline is *never stuck* violated in a new
+// costume. What un-sticks it is the land finishing; the deadline exists only so a wedged verify
+// step cannot hold a terminal forever, and it says plainly that it is not a refusal.
+int LandCli(long tid)
+{
+    var start = Client(new { cmd = "land", ticket = tid });
+    if (start != 0) return start;                                    // refused by the cheap gate, on the spot
+    if (opts.ContainsKey("no-wait")) return 0;
+
+    var waitSec = int.TryParse(Environment.GetEnvironmentVariable("DODONA_LAND_WAIT_SEC"), out var ws) && ws > 0 ? ws : 900;
+    var deadline = DateTime.UtcNow.AddSeconds(waitSec);
+    while (true)
+    {
+        var lines = new List<string>();
+        // neverSummon: a poll must never wake a daemon. If the daemon died mid-land there is
+        // nothing to report and summoning one would spawn its whole warm-up to say so
+        // (CLAUDE.md §3.2's incident, on a 250 ms timer).
+        var code = Client(new { cmd = "land-status", ticket = tid }, null, lines, neverSummon: true);
+        if (!(lines.Count > 0 && lines[0].StartsWith("state=running")))
+        {
+            foreach (var l in lines.Where(l => !l.StartsWith("state="))) Console.WriteLine(l);
+            return code;
+        }
+        if (DateTime.UtcNow >= deadline)
+        {
+            Console.WriteLine($"still landing after {waitSec}s — THIS IS NOT A REFUSAL: the land is still running in the daemon. " +
+                              $"`dodona land-status {tid}` reports the outcome and it announces itself in the pane. " +
+                              "DODONA_LAND_WAIT_SEC raises this wait.");
+            return 1;   // fail closed: a caller must not read "still going" as "landed"
+        }
+        Thread.Sleep(250);
+    }
+}
+
 // ---------------------------------------------------------------- client role
 
-int Client(object request, string? pipeName = null)
+int Client(object request, string? pipeName = null, List<string>? capture = null, bool neverSummon = false)
 {
     pipeName ??= CtlPipe();
     var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
@@ -1479,7 +1526,9 @@ int Client(object request, string? pipeName = null)
         // Deliberately NARROW: `tail`, `say` and the rest still summon, because bringing the
         // daemon back is what the caller wants there -- and the shims have been buffering. Only
         // the command people reach for to ASK A QUESTION is changed.
-        var neverSummons = cmd is "stop-daemon" or "status";
+        // `land-status` is on the list for the same reason, and `neverSummon` carries it for the
+        // poll inside LandCli — where `cmd` is still "land", so the name test alone would miss it.
+        var neverSummons = neverSummon || cmd is "stop-daemon" or "status" or "land-status";
         if (!isWorkspaceCtl || neverSummons || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
             return Fail(
                 // Say what IS known and what starts nothing, so the answer is useful rather than
@@ -1511,7 +1560,10 @@ int Client(object request, string? pipeName = null)
         while ((line = r.ReadLine()) is not null && line != "##end")
         {
             if (line.StartsWith("##exit ")) { exitOverride = int.Parse(line[7..]); continue; }
-            Console.WriteLine(line);
+            // A caller that passed `capture` is deciding what to print (LandCli polls, and
+            // printing every poll would bury the outcome). Everything else prints as it always
+            // did — the daemon's reply IS the output.
+            if (capture is not null) capture.Add(line); else Console.WriteLine(line);
             if (line.StartsWith("error:")) err = true;
         }
     }
@@ -1567,7 +1619,7 @@ static (string? cmd, string root, PathSource rootSource, Dictionary<string, List
     // added -- the one the LEFT ALONE message tells you to use -- has never once worked. Found
     // by running it (`stop-all --lanes --orphans` named two ghost lanes, then left them);
     // reading the code that prints the message would never have shown it.
-    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk", "shell", "concierge", "lanes", "orphans", "partial" };
+    var boolFlags = new HashSet<string> { "json", "successor", "all", "adopt", "shortcut", "hi", "bulk", "shell", "concierge", "lanes", "orphans", "partial", "no-wait" };
 
     string? cmd = null;
     string root = Environment.CurrentDirectory;
@@ -1649,7 +1701,12 @@ static void Help() => Console.WriteLine("""
       dodona approve <ticket> | tickets
     merge (§7):
       dodona token-request <ticket> [--lease sec] | token-renew | token-release | token-status
-      dodona land <ticket>
+      dodona land <ticket> [--no-wait]
+              merges main into the branch, re-verifies IN THE WORKTREE, then fast-forwards.
+              It runs OFF the daemon's control pipe (R3.5), so the app stays answerable for
+              the whole of it; this command polls the outcome and exits with it. --no-wait
+              returns as soon as the land has started.
+      dodona land-status <ticket>    state=running | state=done, and the outcome. Starts nothing.
     hot swap (§13/§14 — nothing interrupted, no session lost):
       dodona gate-hook --lane <n> [--ticket <n>] [--workspace <id>] [--worktree <dir>]
               the write gate, run BY CLAUDE CODE and not by hand: reads a PreToolUse

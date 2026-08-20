@@ -480,7 +480,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 |---|---|
 | `unit` | the pure logic: claim algebra, policy table, repo resolution, canonical paths, the code-only routing decisions |
 | `m0` | daemon death mid-turn, and Phase 3's whole invariant: a wrapper that outlives its agent, a lane with no shim record, the lease, reconcile asking the OS |
-| `m1` | the write gate (layer 1), the merge token, and the land: merge main in, verify, fast-forward, dropped-nothing |
+| `m1` | the write gate (layer 1), the merge token, and the land: merge main in, verify, fast-forward, dropped-nothing, and that the whole of it runs **off the control pipe** |
 | `m2` | routing, presence, and what a branch touched (recorded, not judged — the backstop is retired) |
 | `m3` | the UI as a view over the store |
 | `m4` | hot swap (runs a REAL build — the slow one) |
@@ -764,6 +764,17 @@ dodona ps                    # what is actually running, machine-wide
 shims have been buffering the whole time: `say`, `tail`, `input`, `lane-start`, `tickets`, and the
 rest. Reach for one of those when you mean to wake a workspace, and expect the four warm-up
 processes that come with it.
+
+**THE CONTROL PIPE IS SERIAL, SO A SLOW HANDLER FREEZES THE WHOLE DAEMON.** One
+`NamedPipeServerStream` instance, `HandleAsync` awaited inline — so for as long as any command is
+being handled, that daemon answers *nothing*: no UI, no lane input, no `say`, no other repository's
+work. The land ran there for months and nobody noticed, because the operator's `verify` was fast
+enough to look like latency rather than a freeze; the full `dev gate` would have held it **4.6
+minutes** (`REVIEW-AND-MERGE-PLAN` D-R14, fixed by R3.5 — `LandBegin` answers in 142 ms and the
+merge, verify and fast-forward run on their own task). If you add a command that can take longer
+than about a second, it goes on its own task and reports back through an announcement plus a
+`*-status` command, and you write the check that makes a **real concurrent call** during it.
+Reasoning about which thread runs what is what kept this invisible.
 
 And when you must run a real command against a live workspace — `publish` in particular, which
 §2 requires — say so in your report, because it is an action on the operator's machine and not a

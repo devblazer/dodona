@@ -130,7 +130,13 @@ sealed class Daemon
     /// one-member workspace they are the same thing they always were.</summary>
     readonly string _primary, _instanceId, _wsName, _ctlPipe;
     readonly Store _store;
-    readonly Dictionary<long, LaneRuntime> _lanes = new();
+    /// <summary>CONCURRENT SINCE R3.5, and that is a correctness fix rather than a precaution.
+    /// The land now runs on its own task (D-R14), and its tail RETIRES THE LANE — so a plain
+    /// `Dictionary` would be written from a background thread for minutes at a time while the
+    /// control pipe reads and writes the same buckets. `_brainLo` above carries the identical
+    /// reasoning for the identical reason; this one only became unsafe when something long-running
+    /// left the pipe.</summary>
+    readonly ConcurrentDictionary<long, LaneRuntime> _lanes = new();
     readonly SemaphoreSlim _routerLock = new(1, 1);   // one classification at a time on the warm session
     /// <summary>The two brain tiers, PER PROJECT (P5.3, decision D-L8) — a manager is a
     /// per-project scope (GLOSSARY), so "the brain" is not one thing any more.
@@ -804,7 +810,7 @@ sealed class Daemon
             // Ask the SHIM to go, over its own pipe — it takes the child tree with it and exits
             // cleanly, which needs no pid bookkeeping (CLAUDE.md §4). Walking away instead is
             // what left three unkillable shims running out of the compiler's output directory.
-            if (_lanes.TryGetValue(l.Id, out var rrt)) { rrt.Shutdown(); _lanes.Remove(l.Id); }
+            if (_lanes.TryGetValue(l.Id, out var rrt)) { rrt.Shutdown(); _lanes.TryRemove(l.Id, out _); }
             else if (l.Pipe is { Length: > 0 }) await LaneRuntime.ShutdownShimAsync(l.Pipe);
             _brainLocks.TryRemove(l.Id, out _);
             if (l.Role == "brain" && _brainLo.TryGetValue(key, out var lo) && lo == l.Id) _brainLo.TryRemove(key, out _);
@@ -1102,7 +1108,7 @@ sealed class Daemon
                 if (_lanes.TryGetValue(lane, out var srt))
                 {
                     srt.Shutdown();
-                    _lanes.Remove(lane);
+                    _lanes.TryRemove(lane, out _);
                 }
                 _store.LaneState(lane, "dead");
                 if (_store.KvGet("focused_lane") == lane.ToString()) _store.KvSet("focused_lane", "");
@@ -1773,11 +1779,46 @@ sealed class Daemon
                     w.WriteLine($"{(manyRepos ? $"repo={tok.Repo,-12} " : "")}holder={(tok.Holder?.ToString() ?? "none")} generation={tok.Generation} expires={tok.ExpiresTs ?? "-"} main={(tok.MainSha is { Length: >= 8 } s ? s[..8] : "-")}");
                 break;
             }
+            // R3.5 / D-R14: THIS HANDLER NO LONGER PERFORMS THE LAND. It answers in
+            // milliseconds — the cheap gate, then `landing…` — and the merge, the verify and the
+            // fast-forward run on their own task. See LandBegin for why, and for the two
+            // constraints that survive the change.
             case "land":
             {
                 var tid = e.GetProperty("ticket").GetInt64();
-                w.WriteLine(LandOp(tid, out var landOk));
-                if (!landOk) w.WriteLine("##exit 1");
+                w.WriteLine(LandBegin(tid, out var landStarted));
+                if (!landStarted) w.WriteLine("##exit 1");
+                break;
+            }
+            // The other half of the protocol: where the outcome is read from. A land also
+            // ANNOUNCES its outcome (into the ticket's pane, or the dispatcher's), so nothing
+            // depends on anyone polling — this exists so `dodona land` can still hand a shell an
+            // exit code, and so a person can ask.
+            //
+            // IT MUST NEVER SUMMON A DAEMON, and the client end enforces that (CLAUDE.md §3.2's
+            // incident: a summoned daemon runs its warm-up and spawns four model-backed
+            // processes). A poll that woke a daemon to be told "no land here" would be that
+            // incident on a 250 ms timer.
+            case "land-status":
+            {
+                var tid = e.GetProperty("ticket").GetInt64();
+                if (!_lands.TryGetValue(tid, out var run))
+                {
+                    // Deliberately NOT an error about the ticket: this daemon simply has no land
+                    // for it. In-flight lands are in memory only, so a restart forgets them —
+                    // which is correct (nothing can go stale) and has to be said out loud.
+                    w.WriteLine($"state=none");
+                    w.WriteLine($"no land in flight for ticket {tid} in this daemon — `dodona tickets` says whether it landed, and a daemon restart forgets lands it did not finish");
+                    w.WriteLine("##exit 1");
+                    break;
+                }
+                if (run.Done)
+                {
+                    w.WriteLine($"state=done ok={(run.Ok ? 1 : 0)}");
+                    w.WriteLine(run.Message);
+                    if (!run.Ok) w.WriteLine("##exit 1");
+                }
+                else w.WriteLine($"state=running elapsed={(int)(DateTime.UtcNow - run.StartedUtc).TotalSeconds}s");
                 break;
             }
             case "policy":
@@ -1883,7 +1924,7 @@ sealed class Daemon
                 {
                     if (l.State == "dead" || !Projects.IsManagementRole(l.Role)) continue;
                     if (!string.Equals(RegistrationKey(l, goneProjects), gonePath, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (_lanes.TryGetValue(l.Id, out var mrt)) { mrt.Shutdown(); _lanes.Remove(l.Id); }
+                    if (_lanes.TryGetValue(l.Id, out var mrt)) { mrt.Shutdown(); _lanes.TryRemove(l.Id, out _); }
                     else if (l.Pipe is { Length: > 0 }) await LaneRuntime.ShutdownShimAsync(l.Pipe);
                     _brainLocks.TryRemove(l.Id, out _);
                     if (l.Role == "brain") _brainLo.TryRemove(gonePath, out _);
@@ -1907,7 +1948,7 @@ sealed class Daemon
                     // exits cleanly, which needs no pid bookkeeping (CLAUDE.md §4). A lane this
                     // daemon never connected to still has a recorded pipe, and a shim that has
                     // been buffering for a predecessor is exactly the case worth covering.
-                    if (_lanes.TryGetValue(l.Id, out var grt)) { grt.Shutdown(); _lanes.Remove(l.Id); }
+                    if (_lanes.TryGetValue(l.Id, out var grt)) { grt.Shutdown(); _lanes.TryRemove(l.Id, out _); }
                     else if (l.Pipe is { Length: > 0 }) await LaneRuntime.ShutdownShimAsync(l.Pipe);
                     _store.LaneState(l.Id, "unreachable");
                     _store.Event("lane_project_detached", l.Id, $"project={gonePath} cwd={l.Cwd}");
@@ -1982,8 +2023,29 @@ sealed class Daemon
                 break;
 
             case "stop-daemon":
+            {
+                // A STOP CAN NOW ARRIVE DURING A LAND, which R3.5 made possible: the pipe used to
+                // be held for the whole land, so this command physically could not be delivered
+                // until it finished. Losing the land's task with the process is recoverable —
+                // main only moves in the very last step, and re-running `land` re-merges (a
+                // no-op), re-verifies and re-fast-forwards under the token the ticket still
+                // holds. What is NOT acceptable is that happening silently (CLAUDE.md §0.1's
+                // quietly-stale), so it is announced, recorded, and said on this reply.
+                //
+                // A hot SWAP needs no equivalent: `Blockers` already refuses to swap while any
+                // merge token is held, and R3.5's first load-bearing constraint is that the token
+                // is held across the whole land. So an in-flight land arms the swap rather than
+                // being cut in half by it.
+                foreach (var inflight in _lands.Values.Where(x => !x.Done).ToList())
+                {
+                    _store.Event("land_interrupted", null, $"ticket {inflight.Ticket}: daemon stopped mid-land");
+                    if (_store.Ticket(inflight.Ticket) is Store.TicketRow it)
+                        Announce(it, $"ticket {inflight.Ticket}'s land was interrupted by a daemon stop — nothing was lost (the trunk only moves in the last step): re-run dodona land {inflight.Ticket}");
+                    w.WriteLine($"warning: ticket {inflight.Ticket} was mid-land — nothing was lost, re-run dodona land {inflight.Ticket}");
+                }
                 w.WriteLine("stopping (lanes keep running)");
                 return true;
+            }
 
             case "workspace-forgotten":
             {
@@ -2013,7 +2075,7 @@ sealed class Daemon
                 foreach (var l in _store.LanesAll())
                 {
                     if (l.State == "dead" || l.Role == "dispatcher") continue;
-                    if (_lanes.TryGetValue(l.Id, out var frt)) { frt.Shutdown(); _lanes.Remove(l.Id); }
+                    if (_lanes.TryGetValue(l.Id, out var frt)) { frt.Shutdown(); _lanes.TryRemove(l.Id, out _); }
                     else if (l.Pipe is { Length: > 0 }) await LaneRuntime.ShutdownShimAsync(l.Pipe);
                     _brainLocks.TryRemove(l.Id, out _);
                     if (Projects.IsManagementRole(l.Role))
@@ -2097,6 +2159,12 @@ sealed class Daemon
 
         // Any repository mid-merge blocks the swap — the tokens are independent, but the
         // daemon that would vanish underneath them is not.
+        //
+        // THIS IS ALSO WHAT COVERS AN IN-FLIGHT LAND (R3.5). Since the land left the control pipe
+        // a swap could arrive in the middle of one, and cutting a land in half is exactly what
+        // this list exists to prevent — it needs no new entry only because R3.5's first
+        // load-bearing constraint is that the token is held across the WHOLE flow. Break that
+        // constraint and this stops covering it, silently.
         foreach (var tok in _store.TokensAll())
         {
             if (tok.Holder is not long h) continue;
@@ -3108,7 +3176,7 @@ sealed class Daemon
                 // ASK IT TO GO, THEN WAIT FOR IT TO BE GONE. The pipe name is deterministic per
                 // lane, so the new shim cannot own it until the old one has actually exited -- see
                 // `WaitLaneProcessesGone` for what racing this produced.
-                if (_lanes.TryGetValue(row.Id, out var old)) { old.Shutdown(); _lanes.Remove(row.Id); }
+                if (_lanes.TryGetValue(row.Id, out var old)) { old.Shutdown(); _lanes.TryRemove(row.Id, out _); }
                 if (!WaitLaneProcessesGone(row.Id, 15000))
                     _store.Event("lane_promotion_slow_exit", row.Id,
                         "the previous shim did not exit in 15s; respawning anyway (the pipe name may still be held)");
@@ -3843,7 +3911,7 @@ sealed class Daemon
             _shutdownAttempts[l.Id] = asked + 1;
             var told = await LaneRuntime.ShutdownShimAsync(l.Pipe!);
             var gone = told && await LaneRuntime.WaitPipeGoneAsync(l.Pipe!);
-            _lanes.Remove(l.Id);           // whatever we had, it is not usable
+            _lanes.TryRemove(l.Id, out _);           // whatever we had, it is not usable
             if (gone) { _store.LaneState(l.Id, "dead"); }
             else clear = false;
             _store.Event("utility_predecessor_live", l.Id,
@@ -4728,38 +4796,115 @@ sealed class Daemon
         return drops;
     }
 
-    /// <summary>The land (§7, and `docs/REVIEW-AND-MERGE-PLAN.md` §3): the daemon executes
-    /// the one atomic ref advance — but it now does the ordinary developer flow first
-    /// (D-R1), in this order and under the merge token throughout:
-    ///
-    /// <code>
-    ///   git merge &lt;main&gt;    IN THE WORKTREE, on the ticket branch
-    ///   &lt;verify&gt;             IN THE WORKTREE, on the merged result
-    ///   git merge --ff-only  in the shared checkout: now guaranteed
-    /// </code>
-    ///
-    /// **What changed and why.** This used to be `merge --ff-only` and nothing else: when
-    /// main had moved it refused with *"rebase &lt;branch&gt; onto &lt;main&gt; and re-verify
-    /// first"* — and **nothing in the tree performed that rebase**, so concurrent work
-    /// could not land at all. Worse, verify ran AFTER the ref advance, in the repository
-    /// that had just changed, so a red verify had already shipped.
-    ///
-    /// **ff-only is now an ASSERTION rather than a policy (D-R2).** After main has been
-    /// merged into the branch, the merge back *is* a fast-forward — measured, not assumed:
-    /// git itself reports `Fast-forward` and main's tree comes out byte-identical to the
-    /// branch tip that was verified. That identity is the whole reason verifying the
-    /// worktree is equivalent to verifying main (`WORK-ISOLATION-PLAN` D-5), and it is why
-    /// verify may move ahead of the merge at all. So if ff-only fails *now*, main moved
-    /// despite the token — a real fault, and refusing is correct.
-    ///
-    /// **The ordering is the trap, not the merge** (plan §10). The in-worktree merge must
-    /// happen while the token is HELD, which is why it lives here, below the holder check,
-    /// and never in `token-request` before the grant: otherwise two lanes both merge main
-    /// in, both believe they verified against current main, and the second one's
-    /// fast-forward is against a main that moved underneath it.</summary>
-    string LandOp(long tid, out bool ok)
+    /// <summary>One land, in flight or finished (R3.5). The whole of the phase's state, and it
+    /// is deliberately in memory: a daemon that restarts forgets a land it did not finish, which
+    /// is the correct answer rather than a gap — a persisted "landing" row is exactly the kind of
+    /// thing that outlives its reason and goes quietly stale (CLAUDE.md §0.1). The recovery is
+    /// re-running `land`, which is idempotent by construction: the trunk moves only in the last
+    /// step, so an interrupted land has merged main in (a no-op next time) and nothing else.</summary>
+    sealed class LandRun
     {
-        ok = false;
+        public LandRun(long ticket) { Ticket = ticket; StartedUtc = DateTime.UtcNow; }
+        public long Ticket { get; }
+        public DateTime StartedUtc { get; }
+        /// <summary>WRITTEN LAST, and volatile, so a reader that sees `Done` also sees `Ok` and
+        /// `Message`. The writer is the land's own task; every reader is the control pipe.</summary>
+        public volatile bool Done;
+        public bool Ok;
+        public string Message = "";
+        public void Finish(bool ok, string msg) { Ok = ok; Message = msg; Done = true; }
+    }
+
+    /// <summary>Lands by ticket id. A finished entry is kept, so the outcome stays readable after
+    /// the caller has gone, and is replaced when the same ticket lands again.</summary>
+    readonly ConcurrentDictionary<long, LandRun> _lands = new();
+
+    /// <summary>Everything the expensive half of a land needs, resolved by the cheap half that
+    /// still runs on the pipe. Passing it forward rather than re-resolving is not a micro-
+    /// optimisation: `RepoOf` and `Config.For` read the registry and the filesystem, and a land
+    /// that answered "your repository is fine" and then acted on a different one would be P0.1's
+    /// wrong-main incident with a race in front of it.</summary>
+    sealed record LandPlan(Store.TicketRow Ticket, string RepoPath, Config Cfg, Store.RepoId TokenId);
+
+    /// <summary>THE LAND IS NOT ON THE CONTROL PIPE ANY MORE (R3.5, decision D-R14). This is what
+    /// `case "land"` calls, and it returns in milliseconds.
+    ///
+    /// **The freeze it removes, measured 2026-08-20.** The pipe is serial — one
+    /// `NamedPipeServerStream` instance, `HandleAsync` awaited inline — and the land ran on it. So
+    /// for the whole duration of a land's verify the daemon answered *nothing*: no UI, no lane
+    /// input, no `say`, no other repository's land. The narrow verify this repo settled on holds
+    /// it ~20 s; the full `dev gate` would hold it **4.6 minutes**. That is CLAUDE.md §0.1's
+    /// *never hung* on the one operation an operator is certainly watching.
+    ///
+    /// **The protocol, which is the part that changes for callers.** The cheap gate stays here —
+    /// ticket open, repository resolvable, token held, lease alive, and the trunk actually checked
+    /// out in the shared checkout — because it costs milliseconds and a caller deserves those
+    /// refusals on the spot. Past that point the reply is *landing…*, and the outcome arrives
+    /// three ways: an announcement in the ticket's pane, an event in the store, and
+    /// `land-status &lt;ticket&gt;`. `dodona land` polls that last one so a shell still gets an
+    /// exit code (see `LandCli` in Program.cs) — the daemon is free either way, which is the
+    /// whole point.
+    ///
+    /// **Two constraints this had to preserve, both load-bearing (plan §5).**
+    ///
+    /// * **The token is held across the WHOLE flow.** Nothing here releases or re-checks it: the
+    ///   in-worktree merge and the fast-forward stay inside one task, so no window exists in
+    ///   which main can move between them. D-R2's fast-forward-as-an-assertion depends on it, and
+    ///   a swap cannot cut a land in half either — `Blockers` already refuses to swap while a
+    ///   merge token is held.
+    /// * **A failed land still leaves the worktree clean and main untouched.** Unchanged, because
+    ///   `LandFlow` is the same code in the same order: every giving-up path aborts its merge and
+    ///   returns before the fast-forward. What the split adds is that the failure is now
+    ///   *reported* asynchronously, so it has to announce itself — and it does, on every path
+    ///   inside `LandFlow`, plus the two this wrapper covers (success, and a throw).
+    ///
+    /// A second `land` for a ticket already landing is refused rather than run twice. That was
+    /// impossible before — the serial pipe made it impossible — and it is the one new race the
+    /// split creates, so it is closed here rather than left to be discovered.</summary>
+    string LandBegin(long tid, out bool started)
+    {
+        started = false;
+        if (_lands.TryGetValue(tid, out var already) && !already.Done)
+            return $"refused: ticket {tid} is already landing ({(int)(DateTime.UtcNow - already.StartedUtc).TotalSeconds}s so far) — dodona land-status {tid}";
+
+        var refusal = LandGate(tid, out var plan);
+        if (refusal is not null) return refusal;
+
+        var run = new LandRun(tid);
+        _lands[tid] = run;
+        started = true;
+        _store.Event("land_started", null, $"ticket {tid}");
+        _ = Task.Run(() =>
+        {
+            string msg;
+            var ok = false;
+            try { msg = LandFlow(plan!, out ok); }
+            catch (Exception ex)
+            {
+                // The pipe used to catch this and turn it into `error: …` on the caller's
+                // reply. Nobody is holding that reply now, so an unhandled throw would be a
+                // land that simply stopped existing — the silent failure this codebase pays for
+                // most (§3's dead routing ladder). It announces, and it says what to do.
+                msg = $"error: the land threw — {ex.Message}";
+                _store.Event("land_threw", null, $"ticket {tid}: {ex}");
+                Announce(plan!.Ticket, $"ticket {tid}'s land threw: {ex.Message} — nothing was lost (the trunk moves only in the last step); re-run dodona land {tid}");
+            }
+            run.Finish(ok, msg);
+            _store.Event(ok ? "land_finished" : "land_refused_async", null, $"ticket {tid}: {msg}");
+            // Success is the one outcome LandFlow does not announce in its own words: it writes
+            // "agent retired" into the lane's pane and used to return the receipt to a caller
+            // that was still waiting. There is no such caller now, so the receipt is announced —
+            // which is also the only announcement a ticket with no lane would ever get.
+            if (ok) Announce(plan!.Ticket, msg);
+        });
+        return $"landing ticket {tid} — merge, verify and fast-forward run off the control pipe; the outcome announces itself and dodona land-status {tid} reports it";
+    }
+
+    /// <summary>The cheap half: milliseconds, and therefore still answered on the pipe. Returns a
+    /// refusal, or null with the plan the expensive half runs on.</summary>
+    string? LandGate(long tid, out LandPlan? plan)
+    {
+        plan = null;
         var t = _store.Ticket(tid);
         if (t is null || t.State != "open") return $"refused: ticket {tid} not open";
 
@@ -4798,6 +4943,49 @@ sealed class Daemon
             Announce(t, $"ticket {tid} cannot land: {where} has '{head}' checked out, not '{cfg.Main}' — check out {cfg.Main} there and re-run dodona land {tid}");
             return $"refused: {where} has '{head}' checked out, not '{cfg.Main}'";
         }
+
+        plan = new LandPlan(t, repoPath, cfg, tokenId);
+        return null;
+    }
+
+    /// <summary>The land (§7, and `docs/REVIEW-AND-MERGE-PLAN.md` §3): the daemon executes
+    /// the one atomic ref advance — but it now does the ordinary developer flow first
+    /// (D-R1), in this order and under the merge token throughout:
+    ///
+    /// <code>
+    ///   git merge &lt;main&gt;    IN THE WORKTREE, on the ticket branch
+    ///   &lt;verify&gt;             IN THE WORKTREE, on the merged result
+    ///   git merge --ff-only  in the shared checkout: now guaranteed
+    /// </code>
+    ///
+    /// **What changed and why.** This used to be `merge --ff-only` and nothing else: when
+    /// main had moved it refused with *"rebase &lt;branch&gt; onto &lt;main&gt; and re-verify
+    /// first"* — and **nothing in the tree performed that rebase**, so concurrent work
+    /// could not land at all. Worse, verify ran AFTER the ref advance, in the repository
+    /// that had just changed, so a red verify had already shipped.
+    ///
+    /// **ff-only is now an ASSERTION rather than a policy (D-R2).** After main has been
+    /// merged into the branch, the merge back *is* a fast-forward — measured, not assumed:
+    /// git itself reports `Fast-forward` and main's tree comes out byte-identical to the
+    /// branch tip that was verified. That identity is the whole reason verifying the
+    /// worktree is equivalent to verifying main (`WORK-ISOLATION-PLAN` D-5), and it is why
+    /// verify may move ahead of the merge at all. So if ff-only fails *now*, main moved
+    /// despite the token — a real fault, and refusing is correct.
+    ///
+    /// **The ordering is the trap, not the merge** (plan §10). The in-worktree merge must
+    /// happen while the token is HELD, which is why it lives here, below the holder check,
+    /// and never in `token-request` before the grant: otherwise two lanes both merge main
+    /// in, both believe they verified against current main, and the second one's
+    /// fast-forward is against a main that moved underneath it.
+    ///
+    /// **AND IT NO LONGER RUNS ON THE CONTROL PIPE** (R3.5 / D-R14). `LandBegin` answers the
+    /// caller; this is what its task runs. See `LandBegin` for the protocol and for the two
+    /// constraints the split had to preserve.</summary>
+    string LandFlow(LandPlan plan, out bool ok)
+    {
+        ok = false;
+        var (t, repoPath, cfg, tokenId) = plan;
+        var tid = t.Id;
 
         // ---- D-R1 step 1: bring main INTO the branch, in the agent's own worktree --------
         //
@@ -4956,7 +5144,7 @@ sealed class Daemon
             if (_lanes.TryGetValue(landedLane, out var lrt))
             {
                 lrt.Shutdown();
-                _lanes.Remove(landedLane);
+                _lanes.TryRemove(landedLane, out _);
             }
             _store.LaneState(landedLane, "dormant");
             _store.LanePresence(landedLane, "landed");

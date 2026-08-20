@@ -53,14 +53,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 gate          
 
 **Run the suites your change touches — the full set belongs at the merge, not at every edit.**
 `dev test` takes any combination and runs them concurrently; CLAUDE.md §1 has the
-change-to-suite table. `dev gate` is ~95 s all in, which is cheap once and expensive twenty
-times, and treating it as the only way to check is how verification turned back into a thing to
+change-to-suite table. This is now the operator's **standing directive** rather than an
+efficiency argument (CLAUDE.md §0.1, 2026-08-20): the heavy suites are not authorized as a
+default anywhere, and `dev gate` at every edit is how verification turned back into a thing to
 skip.
 
-`dev gate` is the real step here — it runs every suite AND asserts the seven invariants
-(nothing left in the build output, the run dirtied nothing, two concurrent worktree builds,
-the live app untouched, the commit guard deployed, the installed build's SHA resolvable, and
-the run inside its time budget). About 70 s of suites plus ~15 s of its own two builds.
+`dev gate` is the real step here — it runs every suite AND asserts the **ten** invariants
+(nothing left in the build output, the run dirtied nothing, no wrapper or agent process that
+outlived it, the commit guard deployed and unoverridden, the live build's commit resolvable in
+`git log`, the run inside its time budget, no changed file quietly altering its BOM or line
+endings, …). **Measured 2026-08-20: ~271 s all in**, against the I7 budget of 300 s. This step
+said "~95 s all in / about 70 s of suites" until then, and a number that stale gets quoted —
+it is what made `dev gate` sound like a thing to reach for casually. Re-measure rather than
+trust either figure; `dev gate` prints its own timings.
 
 Exit code 0, or fix before proceeding. UI affordances need a check in `ui-use` (driven via UI
 Automation), not only a `ui dump` assertion — dumps prove the UI *reports* correctly while the
@@ -74,18 +79,24 @@ wait for the condition the check asserts (`Wait-Until` in `tests/_workspace.ps1`
 
 ```powershell
 git status --short                # FIRST: read the tree. Decide what is yours before staging anything.
-git add -- <path> [<path>...]     # explicit pathspecs, one at a time. Never `add -A`, `add .` or `commit -a`.
+git add -- <path> [<path>...]     # explicit pathspecs are still the habit; see below
 git status --short                # confirm: staged = exactly your paths, nothing else
 git commit -F <message-file>      # -F, not -m: inline messages with quotes break PS 5.1
 ```
 
-**`git add -A` is banned here, and this is not caution — it is the literal mechanism of a
-real loss.** Two sessions share this checkout, so staging the whole tree stages the other
-session's uncommitted work. `f9aaf25` says so in its own message: *"Carries M5.1's lanes.cwd
-migration and its Ver.Schema bump to 8, which were in the working tree from another lane."*
-Its author reviewed the staged list *after* staging, which is exactly this line's shape:
-review that follows the irreversible act is not a control. Review first, then stage what you
-recognise.
+**THE BAN ON `git add -A` HERE WAS STALE, AND SAYING SO IS SAFER THAN LEAVING IT.** This step
+used to forbid it outright on the grounds that *"two sessions share this checkout, so staging
+the whole tree stages the other session's uncommitted work"* — the `f9aaf25` incident, whose own
+message admits it: *"Carries M5.1's lanes.cwd migration and its Ver.Schema bump to 8, which were
+in the working tree from another lane."* **That premise no longer holds.** Every session works in
+a worktree of its own (CLAUDE.md §0.0), so a broad add can only sweep up files this session put
+there, and the sharing that made it dangerous is prevented structurally.
+
+What survives is the habit, for a different and smaller reason: **read the tree before you
+stage.** A broad add still quietly commits a scratch file, a stray `.log`, or a plan document you
+never meant to track — and review that follows the irreversible act is not a control. Explicit
+pathspecs remain the default here because they make you look. A rule kept after its reason
+expired is worse than no rule, though: it teaches that the rules are decoration.
 
 A file you did not put there is not yours to commit, even when it looks finished. Say so in
 your report and leave it in the tree — an orphan needs a decision, not a drive-by.

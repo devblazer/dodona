@@ -441,6 +441,16 @@ are the authority and they must agree.)*
   `ticket_approved`, `token_granted`, `token_queued`, `token_refused_unapproved`,
   `token_released`, `token_expired_reclaimed`, `claim_backstop_refused`, `landed`,
   `land_refused`, `land_inconsistent`, `verify_green`, `verify_red`, `worktree_pruned`,
+  the R1/R2 land-flow kinds (`land_merged_main`, `land_no_worktree`, `land_conflict`,
+  `land_merge_abort_failed`, `land_not_ff_under_token`, `land_drop_check`,
+  `land_drop_check_moot` — **the drop check ran and had nothing to examine, which is a
+  different thing from a check that failed to run** — and `land_silent_drop`),
+  the R3.5 asynchronous-land kinds (`land_started` — the pipe accepted it and let go;
+  `land_finished` / `land_refused_async` — the outcome, written where a caller's reply used to
+  be; `land_threw` — an exception that would once have become `error:` on that reply and would
+  now vanish silently; `land_interrupted` — a daemon stopped mid-land, which was impossible
+  while the land held the pipe, and which loses nothing because the trunk moves only in the
+  last step),
   `worktree_prune_failed`, `ticket_git_failed`, `claim_extend_refused` (a `claim-extend`
   whose claims were outside the ticket's own repository), `token_refused_no_repo` (the
   ticket's repository has left the workspace — the token is refused rather than aimed at

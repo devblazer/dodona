@@ -660,6 +660,102 @@ for k, d in db.execute('SELECT kind, detail FROM events ORDER BY id'):
     Check 'the_whole_tree_covers_a_file_no_other_claim_names' `
         ($DODONA_EXIT -eq 0 -and $wideCovered -match 'covered:') $wideCovered
 
+    # ---- 11c. R3.5 / D-R14: the land runs OFF the serial control pipe --------------------
+    #
+    # The pipe is serial -- one NamedPipeServerStream instance, HandleAsync awaited inline --
+    # and the land used to run ON it. So for the whole of a land's verify the daemon answered
+    # NOTHING: no UI, no lane input, no `say`, no other repository's land. Measured 2026-08-20:
+    # this repo's narrow verify holds it ~20 s and the full `dev gate` would hold it 4.6 minutes.
+    #
+    # THE ONLY HONEST PROOF IS A REAL CONCURRENT CALL. Reasoning about which thread runs what is
+    # what made this defect invisible for as long as it existed, so the verify below genuinely
+    # sleeps and the checks genuinely talk to the daemon while it does. `land-status` is read
+    # BEFORE and AFTER the probes: "still running afterwards" is what makes the probes evidence
+    # rather than a race that happened to land after the verify finished.
+    #
+    # No commit for the config change, following 10b: Config.For re-reads dodona.json per call
+    # and the ticket branch never touches it, so a dirty shared checkout is harmless here.
+    Set-Content "$root\dodona.json" '{ "main": "main", "verify": ["ping -n 8 127.0.0.1 > nul", "echo verify-ok"] }'
+    $t8 = Dodona @("ticket-create", "--title", "ASYNC", "--claim", "path:src/async/pipe.cs")
+    if ($t8 -match 'ticket (\d+) ') { $t8id = $Matches[1] }
+    Dodona @("approve", "$t8id") | Out-Null
+    Dodona @("token-request", "$t8id") | Out-Null
+    $wt8 = "$root\.dodona\wt\t$t8id"
+    New-Item -ItemType Directory -Force "$wt8\src\async" | Out-Null
+    Set-Content "$wt8\src\async\pipe.cs" "// off the pipe"
+    git -C $wt8 add -A
+    git -C $wt8 -c user.email=t@t -c user.name=t commit -q -m "off the pipe"
+    $t8Tip = (git -C $wt8 rev-parse HEAD)
+    $mainBeforeAsync = (git -C $root rev-parse main)
+
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $landAsync = Dodona @("land", "$t8id", "--no-wait")
+    $startMs = $sw.ElapsedMilliseconds
+    Check 'land_returns_before_its_verify_has_run' `
+        ($DODONA_EXIT -eq 0 -and $landAsync -match "landing ticket $t8id" -and $startMs -lt 3000) "${startMs}ms: $landAsync"
+    $stateEarly = Dodona @("land-status", "$t8id")
+    Check 'land_status_says_running_while_it_runs' ($stateEarly -match 'state=running') $stateEarly
+
+    # THE CHECK THIS PHASE EXISTS FOR. Under the old build this command could not be answered
+    # at all until the land finished.
+    #
+    # MEASURED on this machine 2026-08-20, with `land-status` confirming the land was still
+    # running at the time: `land --no-wait` returned in 142 ms while its verify slept ~7 s,
+    # `status` answered in 131 ms and `say` in 161 ms (and the fake agent received it). The
+    # 3000 ms budgets are a 20x margin for a loaded machine, not a measurement -- the
+    # measurement is in this comment, and `state=running` is what makes the number mean
+    # anything. Read them by setting a threshold to `-lt 1` and reading the FAIL detail.
+    $statusSw = [Diagnostics.Stopwatch]::StartNew()
+    $duringStatus = Dodona @("status")
+    $statusMs = $statusSw.ElapsedMilliseconds
+    $saySw = [Diagnostics.Stopwatch]::StartNew()
+    $duringSay = Dodona @("say", "$plainId", "a sentence typed during a land")
+    $sayMs = $saySw.ElapsedMilliseconds
+    $sayExit = $DODONA_EXIT      # captured HERE: two more Dodona calls follow and each overwrites it
+    # A second land of the same ticket, while one is in flight: impossible before (the serial
+    # pipe made it impossible), so it is the one new race the split creates. Closed by name.
+    $secondLand = Dodona @("land", "$t8id", "--no-wait")
+    $secondLandExit = $DODONA_EXIT
+    $stateLate = Dodona @("land-status", "$t8id")
+    Check 'status_answers_during_a_land' `
+        ($statusMs -lt 3000 -and $duringStatus -match 'lanes' -and $stateLate -match 'state=running') "${statusMs}ms late=[$stateLate] $duringStatus"
+    Check 'say_answers_during_a_land' `
+        ($sayMs -lt 3000 -and $sayExit -eq 0 -and $stateLate -match 'state=running') "${sayMs}ms exit=$sayExit late=[$stateLate] $duringSay"
+    Check 'a_second_land_of_the_same_ticket_is_refused_while_one_runs' `
+        ($secondLandExit -eq 1 -and $secondLand -match 'already landing') $secondLand
+
+    # ...and the outcome still arrives. Nobody is holding the reply that used to carry it.
+    Wait-Until { (Dodona @("land-status", "$t8id")) -match 'state=done' } 60000 "ticket $t8id's land to finish" | Out-Null
+    $finalState = Dodona @("land-status", "$t8id")
+    Check 'the_outcome_of_an_async_land_reaches_a_later_reader' `
+        ($DODONA_EXIT -eq 0 -and $finalState -match 'state=done ok=1' -and $finalState -match "landed ticket $t8id") $finalState
+    git -C $root merge-base --is-ancestor $t8Tip main
+    $t8IsAncestor = ($LASTEXITCODE -eq 0)
+    $mainAfterAsync = (git -C $root rev-parse main)
+    Check 'an_async_land_still_advances_main' `
+        ($t8IsAncestor -and $mainAfterAsync -ne $mainBeforeAsync) "ancestor=$t8IsAncestor before=$mainBeforeAsync after=$mainAfterAsync tip=$t8Tip"
+    # The announcement is how the outcome reaches the operator when no caller is waiting, and
+    # a land with no lane would otherwise finish in silence.
+    $t8Panes = Invoke-StoreSql $storeDb "SELECT body FROM pane_events WHERE kind = 'announcement'"
+    Check 'the_async_land_announces_its_outcome' ($t8Panes -match "landed ticket $t8id") $t8Panes
+
+    # The waiting form, which is what every other check in this suite uses: `dodona land` still
+    # prints the outcome and still exits with it, because a land that returned 0 the moment it
+    # STARTED would put a fail-open in every script that lands and checks the exit code.
+    Set-Content "$root\dodona.json" '{ "main": "main", "verify": ["echo verify-ok"] }'
+    $t9 = Dodona @("ticket-create", "--title", "WAITED", "--claim", "path:src/waited/box.cs")
+    if ($t9 -match 'ticket (\d+) ') { $t9id = $Matches[1] }
+    Dodona @("approve", "$t9id") | Out-Null
+    Dodona @("token-request", "$t9id") | Out-Null
+    $wt9 = "$root\.dodona\wt\t$t9id"
+    New-Item -ItemType Directory -Force "$wt9\src\waited" | Out-Null
+    Set-Content "$wt9\src\waited\box.cs" "// waited"
+    git -C $wt9 add -A
+    git -C $wt9 -c user.email=t@t -c user.name=t commit -q -m "waited"
+    $landWaited = Dodona @("land", "$t9id")
+    Check 'the_waiting_form_prints_the_start_and_the_outcome' `
+        ($DODONA_EXIT -eq 0 -and $landWaited -match "landing ticket $t9id" -and $landWaited -match "landed ticket $t9id") $landWaited
+
     # ---- 12. the causal chain is in the store (§12) ----
     $events = (python -c "
 import sqlite3
@@ -669,7 +765,9 @@ print('\n'.join(k for (k,) in db.execute('SELECT kind FROM events ORDER BY id'))
     # R1 added three: the daemon merging main in, a conflict it refused to guess at, and a
     # verify that went red BEFORE the ref moved (which under the old order was unreachable --
     # verify_red could only ever be written after main had already advanced).
-    foreach ($k in 'ticket_created','claim_overlap','token_refused_unapproved','token_granted','token_queued','landed','verify_green','token_expired_reclaimed','worktree_pruned','land_merged_main','land_conflict','verify_red') {
+    # R3.5 added two more: a land that STARTED (which is all the pipe now knows) and one that
+    # finished off it. Their absence would mean the land never left the pipe.
+    foreach ($k in 'ticket_created','claim_overlap','token_refused_unapproved','token_granted','token_queued','landed','verify_green','token_expired_reclaimed','worktree_pruned','land_merged_main','land_conflict','verify_red','land_started','land_finished') {
         Check "event_$k" ([bool]($events -match $k))
     }
 
