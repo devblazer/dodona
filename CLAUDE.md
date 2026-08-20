@@ -89,6 +89,19 @@ nothing while looking installed).
     point of use.
   - **Do not propose widening it back** on the grounds that a subset might miss something.
     It might; that is the trade the operator has made, twice now, knowing it.
+- **Speed beats thoroughness where the two conflict, and that is a decision rather than a
+  preference** (standing directive, 2026-08-21, in their words: *"We don't wanna hold agents up
+  forever, because your costs are gonna balloon dramatically if you do stuff like that. A person
+  that's serious about reviews can ask for it themselves, or get you, mister, to do it. These
+  kinds of systems — Dodona itself is geared towards performance and speed. Move fast and break
+  things."*). It was said about the manager's review (`REVIEW-AND-MERGE-PLAN` D-R23) and it
+  generalises: **anything automatic that reads more, waits longer or checks harder is spending the
+  scarce resource — an agent's time and the quota — to buy thoroughness nobody asked for.** Depth
+  is available on request, from a person or an agent a person asks. So when you are designing
+  something that runs on its own, the default is the cheap pass, with a way to ask for more; and
+  a missed catch is the accepted cost, because the operator approves every irreversible step
+  anyway. Do not propose widening an automatic reader on the grounds that it might miss
+  something. It will.
 - **Act, announce, allow undo** (§11) applies to you too: make the routine call, say what
   you did, keep it reversible. Blocking questions are for genuinely unsafe forks only.
 - Feedback like "that's bullshit" about a proposal is a decision — record it (rejected
@@ -614,10 +627,21 @@ three states (off / listening / **error**, because on-and-deaf must never look l
 microphone, which would be §4's incident in a new costume. `=fail` forces the error state, which
 is otherwise unreachable without unplugging something.
 
-**The engine is wired but UNVERIFIED.** `SapiRecognizer` (System.Speech, one PackageReference)
-compiles and is behind the seam; nothing has confirmed it *hears* anything, because that needs a
-voice. Which engine actually ships is D-V8's spike, which has not been run. Do not describe
-dictation as working end to end until someone has spoken to it.
+**The engine is Deepgram, and the operator has spoken to it — that is evidence, not proof.**
+This paragraph said `SapiRecognizer` was the engine and that D-V8's spike had not been run;
+`docs/VOICE-ENGINE-PLAN.md` superseded both. SAPI shipped, the operator spoke to it and it
+produced **gibberish**, so the seam was used for what it was built for and the engine was
+replaced. Deepgram is measured end to end at the socket (`state=listening engine=deepgram`, one
+live socket, nothing configured — the credential is the one the `claude` CLI already holds).
+
+**What the operator reports, 2026-08-21, verbatim:** *"I've tested the dictation a bit — well,
+before a lot of the changes — it seemed to work."* So the line this paragraph carried for weeks —
+*nobody has spoken to it* — is retired: somebody has, and it worked. What is NOT established is a
+word-error rate, or that it still works at HEAD, since "a lot of the changes" have landed since.
+Treat dictation as **working, unmeasured, and unconfirmed at the current build**. Sixty seconds of
+talking settles the third of those, and it is the cheapest verification in this repo — but no
+suite can do it, because every suite runs with `DODONA_UI_MIC=off` and must keep doing so
+(opening the operator's microphone is §4's incident in a new costume).
 
 `ui dump` gained an `input` key (`text`, `lines`, `height`, `fit`, `sized`, `remembered`,
 `hint`) — `lines` is LOGICAL lines, not wrapped rows; `fit` is the default height and

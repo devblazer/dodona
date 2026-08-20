@@ -1,6 +1,7 @@
 # Review and merge — the ordinary developer flow, with a manager as the reviewer
 
-Status: **R1, R2, R3, R3.5, R4, R5 and R6 BUILT** (2026-08-20); R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
+Status: **R1, R2, R3, R3.5, R4, R5 and R6 BUILT** (2026-08-20); **R7 and R8 planned** — R8 is
+D-R23/D-R24, decided by the operator 2026-08-21 and not started. Written 2026-08-20 from the operator's brief, after tracing the land
 path in code and measuring what the manager is actually told today.
 
 The authority for how a ticket's work gets reviewed and lands on main. It **supersedes
@@ -411,6 +412,51 @@ somebody who has a window — but the **primary moment is completion**, because 
 manager's write-up is and it means the operator is not waiting for an agent to bump into a wall
 first.
 
+### DECIDED 2026-08-21, NOT YET BUILT — R8, and both decisions amend D-R12
+
+The operator answered §11's two remaining questions in one breath, and they are one decision seen
+from two sides: **the reviewer must not become a thing that holds agents up.** Recorded here
+because a decision that lives only in a conversation is one the next session re-litigates.
+
+**D-R23. THE REVIEWER MAY ASK FOR THE DETAILS; IT NEVER GETS THEM BY DEFAULT.** D-R12 bounds the
+reading to the diffstat, the changed-file names and the agent's own report, and that stays the
+first pass **permanently** — this is no longer a stopgap awaiting a measurement. What is added is
+a way for the review to say *"I need to see `Store.cs` before I can judge this"* and get that one
+file, when something in particular concerns it. Three properties it has to have, and each is a way
+the feature could go wrong:
+
+- **Named and narrow.** It asks for specific files, not "the diff". A request that can widen to
+  everything is the expensive reviewer arriving through the door marked cheap.
+- **Bounded and once.** One round of details per review, and a cap on what comes back. A reviewer
+  that can ask, read, and ask again is an unbounded loop wearing D-R12's clothes — the same
+  failure the send-back bound exists for, one level down.
+- **Recorded.** Which files it asked for and why, in the `manager_review` row. That is the only
+  way anyone finds out later whether the escape hatch is being used for judgement or as a habit,
+  and it is what makes "is this affordable" answerable from rows rather than argument.
+
+The operator's own framing, which settles more than the mechanism: **a review genuinely worth a
+full read is a person's job** — theirs, or an agent they ask directly — and this reviewer is not
+the place to buy one. *"These kinds of systems — Dodona itself is geared towards performance and
+speed. Move fast and break things."* So the trade is made knowingly and in this direction: this
+reviewer will miss things a thorough one would catch, and that is preferred to agents waiting and
+quota ballooning. It can still block, and the operator still approves every merge (D-R10), which
+is what makes missing things survivable.
+
+**D-R24. A MECHANICAL OBJECTION IS NOT A STRIKE, AND CODE DECIDES THAT IT WAS ONE.** A send-back
+whose grounds are `verify: red` does not spend one of D-R12's three rounds. The reasoning is the
+asymmetry: a strike is a judgement the agent has to answer, while red tests are a fact it can
+already see, so counting them means an agent gets fewer real chances for having had a bad build at
+the wrong moment.
+
+R5's objection to this — *an exemption the model itself classifies is a bound the model can talk
+its way out of* — **is not overturned; it is what fixes the implementation.** The model does not
+classify anything. The verify state is already a code fact in R4's record (`verify_green` /
+`verify_red`, written by `LandFlow`, reported and never re-run — D-R15), so the exemption keys on
+what the RECORD says at the moment of the review. A reviewer claiming it only objected because the
+tests were red earns nothing by saying so. Note the interaction with `not-run`, which is the
+normal value: `not-run` is not red, so it grants no exemption — and R5's prompt already tells the
+reviewer that `not-run` is correct and never grounds for anything.
+
 ## 6. Where the human still is
 
 Unchanged, and deliberately: `approve` gates `token-request`, and this repo stays
@@ -444,6 +490,7 @@ more there, not less: it is what a human reviewer reads first.
 | **R5 — BUILT** | D-R9/D-R10/D-R12: the manager reads it, may send back, bounded at three, and **cannot approve**. Triggered by the record existing rather than by a third `OnResult` consumer, and fired after `_recordLocks` is released — see D-R16/D-R17/D-R18. | `brain`: a send-back reaches the lane as input; a manager "approval" grants **nothing** (unapproved, no `ticket_approved`, `token-request` still refuses); the cheap tier escalates when unsure; and **three send-backs is the bound with a daemon restart in the middle of them**, because the count lives in the store. `m1` asserts the other side of D-R17: with autostart off no judgement agent is started at all. 7 new checks, all seen red. |
 | **R6 — BUILT** | D-R11: the write-up renders in the approval ask (absorbs `WORK-ISOLATION` P5). Raised by the RECORD, never by the review — see D-R19, the decision the phase turns on. | `ui-use`: the ask renders at a live window with no review having run, carries what code knows, offers no path, and answering it takes the ticket from *token refused* to *token granted*. `brain`: the manager's note is in the row, the bound says so, and a verdict — `approve` included — never answers it. `m1`: the unapproved refusal names the question. 12 checks, all seen red. |
 | **R7** | §7: PR-mode assembles a PR description and review comments instead. | `publish`/`workspace`: a `"delivery": "pr"` repo performs no local merge. |
+| **R8** | D-R23/D-R24: the reviewer may REQUEST named files when something concerns it — narrow, once, and recorded — and a send-back on `verify: red` does not spend a round. Both amend D-R12; neither is started. | `brain`: a review that asks for a file gets that file and no more, asks only once, and its request is in the `manager_review` row; a send-back with `verify: red` in the record leaves the send-back count unchanged, and one with `not-run` still counts. **The exemption must be proved from the RECORD, never from the model's stated reason** — a fake manager claiming red must earn no exemption, and that is the check most worth writing first. |
 
 **R1–R3 are the correction and come first**: R1 makes concurrent landing work at all, R2 makes
 agent-resolved conflicts safe, and R3 removes the machinery that was standing in for R1. **R3.5
@@ -533,19 +580,36 @@ it is not mistaken for done.
 
 ## 11. Open questions
 
-- Does the manager review need the diff **content** for a first pass, or is diffstat-plus-report
-  enough to catch anything worth catching? Measure before deciding — this is the difference between
-  an affordable reviewer and an expensive one. **STILL OPEN after R5, and now measurable**: R5
-  ships diffstat-plus-report as the first pass with escalation on low confidence, so the question
-  is answerable from real `manager_review` rows rather than from argument. It cannot be answered by
-  a suite: the fake manager answers directives, so what a real one *misses* is not visible there.
-- Should a send-back count against the loop bound when the manager's objection was **mechanical**
-  (tests red) rather than judgement? Code already caught that, so arguably it should never have
-  reached the manager. **Narrowed by R5 rather than answered**: the prompt now says in as many
-  words that `verify: not-run` is normal and correct and that missing tests are never grounds, so
-  the mechanical objection should not arise. If `manager_review` rows show it arising anyway, the
-  fix is the prompt, not an exemption in the bound — an exemption the model itself classifies is a
-  bound the model can talk its way out of.
+- ~~Does the manager review need the diff **content** for a first pass?~~ **ANSWERED BY THE
+  OPERATOR, 2026-08-21 — and not by measurement, because it is a question about what this system
+  is FOR.** The reviewer may **ask** for the details when something in particular concerns it, and
+  otherwise must not. Their words: *"I think a reviewer can request the details if it thinks it's
+  necessary. If there's something in particular that concerns it. Otherwise, definitely shouldn't.
+  We don't wanna hold agents up forever, because your costs are gonna balloon dramatically if you
+  do stuff like that. A person that's serious about reviews can ask for it themselves, or get you,
+  mister, to do it. These kinds of systems — Dodona itself is geared towards performance and speed.
+  Move fast and break things."*
+
+  So the default is unchanged and now permanent: **diffstat plus the agent's own report, and the
+  reviewer never reads the diff by default.** What is new is the escape hatch, D-R23. Note what the
+  operator also settled in passing: a review that is genuinely worth a full read is a **person's**
+  job — theirs, or an agent they ask directly — and this reviewer is not the place to buy it. That
+  closes the "affordable reviewer versus expensive one" framing rather than answering it: an
+  expensive one is not wanted at any price, because the cost is paid in **agents held up**, which
+  is the resource this system exists to protect.
+- ~~Should a send-back count against the loop bound when the manager's objection was
+  **mechanical** (tests red) rather than judgement?~~ **ANSWERED BY THE OPERATOR, 2026-08-21: it
+  DEFINITELY does not count.** A strike is a judgement the agent has to answer; tests being red is
+  a fact the agent can already see, and spending one of three chances on it means an agent gets
+  fewer real rounds for having had a red build at the wrong moment. D-R24.
+
+  **The earlier objection to this stands and is what constrains the implementation, rather than
+  what refuses it.** R5's position was: *an exemption the model itself classifies is a bound the
+  model can talk its way out of* — and that is still true, so the model does not get to classify
+  it. **Code does.** The verify state is a code fact already in R4's record (`verify_green` /
+  `verify_red`, written by `LandFlow` and reported, never re-run — D-R15), so the exemption keys on
+  what the record SAYS, not on the reviewer's account of why it objected. A model claiming "I only
+  sent it back because the tests were red" earns nothing.
 - ~~Where does the review write-up live so the operator can read it after the fact — a pane
   announcement, the question row, or both?~~ **ANSWERED BY R6: BOTH, and they are different
   jobs.** The **row** is where the decision is made, because it is the thing that can be

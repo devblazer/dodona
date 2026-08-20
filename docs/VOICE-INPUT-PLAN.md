@@ -8,6 +8,13 @@ mic glyph, the persistence and twenty-five checks — `dev test unit` (250 check
 `dev test voice` (18 checks), gate green twice at 13/13 suites. Read §8 for the verdict each
 check carries and §12 for the decisions taken while building it.
 
+**SUPERSEDED ON BOTH BULLETS BELOW — read `VOICE-ENGINE-PLAN.md` first.** That plan closed D-V8
+(SAPI shipped, the operator spoke to it, it produced gibberish, and Deepgram replaced it) and
+recorded the operator's own hands-on test, 2026-08-21: dictation **works** in a human's hands,
+unmeasured, and unconfirmed at the current build. The two bullets are kept as written because they
+are the state this plan shipped in and the reasoning still reads true; they are no longer the
+status.
+
 **Two things are NOT done, and neither is a detail:**
 
 - **Spike 4 has not been run** (§6, D-V8). It needs a human speaking twenty sentences into a
