@@ -1,6 +1,34 @@
 {
   "main": "main",
-  "verify": ["dotnet build Dodona.sln -c Release -warnaserror"],
+  "verify": [
+    "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\dev.ps1 build",
+    "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\dev.ps1 test unit m1 m2"
+  ],
+  "//verify": [
+    "THROUGH THE WRAPPER, NEVER `dotnet build` (WORK-ISOLATION-PLAN D-6). A bare dotnet",
+    "build reports a locked output file as `Build FAILED` with ten screens of MSB3026 --",
+    "the exact false diagnosis CLAUDE.md 1 mandates the wrapper to prevent, and it arrives",
+    "here when NOBODY IS WATCHING: this runs inside the daemon, during a land.",
+    "",
+    "It runs in the TICKET'S OWN WORKTREE now, on the result of merging main in, BEFORE the",
+    "ref moves (REVIEW-AND-MERGE-PLAN R1/D-R1). It used to run after the fast-forward, in",
+    "the repository that had just changed, so a red verify had already shipped.",
+    "",
+    "`build` FIRST is not optional: a ticket worktree is a fresh checkout that has never",
+    "been built, and `dev test`/`dev gate` REFUSE an absent build output rather than testing",
+    "the previous binary (P1.5). D-6 says the step becomes `dev gate`; measured, `dev gate`",
+    "alone in a fresh worktree refuses every land with `has never been built`.",
+    "",
+    "WHY THE SUBSET AND NOT THE FULL GATE -- measured on this machine 2026-08-20, in a cold",
+    "worktree: `dev build` 2.5s then `dev gate` 273.1s (suites 259.3s), 275.6s total, versus",
+    "~17s for `dev test unit m1 m2`. The daemon's control pipe is SERIAL (one server",
+    "instance, HandleAsync awaited inline), and the land runs on it -- so the full gate makes",
+    "the daemon answer nothing for four and a half minutes on every land: no UI, no lane",
+    "input, no `say`. That is CLAUDE.md 0.1's `never hung` violated by 4.6 minutes, so the",
+    "full gate cannot go here until the land stops blocking the pipe. Answering REVIEW-AND-",
+    "MERGE-PLAN 11's open question with the number rather than a preference; widen this line",
+    "the moment the land is asynchronous, and see that plan's 11 for the recommendation."
+  ],
   "model": "opus",
   "effort": "high",
 

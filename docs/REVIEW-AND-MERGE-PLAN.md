@@ -1,6 +1,6 @@
 # Review and merge — the ordinary developer flow, with a manager as the reviewer
 
-Status: **plan, not built.** Written 2026-08-20 from the operator's brief, after tracing the land
+Status: **R1 BUILT** (2026-08-20); R2-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
 path in code and measuring what the manager is actually told today.
 
 The authority for how a ticket's work gets reviewed and lands on main. It **supersedes
@@ -205,7 +205,7 @@ more there, not less: it is what a human reviewer reads first.
 
 | | what | proof |
 |---|---|---|
-| **R1** | §3's flow: `land` merges main into the branch, re-verifies **in the worktree**, then fast-forwards. Verify moves ahead of the merge (absorbs `WORK-ISOLATION` P4). | `m1`: a ticket whose main has moved lands without human intervention; a red verify leaves main's sha **unchanged**. `dev prove` first — the phase most likely to look green against the old order. |
+| **R1 — BUILT** | §3's flow: `land` merges main into the branch, re-verifies **in the worktree**, then fast-forwards. Verify moves ahead of the merge (absorbs `WORK-ISOLATION` P4). | `m1`: a ticket whose main has moved lands without human intervention; a red verify leaves main's sha **unchanged**. `dev prove` first — the phase most likely to look green against the old order. |
 | **R2** | D-R4's silent-drop check. | `m1`: a branch that resolves by reverting a file main changed is refused, and the message names the file. Fixture: land one ticket, then have a second resolve by discarding it. |
 | **R3** | D-R5: retire the three refusals. Re-aim `m1`'s two gate checks and `m2`'s backstop check rather than deleting them. | `m1`: two tickets over one path both get created; an agent writes freely across its own worktree; the gate still refuses the **shared checkout** (layer 1 untouched). |
 | **R4** | D-R8's record, assembled at completion. Gated on the worktree having changed (D-R13). | `m1`: a finished ticket produces exactly one record carrying diffstat, verify result, drop-check and the agent's report; a chatty lane produces no second one. |
@@ -274,9 +274,31 @@ the review. R7 is the foreign-repo case and can wait.
   reached the manager.
 - Where does the review write-up live so the operator can read it after the fact — a pane
   announcement, the question row, or both? The row is answerable; the pane is scrollable.
-- `dev gate` in a cold worktree is ~250 s. Re-verifying after merging main in doubles the verify
+- ~~`dev gate` in a cold worktree is ~250 s. Re-verifying after merging main in doubles the verify
   cost on every land. Is the touched-suites subset the right default, with the full gate only at the
-  land itself? Needs measuring against how often the subset would say green when the gate would not.
+  land itself?~~ **ANSWERED BY MEASUREMENT, R1, 2026-08-20 — and the answer turned on something
+  this question did not anticipate.** Measured in a cold worktree on this machine: `dev build`
+  **2.5 s**, then `dev gate` **273.1 s** (suites 259.3 s, inside the 300 s I7 budget), **275.6 s**
+  total; against **~17 s** for `dev test unit m1 m2`. Two findings:
+
+  - **`dev gate` alone cannot be the verify step at all.** A ticket worktree is a fresh checkout
+    that has never been built, and `dev test`/`dev gate` *refuse* an absent build output rather
+    than testing the previous binary (P1.5). So D-6's literal `dev gate` refuses **every** land
+    with `has never been built`. `verify` is an array; the first step is `dev build`.
+  - **The full gate would hang the daemon for 4.6 minutes per land.** The control pipe is serial —
+    one `NamedPipeServerStream` instance, `HandleAsync` awaited inline — and `LandOp` runs on it.
+    So the whole daemon answers nothing for the duration of verify: no UI, no lane input, no
+    `say`. At 275 s that is CLAUDE.md §0.1's *never hung* violated by four and a half minutes, on
+    the one operation an operator is definitely watching.
+
+  So the touched subset is the default **for now, on that measurement**, and the real fix is not a
+  narrower verify — it is **an asynchronous land**, which is the only thing that makes the full
+  gate affordable here. That is the recommended next piece of work in this area and it is not in
+  R1: it changes the land's protocol (the caller gets *landing…* and a later announcement), so it
+  wants its own phase and its own decision. Note that the verify cost is **not** doubled the way
+  this question assumed: R1 does not add a verify, it *moves* the one that already existed from
+  after the ref advance to before it. What is genuinely new is that the agent's own verify during
+  development and the land's verify are now two runs of the same thing.
 
 ## Appendix A — implementation touchpoints
 

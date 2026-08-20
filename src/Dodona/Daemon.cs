@@ -2531,6 +2531,18 @@ sealed class Daemon
         _store.PaneEvent(id, "announcement", text, null, null);
     }
 
+    /// <summary>The same, but for something that happened to a TICKET: it lands in that
+    /// ticket's own lane pane, where the agent doing the work and the operator watching it
+    /// are both already looking, and falls back to the dispatcher voice when the ticket has
+    /// no lane. Every refusal on the land path uses this, because "refused" written only to
+    /// a daemon log is the failure mode CLAUDE.md §0.1 calls quietly stale — the caller sees
+    /// one line and the reason lives somewhere nobody opens.</summary>
+    void Announce(Store.TicketRow t, string text)
+    {
+        if (t.LaneId is long lid) _store.PaneEvent(lid, "announcement", text, null, null);
+        else Announce($"[dodona] {text}");
+    }
+
     static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
 
     /// <summary>The argv every claude lane is started with — one place, so model and
@@ -4584,9 +4596,35 @@ sealed class Daemon
     }
 
 
-    /// <summary>The land (§7): the daemon executes the one atomic ref advance. The agent
-    /// already rebased and verified in its own worktree; ff-only IS the freshness check —
-    /// a branch that does not contain current main cannot land.</summary>
+    /// <summary>The land (§7, and `docs/REVIEW-AND-MERGE-PLAN.md` §3): the daemon executes
+    /// the one atomic ref advance — but it now does the ordinary developer flow first
+    /// (D-R1), in this order and under the merge token throughout:
+    ///
+    /// <code>
+    ///   git merge &lt;main&gt;    IN THE WORKTREE, on the ticket branch
+    ///   &lt;verify&gt;             IN THE WORKTREE, on the merged result
+    ///   git merge --ff-only  in the shared checkout: now guaranteed
+    /// </code>
+    ///
+    /// **What changed and why.** This used to be `merge --ff-only` and nothing else: when
+    /// main had moved it refused with *"rebase &lt;branch&gt; onto &lt;main&gt; and re-verify
+    /// first"* — and **nothing in the tree performed that rebase**, so concurrent work
+    /// could not land at all. Worse, verify ran AFTER the ref advance, in the repository
+    /// that had just changed, so a red verify had already shipped.
+    ///
+    /// **ff-only is now an ASSERTION rather than a policy (D-R2).** After main has been
+    /// merged into the branch, the merge back *is* a fast-forward — measured, not assumed:
+    /// git itself reports `Fast-forward` and main's tree comes out byte-identical to the
+    /// branch tip that was verified. That identity is the whole reason verifying the
+    /// worktree is equivalent to verifying main (`WORK-ISOLATION-PLAN` D-5), and it is why
+    /// verify may move ahead of the merge at all. So if ff-only fails *now*, main moved
+    /// despite the token — a real fault, and refusing is correct.
+    ///
+    /// **The ordering is the trap, not the merge** (plan §10). The in-worktree merge must
+    /// happen while the token is HELD, which is why it lives here, below the holder check,
+    /// and never in `token-request` before the grant: otherwise two lanes both merge main
+    /// in, both believe they verified against current main, and the second one's
+    /// fast-forward is against a main that moved underneath it.</summary>
     string LandOp(long tid, out bool ok)
     {
         ok = false;
@@ -4616,30 +4654,89 @@ sealed class Daemon
         if (tok.ExpiresTs is not null && DateTime.Parse(tok.ExpiresTs).ToUniversalTime() < DateTime.UtcNow)
         { _store.Event("land_refused", null, $"ticket {tid}: lease expired"); return "refused: merge-token lease expired; re-request"; }
 
+        // Checked BEFORE the merge and the verify, because those cost minutes and this costs
+        // milliseconds — and ANNOUNCED rather than failing quietly (plan §10). It is true
+        // while CLAUDE.md §0.0 keeps the operator on main in the shared checkout, so the one
+        // way to see this is a state nobody expected, which is exactly when a silent refusal
+        // in a daemon log is the wrong place for the sentence.
         var (hc, head) = Git.Run(repoPath, "rev-parse", "--abbrev-ref", "HEAD");
-        if (hc != 0 || head != cfg.Main) return $"refused: {where} has '{head}' checked out, not '{cfg.Main}'";
-
-        var (mc, mergeOut) = Git.Run(repoPath, "merge", "--ff-only", t.Branch);
-        if (mc != 0)
+        if (hc != 0 || head != cfg.Main)
         {
-            _store.Event("land_refused", null, $"ticket {tid}: ff-only failed — rebase needed. {mergeOut}");
-            return $"refused: not fast-forward — rebase {t.Branch} onto {cfg.Main} and re-verify first. {mergeOut}";
+            _store.Event("land_refused", null, $"ticket {tid}: {where} has '{head}' checked out, not '{cfg.Main}'");
+            Announce(t, $"ticket {tid} cannot land: {where} has '{head}' checked out, not '{cfg.Main}' — check out {cfg.Main} there and re-run dodona land {tid}");
+            return $"refused: {where} has '{head}' checked out, not '{cfg.Main}'";
         }
 
-        if (!_store.LandCommit(tid, tokenId, out var reason))
+        // ---- D-R1 step 1: bring main INTO the branch, in the agent's own worktree --------
+        //
+        // Measured before this was written (the premise the whole phase rests on): `git merge
+        // <main>` inside a linked worktree SUCCEEDS while main is checked out in the shared
+        // checkout, leaves the shared checkout's HEAD and main sha untouched, and leaves the
+        // worktree clean. Only `checkout` of a branch held elsewhere is refused; merging a ref
+        // into the current branch never checks it out.
+        var mergeMsg = "already current with " + cfg.Main;
+        if (t.Worktree.Length > 0 && Directory.Exists(t.Worktree))
         {
-            // Merge advanced main but the fence refused in the same instant (lease raced
-            // out). Reconcile-from-git heals: branch is an ancestor of main.
-            _store.Event("land_inconsistent", null, $"ticket {tid}: {reason}");
-            return $"landed on main but store fence refused ({reason}) — run reconcile";
+            // A dirty worktree first, because `git merge` refuses one and its complaint does
+            // not say what to do about it. NEVER `git stash` here: the stash is repo-global,
+            // one shared ref in the common dir, so two lanes stashing interleave one stack and
+            // `pop` takes the other lane's work (CLAUDE.md §5.2). Commit to the branch instead.
+            var (sc, dirty) = Git.Run(t.Worktree, "status", "--porcelain");
+            if (sc == 0 && dirty.Length > 0)
+            {
+                _store.Event("land_refused", null, $"ticket {tid}: worktree has uncommitted changes");
+                Announce(t, $"ticket {tid} cannot land: uncommitted changes in its worktree — commit them to {t.Branch} (never git stash: it is repo-global) and re-run dodona land {tid}");
+                return $"refused: ticket {tid}'s worktree has uncommitted changes — commit them to {t.Branch} " +
+                       $"(do NOT git stash: the stash is repo-global and another lane's pop would take them) and re-run land";
+            }
+
+            var (bmc, bmOut) = Git.Run(t.Worktree, "merge", cfg.Main, "-m", $"merge {cfg.Main} into {t.Branch} before landing ticket {tid}");
+            if (bmc != 0)
+            {
+                // A conflict the daemon must not guess at (D-R3). Code does not resolve —
+                // the agent does, and it keeps its context to do it. What code owes here is a
+                // CLEAN TREE: a half-merged worktree makes every later check lie, so the abort
+                // is not optional and it is not best-effort.
+                var (uc, conflicted) = Git.Run(t.Worktree, "diff", "--name-only", "--diff-filter=U");
+                var names = uc == 0 && conflicted.Length > 0
+                    ? string.Join(", ", conflicted.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()))
+                    : "(git named none — see the daemon log)";
+                var (ac, aOut) = Git.Run(t.Worktree, "merge", "--abort");
+                if (ac != 0) _store.Event("land_merge_abort_failed", null, $"ticket {tid}: {aOut}");
+                _store.Event("land_conflict", null, $"ticket {tid}: merging {cfg.Main} into {t.Branch} conflicted in {names}");
+                Announce(t, $"ticket {tid}: merging {cfg.Main} in conflicts in {names} — resolve it in {t.Worktree}, commit, then re-run dodona land {tid}");
+                return $"refused: merging {cfg.Main} into {t.Branch} conflicts in {names} — the merge was aborted, " +
+                       $"so the worktree is clean. Resolve it there, commit, then land again.";
+            }
+            // "Already up to date." is the common case and costs one git call: main has not
+            // moved since the branch was cut, so no merge commit is created and the land is
+            // byte-for-byte what it always was.
+            mergeMsg = bmOut.Contains("Already up to date", StringComparison.OrdinalIgnoreCase)
+                ? $"already current with {cfg.Main}"
+                : $"merged {cfg.Main} in";
+            if (mergeMsg != $"already current with {cfg.Main}")
+                _store.Event("land_merged_main", null, $"ticket {tid}: {cfg.Main} -> {t.Branch}");
+        }
+        else
+        {
+            // No worktree to merge in. Not fatal — a ticket can outlive its checkout — but it
+            // means ff-only below is back to being a policy rather than an assertion, so say so
+            // rather than letting the land look like it did the flow.
+            mergeMsg = "no worktree: could not merge " + cfg.Main + " in";
+            _store.Event("land_no_worktree", null, $"ticket {tid}: {t.Worktree}");
         }
 
-        // Post-land verify (§10): the daemon — code, not a model — runs the configured
-        // steps, in the repository that just changed.
+        // ---- D-R1 step 2: verify the MERGED RESULT, in the worktree, BEFORE the ref moves --
+        //
+        // This used to run after `LandCommit`, in the repository that had just changed — so a
+        // red verify had already shipped and there was nothing left to refuse
+        // (`WORK-ISOLATION-PLAN` D-5). It is exactly equivalent here and strictly safer: the
+        // fast-forward below makes main's tree byte-identical to the tip verified here (D-R2).
         var verifyMsg = "no verify steps configured";
+        var verifyDir = t.Worktree.Length > 0 && Directory.Exists(t.Worktree) ? t.Worktree : repoPath;
         foreach (var step in cfg.Verify)
         {
-            var psi = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = repoPath };
+            var psi = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = verifyDir };
             psi.ArgumentList.Add("/c");
             psi.ArgumentList.Add(step);
             using var p = Process.Start(psi)!;
@@ -4649,12 +4746,36 @@ sealed class Daemon
             if (p.ExitCode != 0)
             {
                 _store.Event("verify_red", null, $"ticket {tid} step '{step}': {so}{errT.Result}".Trim());
-                verifyMsg = $"VERIFY RED at '{step}'";
-                goto verified;
+                // The merge commit STAYS. It is legitimate work the agent will fix on top of,
+                // and throwing it away would mean resolving the same conflict again next round.
+                // What matters is that main did not move: this returns before the ff-only.
+                Announce(t, $"ticket {tid} did not land: verify RED at '{step}' after merging {cfg.Main} in — {cfg.Main} is unchanged. Fix it in {t.Worktree} and re-run dodona land {tid}");
+                return $"refused: VERIFY RED at '{step}' ({mergeMsg}) — {cfg.Main} unchanged. " +
+                       $"Fix it on {t.Branch} and land again.";
             }
         }
         if (cfg.Verify.Length > 0) { _store.Event("verify_green", null, $"ticket {tid}"); verifyMsg = "verify green"; }
-        verified:
+
+        // ---- D-R1 step 3: the fast-forward, which is now an assertion (D-R2) --------------
+        var (mc, mergeOut) = Git.Run(repoPath, "merge", "--ff-only", t.Branch);
+        if (mc != 0)
+        {
+            // Reaching here means main moved WHILE THIS TICKET HELD THE TOKEN — the one thing
+            // the token exists to prevent. It is not "the agent needs to rebase" any more, and
+            // saying so would send someone to do work that is already done.
+            _store.Event("land_not_ff_under_token", null, $"ticket {tid}: {cfg.Main} moved while ticket held the token. {mergeOut}");
+            Announce(t, $"ticket {tid} did not land: {cfg.Main} moved while this ticket held the merge token — nothing was merged. Re-run dodona land {tid}");
+            return $"refused: not fast-forward AFTER merging {cfg.Main} in — {cfg.Main} moved while ticket {tid} " +
+                   $"held the merge token, which the token exists to prevent. Nothing landed; re-run land. {mergeOut}";
+        }
+
+        if (!_store.LandCommit(tid, tokenId, out var reason))
+        {
+            // Merge advanced main but the fence refused in the same instant (lease raced
+            // out). Reconcile-from-git heals: branch is an ancestor of main.
+            _store.Event("land_inconsistent", null, $"ticket {tid}: {reason}");
+            return $"landed on main but store fence refused ({reason}) — run reconcile";
+        }
 
         // Landing retires the agent BEFORE the ground is pulled from under it
         // (docs/LANE-LIFECYCLE.md §3): the prune below deletes the directory the agent is
@@ -4683,7 +4804,10 @@ sealed class Daemon
         else _store.Event("worktree_prune_failed", null, $"ticket {tid}: {wOut}");
 
         ok = true;
-        return $"landed ticket {tid} on {(t.Repo == "." ? "" : t.Repo + "/")}{cfg.Main}; {verifyMsg}";
+        // Says what the flow DID, not just that it finished: "merged main in" is the
+        // difference between a land that resolved against current main and one that never
+        // had to, and the operator reading a receipt cannot tell them apart otherwise.
+        return $"landed ticket {tid} on {(t.Repo == "." ? "" : t.Repo + "/")}{cfg.Main}; {mergeMsg}; {verifyMsg}";
     }
 
     /// <summary>

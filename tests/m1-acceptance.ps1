@@ -318,18 +318,144 @@ try {
     $t3 = Dodona @("ticket-create", "--title", "WATER-NEXT", "--claim", "subtree:src/water")
     Check 'released_claim_reclaimable' ($t3 -match 'ticket \d+ branch') $t3
 
-    # ---- 10. queued ticket now gets the token; stale branch must rebase (§7) ----
+    # ---- 10. queued ticket now gets the token, and the DAEMON brings main in (R1 / D-R1) ----
+    #
+    # RE-AIMED, not added: this fixture used to assert `stale_branch_refused_ff_only` and then
+    # `rebased_branch_lands` -- with the TEST performing the rebase in between. That was the
+    # measurement that condemned the old design: the refusal said "rebase <branch> onto <main>
+    # and re-verify first" and NOTHING IN THE TREE PERFORMED THAT REBASE, so the only thing
+    # that ever satisfied it was a test pretending to be a developer. The moment and the
+    # fixture are unchanged; what is asserted is now the stronger fact, and the two checks
+    # below it are the guard that the precondition is still real.
     $req2 = Dodona @("token-request", "$t2id")
     Check 'queued_ticket_now_granted' ($req2 -match "granted ticket $t2id") $req2
     $wt2 = "$root\.dodona\wt\t$t2id"
     Set-Content "$wt2\src\sky\box.cs" "// skybox v2"
     git -C $wt2 add -A
     git -C $wt2 -c user.email=t@t -c user.name=t commit -q -m "sky v2"
-    $landStale = Dodona @("land", "$t2id")
-    Check 'stale_branch_refused_ff_only' ($DODONA_EXIT -eq 1 -and $landStale -match 'not fast-forward') $landStale
-    git -C $wt2 -c user.email=t@t -c user.name=t rebase -q main | Out-Null
+    # main is at 'water v2'; ticket 2 was cut from init. Assert the staleness rather than
+    # assume it -- a fixture that has quietly stopped being stale would make the land below
+    # pass for the wrong reason, which is this project's most-repeated failure.
+    # No 2>&1 anywhere in this suite: $ErrorActionPreference is 'Stop', and redirecting a
+    # native command's stderr under Stop throws NativeCommandError (CLAUDE.md §0.2).
+    # --is-ancestor prints nothing either way; the answer is the exit code.
+    git -C $root merge-base --is-ancestor main "ticket/$t2id" | Out-Null
+    $staleBefore = ($LASTEXITCODE -ne 0)
     $land2 = Dodona @("land", "$t2id")
-    Check 'rebased_branch_lands' ($land2 -match "landed ticket $t2id") $land2
+    Check 'stale_branch_was_really_stale' $staleBefore "main was already an ancestor of ticket/$t2id, so nothing was tested"
+    Check 'stale_branch_lands_with_no_human_rebase' ($DODONA_EXIT -eq 0 -and $land2 -match "landed ticket $t2id") $land2
+    Check 'the_land_says_it_merged_main_in' ($land2 -match 'merged main in') $land2
+    # The ff-only put main AT the merge commit the daemon made in the worktree -- which is
+    # D-R2's property from the other side: what landed is exactly what was verified.
+    $mainSubject = git -C $root log -1 --format=%s
+    Check 'main_is_now_the_merge_that_was_verified' `
+        ($mainSubject -match "merge main into ticket/$t2id before landing") $mainSubject
+    Check 'the_branch_work_came_with_it' ((git -C $root log --format=%s | Out-String) -match 'sky v2') $mainSubject
+
+    # EVERY SECTION BELOW IS DECOUPLED FROM THIS ONE ON PURPOSE, and the reason is a measured
+    # one rather than tidiness. Written first with 10b sharing section 10's claim and token,
+    # `dev prove` returned VACUOUS on the single most important check in this phase: against
+    # HEAD ticket 2's land fails, so ticket 2 keeps both the token AND `subtree:src/sky`, every
+    # later ticket-create conflicts, and the fixture derails into asserting nothing. A check
+    # that can only be judged when the code already works is not a check. So: release the
+    # token explicitly, and give each section a claim of its own that nothing else touches.
+    Dodona @("token-release", "$t2id") | Out-Null      # a no-op when it already landed
+
+    # ---- 10b. R1: a RED verify leaves main's sha UNCHANGED --------------------------------
+    #
+    # Under the old order verify ran AFTER `LandCommit`, in the repository that had just
+    # changed: a red verify had already shipped and there was nothing left to refuse
+    # (WORK-ISOLATION-PLAN D-5). `verify_ran_green` above passed under both orders, which is
+    # why this phase is "the one most likely to look green against the old code" -- the check
+    # that tells them apart is main's sha, not verify's colour.
+    $t5 = Dodona @("ticket-create", "--title", "REDVERIFY", "--claim", "path:src/verify/probe.cs")
+    if ($t5 -match 'ticket (\d+) ') { $t5id = $Matches[1] }
+    Dodona @("approve", "$t5id") | Out-Null
+    Dodona @("token-request", "$t5id") | Out-Null
+    $wt5 = "$root\.dodona\wt\t$t5id"
+    New-Item -ItemType Directory -Force "$wt5\src\verify" | Out-Null
+    Set-Content "$wt5\src\verify\probe.cs" "// probe"
+    git -C $wt5 add -A
+    git -C $wt5 -c user.email=t@t -c user.name=t commit -q -m "probe"
+    Set-Content "$root\dodona.json" '{ "main": "main", "verify": ["exit 3"] }'   # Config.For re-reads per call
+    $mainBefore = (git -C $root rev-parse main)
+    $landRed = Dodona @("land", "$t5id")
+    $mainAfter = (git -C $root rev-parse main)
+    Check 'red_verify_refuses_the_land' ($DODONA_EXIT -eq 1 -and $landRed -match 'VERIFY RED') $landRed
+    Check 'red_verify_leaves_main_unchanged' ($mainBefore -eq $mainAfter) "before=$mainBefore after=$mainAfter"
+    Check 'the_red_verify_refusal_says_main_is_untouched' ($landRed -match 'main unchanged') $landRed
+    Set-Content "$root\dodona.json" '{ "main": "main", "verify": ["echo verify-ok"] }'
+    $landGreen = Dodona @("land", "$t5id")
+    Check 'the_same_ticket_lands_once_verify_is_green' ($landGreen -match "landed ticket $t5id") $landGreen
+
+    # ---- 10c. R1/D-R3: a conflict is refused, NAMED, and the worktree left CLEAN ----------
+    #
+    # The abort is not tidiness. A half-merged worktree makes every later check lie (plan §10),
+    # and the agent that has to resolve this is standing in it.
+    $t6 = Dodona @("ticket-create", "--title", "CONFLICT", "--claim", "path:src/clash/pane.cs")
+    if ($t6 -match 'ticket (\d+) ') { $t6id = $Matches[1] }
+    $wt6 = "$root\.dodona\wt\t$t6id"
+    New-Item -ItemType Directory -Force "$wt6\src\clash" | Out-Null
+    Set-Content "$wt6\src\clash\pane.cs" "// pane from the ticket"
+    git -C $wt6 add -A
+    git -C $wt6 -c user.email=t@t -c user.name=t commit -q -m "pane from the ticket"
+    # main adds the same path with other content. The fixture is main's other developer here,
+    # and add/add is a conflict git reports the same way content divergence is.
+    New-Item -ItemType Directory -Force "$root\src\clash" | Out-Null
+    Set-Content "$root\src\clash\pane.cs" "// pane from main"
+    git -C $root add -A
+    git -C $root -c user.email=t@t -c user.name=t commit -q -m "pane from main"
+    Dodona @("approve", "$t6id") | Out-Null
+    Dodona @("token-request", "$t6id") | Out-Null
+    $mainBeforeConflict = (git -C $root rev-parse main)
+    $landConflict = Dodona @("land", "$t6id")
+    Check 'a_conflicting_merge_refuses_the_land' ($DODONA_EXIT -eq 1 -and $landConflict -match 'conflict') $landConflict
+    Check 'the_conflict_refusal_names_the_file' ($landConflict -match 'src/clash/pane\.cs') $landConflict
+    Check 'a_conflict_leaves_main_unchanged' ($mainBeforeConflict -eq (git -C $root rev-parse main)) $mainBeforeConflict
+    $wt6Status = ((git -C $wt6 status --porcelain) | Out-String).Trim()
+    Check 'the_worktree_is_left_clean_not_half_merged' ($wt6Status -eq '') "status=[$wt6Status]"
+    # Asked of git rather than of the filesystem: a linked worktree's git dir is
+    # `.git\worktrees\<name>`, and a Test-Path against a guessed path is a check that passes
+    # vacuously the day the guess is wrong.
+    git -C $wt6 rev-parse --verify --quiet MERGE_HEAD | Out-Null
+    Check 'no_merge_is_left_in_progress' ($LASTEXITCODE -ne 0) 'MERGE_HEAD survived the abort'
+    # D-R3: the agent resolves it, in its own worktree, and the same ticket lands. The daemon's
+    # own merge then finds nothing to do -- which is what "the agent already did it" looks like.
+    # This merge CONFLICTS on purpose, so it is the one place the suite must relax Stop to
+    # capture native stderr at all (§0.2's rule, stated the way that section states it).
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    git -C $wt6 -c user.email=t@t -c user.name=t merge main 2>&1 | Out-Null
+    $ErrorActionPreference = $prevEap
+    Set-Content "$wt6\src\clash\pane.cs" "// pane resolved by the agent"
+    git -C $wt6 add -A
+    git -C $wt6 -c user.email=t@t -c user.name=t commit -q -m "merge main, resolved pane"
+    $landResolved = Dodona @("land", "$t6id")
+    Check 'an_agent_resolved_merge_lands' ($landResolved -match "landed ticket $t6id") $landResolved
+    Check 'the_daemon_had_nothing_left_to_merge' ($landResolved -match 'already current with main') $landResolved
+    Check 'the_resolution_is_what_landed' `
+        ((Get-Content "$root\src\clash\pane.cs" -Raw).Trim() -eq '// pane resolved by the agent') `
+        ((Get-Content "$root\src\clash\pane.cs" -Raw).Trim())
+
+    # ---- 10d. an uncommitted worktree is refused, and told what to do INSTEAD of stashing --
+    #
+    # `git merge` refuses a dirty tree and its complaint does not say what to do. The wrong
+    # answer is `git stash`: it is repo-global, one shared ref in the common dir, so two lanes
+    # stashing interleave one stack and `pop` takes the other lane's work (CLAUDE.md §5.2).
+    $t7 = Dodona @("ticket-create", "--title", "DIRTY", "--claim", "path:src/dirty/note.cs")
+    if ($t7 -match 'ticket (\d+) ') { $t7id = $Matches[1] }
+    $wt7 = "$root\.dodona\wt\t$t7id"
+    Dodona @("approve", "$t7id") | Out-Null
+    Dodona @("token-request", "$t7id") | Out-Null
+    New-Item -ItemType Directory -Force "$wt7\src\dirty" | Out-Null
+    Set-Content "$wt7\src\dirty\note.cs" "// uncommitted"      # never committed
+    $landDirty = Dodona @("land", "$t7id")
+    Check 'a_dirty_worktree_is_refused' ($DODONA_EXIT -eq 1 -and $landDirty -match 'uncommitted changes') $landDirty
+    Check 'the_dirty_refusal_says_commit_and_warns_off_the_stash' `
+        ($landDirty -match 'commit' -and $landDirty -match 'stash') $landDirty
+    git -C $wt7 add -A
+    git -C $wt7 -c user.email=t@t -c user.name=t commit -q -m "box committed"
+    $landClean = Dodona @("land", "$t7id")
+    Check 'it_lands_once_the_work_is_committed' ($landClean -match "landed ticket $t7id") $landClean
 
     # ---- 11. lease expiry fences a dead holder (§7/§12) ----
     $t4 = Dodona @("ticket-create", "--title", "EXPIRY", "--claim", "path:README.md")
@@ -387,7 +513,10 @@ import sqlite3
 db = sqlite3.connect(r'$storeDb')
 print('\n'.join(k for (k,) in db.execute('SELECT kind FROM events ORDER BY id')))
 ") | Out-String
-    foreach ($k in 'ticket_created','claim_conflict','token_refused_unapproved','token_granted','token_queued','landed','verify_green','token_expired_reclaimed','worktree_pruned') {
+    # R1 added three: the daemon merging main in, a conflict it refused to guess at, and a
+    # verify that went red BEFORE the ref moved (which under the old order was unreachable --
+    # verify_red could only ever be written after main had already advanced).
+    foreach ($k in 'ticket_created','claim_conflict','token_refused_unapproved','token_granted','token_queued','landed','verify_green','token_expired_reclaimed','worktree_pruned','land_merged_main','land_conflict','verify_red') {
         Check "event_$k" ([bool]($events -match $k))
     }
 
