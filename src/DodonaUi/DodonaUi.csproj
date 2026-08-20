@@ -18,12 +18,16 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
-    <!-- Capture only, for dictation (docs/VOICE-ENGINE-PLAN.md E2). NAudio gives WaveInEvent and
-         a band limited resampler; the RECOGNITION is a WebSocket in DeepgramRecognizer.cs, so
-         nothing here does any speech work. The resample to 16 kHz is the part that matters:
+    <!-- Capture only, for dictation (docs/VOICE-ENGINE-PLAN.md E2). NAudio gives WasapiCapture
+         and MediaFoundationResampler; the RECOGNITION is a WebSocket in DeepgramRecognizer.cs,
+         so nothing here does any speech work. The resample to 16 kHz is the part that matters:
          almost every real device captures at 44.1 or 48 kHz, and sending 48 kHz audio to an
          endpoint told sample_rate=16000 produces fast, confident nonsense indistinguishable
-         from the SAPI gibberish this replaced. AudioCapture pins the rate with a synthetic tone.
+         from the SAPI gibberish this replaced. THE RESAMPLE IS THE LIBRARY'S AND NOT OURS
+         (D-E9): a hand-rolled windowed-sinc version was written and reverted, because the
+         extension this engine mimics never resamples in its own code either, and unproven DSP
+         in that position fails as confident nonsense rather than as a red check. Pcm16 keeps
+         only the MEASUREMENT half, which is how the rate is pinned without an ear.
          System.Speech is GONE with SapiRecognizer.cs (D-E6): a fallback that emits gibberish is
          worse than an error saying "no network", because gibberish looks like the feature
          working badly rather than not working. -->
