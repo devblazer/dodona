@@ -838,6 +838,12 @@ all of it is `docs/M5-DELIVERY-PLAN.md` (the authority; design §7.1/§7.2 are s
 points there). Read it before touching any of this; the traps below are the short version, and
 each one is a way to lose someone's work silently.
 
+**And this is not either/or with `/ship`.** That skill's landing step is the fallback for a
+project with no process of its own — it exists so a session can cope with a worktree at all,
+and with a repo that never defined one. Where a project *does* define one, that process
+governs, and the worktree still has to be dealt with either way. Recorded on the operator's
+correction, 2026-08-20: an agent reading either half alone will skip the other.
+
 - **A worktree's directory name and its branch name are unrelated.** `t7` can hold
   `feature/ABC-123`. Nothing outside Dodona sees the directory, so never rename a worktree
   to match a branch — short paths are a Windows `MAX_PATH` margin once an enterprise repo's

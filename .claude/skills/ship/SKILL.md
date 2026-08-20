@@ -93,7 +93,39 @@ your report and leave it in the tree — an orphan needs a decision, not a drive
 The message says what changed, **why**, and names any incident or gotcha discovered —
 commit messages are this project's history of record (there is no other memory).
 
-## 4. Publish
+## 4. Land the work where this project's process says it lands
+
+**Two questions, and the second is not optional because the first was answered.** You are in a
+worktree on a branch (CLAUDE.md §0.0), so *something* has to move the work onto the trunk, and
+publish follows `main` — a commit sitting on your own branch reaches the operator's app never.
+
+1. **Does this project already have a delivery process of its own?** Its `CLAUDE.md`, its own
+   skills, a `"delivery": "pr"` in `dodona.json` (CLAUDE.md §5.2, `docs/M5-DELIVERY-PLAN.md`).
+   Branch off `develop`, a naming convention, push, open a PR, a human reviews, the forge
+   merges. **If it does, that process governs and you follow it.** It is not a choice between
+   that and the steps below.
+2. **Whichever answer you got, the worktree is still yours to deal with.** A PR flow does not
+   absolve you of a branch left checked out in `.claude\worktrees\<name>`, and a local merge
+   does not absolve you of the push the project expects.
+
+The local ff-only merge below is the **fallback for a project that has no process of its own**,
+and the reason this step mentions worktrees at all. It is Dodona's own ceremony; do not apply it
+to a repo that told you otherwise.
+
+```powershell
+# from the SHARED checkout, which is where main lives (section 0.0)
+git -C <shared-checkout> merge --ff-only <your-branch>
+```
+
+If `--ff-only` refuses, main moved under you: rebase your branch and re-run `dev gate` before
+merging. Do not merge with a merge commit to get past it, and do not park — announce what you
+are rebasing onto (§0.1: name the thing that un-sticks it).
+
+When the branch has landed, the worktree has done its job: `git worktree remove` it, or say in
+your report that you left it and why. A tree nobody removed is the next session's confusion
+about which of two checkouts is current.
+
+## 5. Publish
 
 ```powershell
 # Resolve the INSTALLED binary the way Ver.BinRoot does, newest build wins.
@@ -113,7 +145,7 @@ interrupting agents mid-turn (M4), updates any live UI, and re-points the deskto
 shortcut. The drift watcher (`autoPublish` in dodona.json) would eventually do this on
 its own; shipping means *now*, not after a debounce.
 
-## 5. Verify the swap landed
+## 6. Verify the swap landed
 
 ```powershell
 $env:DODONA_NO_AUTOSTART = "1"
