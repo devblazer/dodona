@@ -181,6 +181,35 @@ was groping at and never reached. It renders in the approval ask (`WORK-ISOLATIO
 of the conversation (`LANE-LIFECYCLE.md` §2), and re-reviewing a chatty lane every turn would burn
 the machine and the quota. Gate it on the worktree having changed since the last review.
 
+**D-R14. THE LAND MUST STOP BLOCKING THE DAEMON, and it is a prerequisite for R4 rather than a
+tidy-up.** Found while building R1, 2026-08-20. The control pipe is **serial** — one
+`NamedPipeServerStream` instance, `HandleAsync` awaited inline — and `LandOp` runs on it. So for
+the whole duration of a land's verify the daemon answers *nothing*: no UI, no lane input, no `say`,
+no other workspace's command. Measured: the full `dev gate` would freeze it for **4.6 minutes**, and
+even the deliberately narrow subset R1 settled on holds it for ~20 s. That is CLAUDE.md §0.1's
+*never hung* violated on the one operation an operator is certainly watching, and it is
+pre-existing — verify has always run inside `LandOp` — rather than something R1 introduced.
+
+It is listed as its own phase (R3.5) for three reasons:
+
+- **It changes the land's PROTOCOL, not just its threading.** The caller stops receiving the
+  outcome and starts receiving *landing…*, with the result arriving later as an announcement. Every
+  caller and every check that reads `land`'s reply is affected, so it cannot be smuggled into
+  another phase.
+- **R4 hangs off the same code path** and would inherit the freeze: the completion record assembles
+  a diffstat and a verify result, in the worktree, at exactly the moment the land is running.
+  Building R4 first means building it inside a blocking call and then moving it.
+- **It is what makes the verify budget a real choice again.** With the land off the pipe, the
+  narrowness of `dodona.json`'s `verify` becomes a question about *quota and wall clock* rather than
+  about whether the app locks up — though note that the operator's standing directive (CLAUDE.md
+  §0.1) governs regardless: the heavy suites are not a default, and this decision does not reopen
+  that. See §11.
+
+Two constraints that must survive the change, both load-bearing: **the token stays held across the
+whole flow** (§10's race — the in-worktree merge and the fast-forward must not be separated by a
+window in which main can move), and **a land that fails must still leave the worktree clean and
+main untouched**, which is harder to guarantee once the failure is reported asynchronously.
+
 ## 6. Where the human still is
 
 Unchanged, and deliberately: `approve` gates `token-request`, and this repo stays
@@ -209,14 +238,25 @@ more there, not less: it is what a human reviewer reads first.
 | **R1 — BUILT** | §3's flow: `land` merges main into the branch, re-verifies **in the worktree**, then fast-forwards. Verify moves ahead of the merge (absorbs `WORK-ISOLATION` P4). | `m1`: a ticket whose main has moved lands without human intervention; a red verify leaves main's sha **unchanged**. `dev prove` first — the phase most likely to look green against the old order. |
 | **R2 — BUILT** | D-R4's silent-drop check. | `m1`: a branch that resolves by reverting a file main changed is refused, and the message names the file. Fixture: land one ticket, then have a second resolve by discarding it. |
 | **R3 — BUILT** | D-R5: retire the three refusals (**four**, see below). Re-aim `m1`'s two gate checks and `m2`'s backstop check rather than deleting them. | `m1`: two tickets over one path both get created; an agent writes freely across its own worktree; the gate still refuses the **shared checkout** (layer 1 untouched). |
+| **R3.5** | D-R14: the land comes OFF the serial control pipe. `land` returns *landing…* and the outcome arrives as an announcement; the token stays held across the whole flow and a failure still leaves main untouched. | `m1`: a land whose verify takes seconds does not block a concurrent `status`/`say` on the same daemon; the outcome still reaches the caller; the existing land checks pass unchanged against the new reply shape. |
 | **R4** | D-R8's record, assembled at completion. Gated on the worktree having changed (D-R13). | `m1`: a finished ticket produces exactly one record carrying diffstat, verify result, drop-check and the agent's report; a chatty lane produces no second one. |
 | **R5** | D-R9/D-R10/D-R12: the manager reads it, may send back, bounded at three, and **cannot approve**. | `brain`: a send-back reaches the lane as input; the fourth round goes to the operator; a manager "approval" grants **nothing**. |
 | **R6** | D-R11: the write-up renders in the approval ask (absorbs `WORK-ISOLATION` P5). | `ui-use`: the ask carries the summary and answering it grants the token, at a live window. |
 | **R7** | §7: PR-mode assembles a PR description and review comments instead. | `publish`/`workspace`: a `"delivery": "pr"` repo performs no local merge. |
 
 **R1–R3 are the correction and come first**: R1 makes concurrent landing work at all, R2 makes
-agent-resolved conflicts safe, and R3 removes the machinery that was standing in for R1. R4–R6 are
-the review. R7 is the foreign-repo case and can wait.
+agent-resolved conflicts safe, and R3 removes the machinery that was standing in for R1. **R3.5
+comes next and before R4** (D-R14): R4 assembles its record on the land path, so building it first
+means building it inside a call that freezes the daemon and then moving it. R4–R6 are the review.
+R7 is the foreign-repo case and can wait.
+
+**AND R3 LEFT A PROMISE R5 HAS TO KEEP.** R3 retired the file reservations on the operator's
+reasoning that *"if that is problematic in some way, it's the manager's job to say something about
+it"* — and that manager does not exist yet. Overlaps and branch touches are recorded now
+(`claim_overlap`, `branch_touched`) and **nothing reads either**. Nothing is unsafe, because the
+real gate never moved: every land still needs the operator's explicit `approve`, and this repo is
+`on-approval` by default (verified in code, 2026-08-20). But the second pair of eyes R3 assumed is
+an empty chair until R5, and that is the honest reason R4–R6 are not optional polish.
 
 ## 9. Rejected — do not re-propose
 
@@ -318,9 +358,8 @@ the review. R7 is the foreign-repo case and can wait.
   not widen it back on the grounds that a subset might miss something.
 
   The asynchronous land is still worth doing — but for its own reason, which is that a land must
-  not freeze the daemon, **not** as a way to afford the full gate. It changes the land's protocol
-  (the caller gets *landing…* and a later announcement), so it wants its own phase and its own
-  decision. Note that the verify cost is **not** doubled the way
+  not freeze the daemon, **not** as a way to afford the full gate. It now HAS its own decision and
+  phase: **D-R14 and R3.5**, scheduled before R4. Landing it does not reopen this question. Note that the verify cost is **not** doubled the way
   this question assumed: R1 does not add a verify, it *moves* the one that already existed from
   after the ref advance to before it. What is genuinely new is that the agent's own verify during
   development and the land's verify are now two runs of the same thing.
