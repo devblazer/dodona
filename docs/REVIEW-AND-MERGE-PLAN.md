@@ -277,3 +277,114 @@ the review. R7 is the foreign-repo case and can wait.
 - `dev gate` in a cold worktree is ~250 s. Re-verifying after merging main in doubles the verify
   cost on every land. Is the touched-suites subset the right default, with the full gate only at the
   land itself? Needs measuring against how often the subset would say green when the gate would not.
+
+## Appendix A — implementation touchpoints
+
+Named symbols, verified against the tree at `bc65ff8`, so a session picking this up does not have to
+re-derive the map. **Line numbers rot; names do not.** This appendix exists because the isolation
+plan shipped without one and handing it off meant re-deriving everything (`a403fbc`).
+
+**One phase per commit**, in §8's order, each with its proof.
+
+### R1 — the merge flow
+
+- **`LandOp(long tid, out bool ok)`** (`Daemon.cs`) — the whole land. Today, in order: ticket open,
+  repo resolved (`RepoOf`), token holder + lease, `main` checked out in the shared checkout, then
+  `Git.Run(repoPath, "merge", "--ff-only", t.Branch)`, then `_store.LandCommit`, then the verify
+  loop over `cfg.Verify`. **Two changes:** the in-worktree merge and re-verify go BEFORE the
+  fast-forward, and the verify loop moves with them (`WorkingDirectory = t.Worktree`).
+- **`Git.Run(string workDir, params string[] args)`** (`Git.cs`) — every git call. The new ones are
+  `merge <main>` and `merge-base` run with `workDir = t.Worktree`, not `repoPath`.
+- **The `token-request` handler** (`Daemon.cs`, `case "token-request"`) — the merge-main-in step must
+  happen while the token is HELD, so it belongs after the grant here or at the top of `LandOp`, never
+  before the grant (§10's race).
+- **`cfg.Verify`** via **`Config.For(_primary, repoPath)`** — the steps. D-6: `dodona.json`'s
+  `verify` becomes `dev gate`, because a bare `dotnet build` reports a locked output as
+  `Build FAILED` (CLAUDE.md §1) and nobody is watching when this runs.
+- **`_store.LandCommit(tid, tokenId, out var reason)`** — the store fence. Unchanged, still after the
+  fast-forward.
+
+### R2 — the silent-drop check
+
+- Model it on the **existing backstop** in the `token-request` handler, which already does
+  `Git.Run(reqPath, "diff", "--name-only", $"{reqCfg.Main}...{t.Branch}")`. That block is what R3
+  deletes; R2 replaces its *question* rather than its plumbing.
+- **The merge base is mandatory** (§10): `git merge-base <main> <branch>`, then diff base…branch.
+  Against main's tip a branch that reverted main's change and one that never saw it are identical.
+
+### R3 — retire the three refusals
+
+- **`GateHook()`** (`Program.cs`) — question 2, the `claim-check` call. **Delete question 2, keep
+  question 1** (`tree-check`, which fails CLOSED and is layer 1). The ordering comment there explains
+  why the two exist; it needs rewriting rather than trimming.
+- **`case "claim-check"`** (`Daemon.cs`) — the handler. Keep the command (it is a useful read and
+  `workspace`'s drift check uses it) but nothing gates on it.
+- **`Store.TicketCreate` → `FindConflicts`** (`Store.cs`) — the overlap refusal, `WHERE t.state =
+  'open'`. Stop refusing; the conflict list becomes information.
+- **`MakeTicket`** (`Daemon.cs`) — `TicketMade.Conflicts` is how both callers see it. Promotion
+  (`PromoteLane`) currently degrades to a refusal on conflict; after R3 it proceeds and the overlap
+  becomes the manager's business (D-R5).
+- **`PromoteLane`** — the seed claim `path:<rel>` goes. A ticket with no claim must be legal:
+  `ticket-create` currently refuses `claims.Count == 0` ("at least one --claim required").
+- **`Claims.cs`** stays — the algebra is still how a derived signal is compared, and `claim-extend`
+  still exists for anyone who wants to annotate a ticket by hand.
+- **Checks to RE-AIM, never delete** (§10): `m1:gate_allows_inside_claim`,
+  `m1:gate_denies_outside_claim`, `m1:overlap_refused_at_plan_time`,
+  `m2:backstop_refuses_outside_claim`. Point them at layer 1 — the shared checkout is still refused —
+  and at the new facts. A suite that keeps its count while asserting less is this project's
+  most-repeated failure.
+
+### R4 — the completion record
+
+- **`rt.OnResult = CompressResult;`** (`Daemon.cs`, guarded by `if (role == "work")`) — **AN
+  ASSIGNMENT, NOT `+=`.** A second consumer written the obvious way silently kills selective
+  compression, which presents as "the panes went verbose" with nothing pointing here. Make it a
+  multicast or call both explicitly.
+- **`CompressResult(long laneId, long paneEventId, string body)`** — the existing consumer, and the
+  signature the record assembler gets: the turn's body IS the agent's report.
+- Gate on the worktree having changed since the last record (D-R13) — record a status digest or the
+  examined sha; a chatty lane must produce one record, not one per turn.
+- Runs in the ticket's own worktree, with its own `bin`/`obj`. Shares the verify runner with R1.
+
+### R5 — the manager review
+
+- **`BrainReview(long laneId, string text, string chosenName, Choice choice)`** (`Daemon.cs`) — the
+  shape to copy, not to extend: it is spawn-time review. A sibling (`BrainReviewWork`?) does
+  completion review. Reuse its parts: **`EnsureBrainAsync(hi: false, project)`** (ensure at the point
+  of use — never look up, CLAUDE.md §3), **`BrainLock(loId)`**, `_lanes[loId].AskAsync(q, 25000)`,
+  the low-confidence escalation to **`AskBrainHiAsync(q, project)`**, and the
+  `_store.Event("brain_review", …)` trail.
+- **Send-back is `LaneRuntime.Say`**, reached by `case "say"` (`Daemon.cs`) — the same path a typed
+  sentence takes, so the agent keeps its context. It refuses when the lane is not connected; a
+  send-back to a disconnected lane must respawn or wait, not vanish.
+- **D-R10 in code:** the review may write a "blocked" state and it must have **no path to
+  `TicketApprove`**. Keep `case "approve"` reachable only from the operator's `approve` /
+  `ui answer`.
+- The loop bound (three) needs somewhere to live: count `brain_review` events for the ticket rather
+  than a field — same reasoning as `Store.HasEvent` in P2, no schema bump for one counter.
+
+### R6 — the write-up in the ask
+
+- **`_store.QuestionOpen(input, candidatesJson, kind, subject)`** (`Store.cs`) and **`Ask.cs`**'s
+  kind constants (`KindRepoInit`, `KindRoute` — this needs a third, e.g. `KindLand`).
+- **`case "answer"`** (`Daemon.cs`) — the one answer path; `dodona ui answer` lands in the same
+  method a button click does (D-L4). **Never a modal** (CLAUDE.md §3.1): a test window cannot
+  produce one, so a modal ask is permanently untestable.
+- Answering yes should do what **`case "approve"`** does today (`TicketApprove`, presence back to
+  idle, pane receipt) and then let `token-request`/`land` proceed.
+
+### R7 — PR mode
+
+- **`"delivery": "pr" | "local-merge"` DOES NOT EXIST YET.** Verified: no `Delivery` member anywhere
+  in `src/`. `M5-DELIVERY-PLAN.md` owns that field and the PR ceremony; this phase adds the field to
+  **`Config`** and branches `LandOp` on it. Do not invent a second spelling of it — read that plan
+  first.
+
+### How to work on it
+
+Per CLAUDE.md, and none of it optional: a worktree of your own; `dev check` before starting;
+`dev test unit` (~1 s) while iterating and the one or two suites the change touches; **`dev prove`
+every new check before believing it** — and note that `dev prove` does not judge `unit` checks, so
+for those break the function on purpose, read the red, revert, and record what the red said;
+`dev gate` once before merging to main; `/ship` to deliver, whose landing step is now explicit about
+a project's own process. A suite that prints no tally is a failure, not a shrug.
