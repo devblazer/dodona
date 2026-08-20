@@ -832,6 +832,128 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     $tc2 = Ask3 @('ticket-create', '--title', 'polish the thing', '--claim', 'path:src/thing.cs')
     Check 'the_ticket_the_question_was_blocking_now_works' ($tc2 -notmatch '^error' -and $tc2 -match 'ticket') $tc2.Trim()
 
+    # =====================================================================================
+    # R6 / D-R11: THE APPROVAL ASK -- the write-up in front of the operator, and the yes
+    # (docs/REVIEW-AND-MERGE-PLAN.md R6, absorbing docs/WORK-ISOLATION-PLAN.md D-7 and P5)
+    #
+    # R4 assembles a PR-shaped record when a ticket turn ends with the worktree moved, R5's
+    # manager reads it and writes a note FOR THE OPERATOR -- and until this phase that note went
+    # into the store and was read by nothing. This is where it reaches a person: the same
+    # `questions` row, the same overlay, the same one answer path (D-L4), and answering it is the
+    # operator's approval, which is the one thing a merge cannot happen without.
+    #
+    # THE FIXTURE REUSES THE DAEMON AND THE WINDOW ALREADY STANDING. `ui-use` is a SoloSuites
+    # member, so every second here lands on the gate's wall clock directly (I7), and window
+    # creation is the expensive part. By this line $root3 is a git repo (the question above made
+    # it one) and the ticket that refusal was blocking exists -- so all this section adds is one
+    # commit, one fake agent and one turn.
+    #
+    # NO REVIEW RUNS HERE, AND THAT IS THE POINT OF TESTING IT HERE. This suite sets
+    # DODONA_NO_AUTOSTART=1, so R5's manager honours it and writes `manager_review_skipped`
+    # (D-R17) -- which is exactly the case the ask must survive. If the ask only appeared once a
+    # note existed, approving a merge would be gated on a model having answered, and a machine
+    # with judgement switched off could never merge anything. The WITH-note case is proved in
+    # `brain`, which already stands up a real (fake-backed) manager and is not a solo suite.
+    # =====================================================================================
+    $tid3 = if ($tc2 -match 'ticket (\d+) ') { $Matches[1] } else { 0 }
+    # Read the worktree off the ROW rather than composing `.dodona\wt\t<N>` by hand: never
+    # reconstruct a Dodona path (CLAUDE.md §5), and this suite has no business knowing the layout.
+    $wt3 = (Q3 "SELECT worktree FROM tickets WHERE id=$tid3")
+    function Wt3([string[]]$a) {
+        $ErrorActionPreference = 'Continue'
+        (& git -C $wt3 @a 2>$null) | Out-String
+    }
+    Set-Content "$wt3\src\thing.cs" "// thing, polished"
+    Wt3 @('add', '-A') | Out-Null
+    Wt3 @('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'polish') | Out-Null
+    $tl3 = Ask3 @('ticket-agent', "$tid3")
+    $tlid3 = if ($tl3 -match 'lane (\d+)') { $Matches[1] } else { 0 }
+    # The fake agent's `say <text>` is a turn that ENDS, which is the trigger: R4's record exists
+    # exactly when the worktree moved, and R6 hangs the question off the record existing.
+    $said3 = Ask3 @('say', "$tlid3", 'say polished the mask; one file, and I have not run the tests')
+    Wait-Until { (Q3 "SELECT COUNT(*) FROM questions WHERE kind='land' AND state='open'") -ge 1 } `
+        40000 'the approval ask' | Out-Null
+    $lq = (Q3 "SELECT id FROM questions WHERE kind='land' AND state='open' ORDER BY id DESC LIMIT 1")
+    # A QUESTION ABOUT A TICKET, NOT ABOUT A PROJECT, and the subject is what says so: a ticket
+    # number, which the system already knows, and never a folder. The two kinds must not be
+    # confusable -- `a_one_project_workspace_is_never_asked_anything` above pins that a workspace
+    # with one project is asked nothing, and this must not be a way around it.
+    Check 'a_finished_ticket_asks_the_operator_to_approve_the_merge' `
+        ("$lq" -match '^\d+$' -and (Q3 "SELECT subject FROM questions WHERE id=$lq") -eq "$tid3") `
+        "ticket=[$($tc2.Trim())] lane=[$($tl3.Trim())] say=[$($said3.Trim())] rows=$(Q3 'SELECT id, kind, state, subject FROM questions')"
+    # THE ONE MOST LIKELY TO BE GOT WRONG. Four ordinary things leave a ticket with no
+    # `manager_review` row -- autostart off (D-R17), `"brain": false`, a cheap tier that timed
+    # out, the send-back bound spent (D-R18) -- and if the ask waited for one, judgement being
+    # switched off would make a merge un-approvable. Asserted in the shape that cannot be
+    # satisfied by accident: the review provably did NOT run, and the question is there anyway.
+    Check 'the_approval_ask_does_not_wait_for_a_review' `
+        ("$lq" -match '^\d+$' -and
+         (Q3 "SELECT COUNT(*) FROM events WHERE kind='manager_review_skipped'") -ge 1 -and
+         (Q3 "SELECT COUNT(*) FROM events WHERE kind='manager_review'") -eq '0') `
+        "q=$lq skipped=$(Q3 "SELECT COUNT(*) FROM events WHERE kind='manager_review_skipped'") reviews=$(Q3 "SELECT COUNT(*) FROM events WHERE kind='manager_review'")"
+    # ...and it falls back to what CODE knows rather than an empty box: what changed, the verify
+    # state (`not-run` is the normal value -- D-R15: the verify that gates is the land's own), and
+    # why there is no note. A blank where a reason belongs is the failure `verify: not-run` and
+    # `drop: moot` were both written to avoid.
+    $lqText = (Q3 "SELECT input FROM questions WHERE id=$lq")
+    Check 'the_approval_ask_says_what_code_knows_when_no_review_ran' `
+        ($lqText -match 'ready to merge' -and $lqText -match '1 file' -and $lqText -match 'verify not-run' -and
+         $lqText -match 'no review ran' -and $lqText -match 'Approve the merge') $lqText
+
+    # ---- RENDER MODE 1 again, for the kind this phase adds ---------------------------------
+    Wait-Until { ($script:a6 = AskDumpOrNull) -and $script:a6.ask -and "$($script:a6.ask.id)" -eq "$lq" } `
+        20000 'the window renders the approval ask' | Out-Null
+    $a6 = AskDumpOrNull
+    Check 'the_approval_ask_renders_at_a_live_window' `
+        ($null -ne $a6 -and $null -ne $a6.ask -and "$($a6.ask.id)" -eq "$lq" -and $a6.ask.shown -eq $true -and
+         $a6.ask.question -match 'Approve the merge') `
+        ($(if ($null -eq $a6) { 'the ui pipe did not answer' } else { $a6.ask | ConvertTo-Json -Compress }))
+    # §3.1 again, on the kind whose subject is a thing that LIVES ON DISK: a ticket has a
+    # worktree and a repository path hanging off it, and neither may reach a choice. `-ge 1`
+    # first for the same reason the repo question's copy of this has it: an empty choice list
+    # contains no paths either, and would keep this green against a build that never asks.
+    $vals6 = @($a6.ask.choices).value
+    Check 'the_approval_ask_offers_no_filesystem_navigation' `
+        ($vals6.Count -ge 1 -and @($vals6 | Where-Object { $_ -match '[\\/]' -or $_ -match '^[A-Za-z]:' }).Count -eq 0) `
+        ($vals6 -join ',')
+    # Kept for the check AFTER the answer, and that is the whole reason it exists: "the overlay is
+    # gone" is true of a build that never put one up, which is what `dev prove` called VACUOUS on
+    # the first draft of it. Paired with this, the same check can only pass on a build that both
+    # asked and stopped asking.
+    $wasUp = ($null -ne $a6 -and $null -ne $a6.ask -and "$($a6.ask.id)" -eq "$lq" -and $a6.ask.shown -eq $true)
+
+    # ---- THE YES, AND IT IS THE ONE THING A MERGE CANNOT HAPPEN WITHOUT (D-R10) ------------
+    # §8's proof for this phase, in one check: the token is REFUSED before the answer and GRANTED
+    # after it, through `dodona ui answer` -- the same method a button click lands in, sending the
+    # same daemon command `dodona approve` sends. Both halves in one assertion on purpose: the
+    # "granted" half alone would be green against a build where the ticket was already approved,
+    # which is the vacuous shape `dev prove` exists to catch.
+    $tokBefore = Ask3 @('token-request', "$tid3")
+    $ansL = (& $dodona ui answer yes --workspace $ws3.Id) | Out-String
+    Wait-Until { (Q3 "SELECT approved FROM tickets WHERE id=$tid3") -eq '1' } 25000 'the ticket is approved' | Out-Null
+    $tokAfter = Ask3 @('token-request', "$tid3")
+    Check 'answering_the_approval_ask_grants_the_merge_token' `
+        ($tokBefore -match 'not approved' -and $ansL -match 'answered' -and $tokAfter -match 'granted') `
+        "before=[$($tokBefore.Trim())] answer=[$($ansL.Trim())] after=[$($tokAfter.Trim())]"
+    # It is the OPERATOR'S approval, recorded as one: same `ticket_approved` event `dodona
+    # approve` writes, because both go through one `ApproveTicket`. R5 deliberately has no path
+    # from a review to that method, and R6 must not become one by the back door.
+    Check 'the_answer_is_recorded_as_the_operators_own_approval' `
+        ((Q3 "SELECT COUNT(*) FROM events WHERE kind='ticket_approved'") -ge 1 -and
+         (Q3 "SELECT state FROM questions WHERE id=$lq") -eq 'answered') `
+        "events=$(Q3 "SELECT COUNT(*) FROM events WHERE kind='ticket_approved'") row=$(Q3 "SELECT state, answer FROM questions WHERE id=$lq")"
+    # ...and then it STOPS ASKING -- the overlay goes because the ROW closed (m3 doctrine), and no
+    # second question takes its place: `AskToLand` returns early on an approved ticket, so the
+    # next turn cannot re-ask a decision already made. Three things in one assertion because the
+    # last two alone are true of a build that never asks at all -- which is exactly what
+    # `dev prove` called VACUOUS on the first draft of this check, and the reason `$wasUp` is
+    # captured above rather than re-derived here.
+    Wait-Until { ($script:a6 = AskDumpOrNull) -and $null -eq $script:a6.ask } 20000 'the approval overlay follows the row closing' | Out-Null
+    Check 'an_approved_ticket_is_never_asked_about_again' `
+        ($wasUp -and $null -eq (AskDumpOrNull).ask -and
+         (Q3 "SELECT COUNT(*) FROM questions WHERE kind='land' AND state='open' AND subject='$tid3'") -eq '0') `
+        "wasUp=$wasUp ask=$((AskDumpOrNull).ask | ConvertTo-Json -Compress) open=$(Q3 "SELECT COUNT(*) FROM questions WHERE kind='land' AND state='open' AND subject='$tid3'")"
+
     (& $dodona ui close --workspace $ws3.Id) | Out-Null
     Wait-Until { $null -eq (AskDumpOrNull) } 20000 'the ask window is gone' | Out-Null
     (& $dodona stop-daemon --workspace $ws3.Id) | Out-Null

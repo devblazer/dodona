@@ -227,6 +227,9 @@ Reading it with nothing running:
 ```sql
 SELECT ts, rung, confidence, workspace_id, created, latency_ms, input FROM resolutions ORDER BY id;
 SELECT id, state, input, candidates, answer FROM questions ORDER BY id;   -- rung 4
+-- ...and in a WORKSPACE store, `kind` says what answering DOES: `repo-init`, `route`, or
+-- `land` (R6 — subject is the ticket id, and answering `yes` is the operator's approval; it
+-- is the only path to `TicketApprove` besides `dodona approve`).
 SELECT id, ts, acked, body FROM feed ORDER BY id;                          -- the merged spine
 SELECT ts, kind, detail FROM events ORDER BY id;
 ```
@@ -478,6 +481,11 @@ are the authority and they must agree.)*
   `manager_send_back_undelivered` — the lane never came back, so the whole message is in the
   event AND announced with the two commands that deliver it by hand; it counts as no round,
   because nothing was said),
+  the R6 approval-ask kinds (`question_opened` with `kind=land subject=<ticket>` — the ask that
+  puts the manager's write-up in front of the operator, raised by the RECORD existing and never
+  by the review having answered, so `no review has run` is a normal thing for it to say
+  (D-R19); `land_ask_failed` — raising or refreshing it threw, which is worth an event because a
+  ticket with no ask is one the operator can only approve from the command line),
   `worktree_prune_failed`, `ticket_git_failed`, `claim_extend_refused` (a `claim-extend`
   whose claims were outside the ticket's own repository), `token_refused_no_repo` (the
   ticket's repository has left the workspace — the token is refused rather than aimed at

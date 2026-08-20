@@ -370,7 +370,7 @@ predicted here:
 | **P2** | **Layer 2**: promotion on that refusal — ticket, worktree, gate, respawn-with-resume, announce, undo. | `m2`: a plain lane attempting a write ends in a worktree, session resumed, nothing written to the live tree. |
 | ~~P3~~ | **MOVED to `REVIEW-AND-MERGE-PLAN.md` R4.** The end-of-turn examination is where that plan's PR-shaped record is assembled, so it gained the agent's own report and the diffstat. |
 | ~~P4~~ | **MOVED to R1.** Verify before the merge is one step of the standard merge flow (bring main in, re-verify in the worktree, then fast-forward), not a phase of its own. D-6 (`dev gate` rather than a bare `dotnet build`) travels with it. |
-| ~~P5~~ | **MOVED to R6.** The approval row is the same row; what changed is that it now carries the manager's write-up, which is what makes answering it a two-second decision. |
+| ~~P5~~ | **MOVED to R6, and BUILT there** (2026-08-20). The approval row is the same row; what changed is that it now carries the manager's write-up, which is what makes answering it a two-second decision. One deviation from the wording below, decided as R6's **D-R22**: the row is raised primarily at **completion**, not at `token-request`'s refusal — that is where the write-up exists, and it means the operator is not waiting for an agent to bump into a wall first. The refusal raises it too (and names it), so a ticket whose record was impossible still asks rather than instructs. |
 | **P6** | §4: the manager's review-behind gains the ownership picture and the coordination questions; the router's fact sheet gains only what changes a destination. | `unit`: both renderings. `m2`: a colliding sentence is corrected behind, announced, not blocked. |
 | **P7** | **Layer 3**: `isolate` on the verdict; isolated spawn; fallback to a plain lane when `ticket-create` refuses. | `unit`: verdict parses, defaults false, ignored unless `new-task`. `m2`: an isolating sentence is born in a worktree, skipping promotion. |
 | ~~P8~~ | **DEAD — see D-4 above and `REVIEW-AND-MERGE-PLAN.md` R3**, which deletes the three claim refusals instead of making one of them elastic. |
@@ -572,11 +572,14 @@ rot; names do not. **One phase per commit**, each with its proof, in the order �
 - `dev prove` this one red before trusting it; it is the phase most likely to pass against the
   old order.
 
-### P5 — the approval ask
+### P5 — the approval ask (BUILT as `REVIEW-AND-MERGE-PLAN.md` R6; its Appendix A is the map)
 
 - The **`on-approval` refusal branch in `token-request`** raises a `questions` row instead of only
-  announcing. `Ask.cs`, the `answer` handler and `ui answer` already exist; the overlay already
-  renders an open row (D-L4). `dodona approve <id>` stays as the CLI form.
+  announcing — it does, and it names the id. But the row is raised **first at completion**, by
+  `Daemon.AskToLand` off R4's record, which is where the manager's write-up is (R6's D-R19/D-R22).
+  `Ask.cs`, the `answer` handler and `ui answer` already existed and needed no new answer path;
+  the overlay already renders an open row (D-L4). `dodona approve <id>` stays as the CLI form,
+  and both it and the ask now go through one `Daemon.ApproveTicket`.
 
 ### P6 — the manager's ownership picture
 

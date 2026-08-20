@@ -492,8 +492,17 @@
                                    Foreground="#FF8A9099" VerticalAlignment="Center"
                                    Visibility="{Binding Ask.ScopeVisibility}"/>
                     </DockPanel>
-                    <TextBlock Text="{Binding Ask.Question}" FontSize="17" TextWrapping="Wrap"
-                               Foreground="#FFE6ECF4"/>
+                    <!-- SCROLLED, because R6 made the question a PARAGRAPH. A `land` question
+                         carries the manager's write-up (REVIEW-AND-MERGE-PLAN D-R11) as well as
+                         the facts and the question itself, so the text is now bounded rather
+                         than short. Without a ceiling a long note grows the centred panel until
+                         the CHOICES are off the bottom of the window — a question a person can
+                         read and cannot answer, which is worse than not asking. -->
+                    <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <TextBlock Text="{Binding Ask.Question}" FontSize="17" TextWrapping="Wrap"
+                                   Foreground="#FFE6ECF4"/>
+                    </ScrollViewer>
                     <ItemsControl ItemsSource="{Binding Ask.Choices}" Margin="0,16,0,0">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>

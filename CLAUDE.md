@@ -653,6 +653,17 @@ lands in, and sends the same daemon command `dodona answer` / `dodona concierge-
   `ui-use:the_ask_offers_no_filesystem_navigation` goes red if a path appears in one.
 - **With one project there is nothing to ask, so no overlay may appear.** The operator's own
   machine is a one-project workspace, and two `ui-use` checks pin it.
+- **A FINISHED TICKET ASKS TO BE MERGED, and that question is the one place a merge can be
+  approved from besides `dodona approve`** (`docs/REVIEW-AND-MERGE-PLAN.md` R6). When a ticket
+  turn ends with the worktree moved, the ask carries what the manager wrote for you — *"4 files,
+  verify not-run; the manager sent this back, round 2 of 3: it changed the schema and its report
+  does not mention it"* — and `yes` is your approval. Two rules travel with it. It **never waits
+  for the review**: no manager, a project with `"brain": false`, a timeout or a spent bound all
+  render as words saying so over facts code knows, because an ask that appeared only when a model
+  had answered would make a merge un-approvable on a machine with judgement switched off. And
+  **nothing that is not a person may answer it** — no timeout, no default, and above all no "the
+  manager said ok, so approve it": the manager may block and may never bless (D-R10), and there
+  is deliberately no path from a review to `TicketApprove`.
 
 ## 3.1 No folder UI, ever (operator directive, 2026-08-18)
 

@@ -492,6 +492,17 @@ try {
     # ---- 6. on-approval gates the token (§7) ----
     $req = Dodona @("token-request", "1")
     Check 'unapproved_token_refused' ($DODONA_EXIT -eq 1 -and $req -match 'not approved') $req
+    # R6 (absorbing `WORK-ISOLATION-PLAN` P5): THE REFUSAL ASKS, IT DOES NOT INSTRUCT. Printing
+    # "dodona approve 1" at a person who has a window is the original sin P4.5 removed from
+    # `ticket-create`, one layer down. The row is normally already open by now -- R4's completion
+    # record above raises it (D-R11's primary moment, because that is where the manager's
+    # write-up is) -- so what this pins is that the refusal names the QUESTION either way, and
+    # that `QuestionUpsert` did not open a second one for the same ticket.
+    $askRow = Invoke-StoreSql $storeDb "SELECT id, state FROM questions WHERE kind='land' AND subject='1'"
+    Check 'the_unapproved_refusal_names_the_question_instead_of_only_a_command' `
+        ($req -match 'dodona answer \d+ yes' -and
+         [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM questions WHERE kind='land' AND state='open' AND subject='1'").Trim()) -eq 1) `
+        "refusal=[$($req.Trim())] rows=[$(($askRow -replace '\s+', ' ').Trim())]"
 
     Dodona @("approve", "1") | Out-Null
     $req = Dodona @("token-request", "1")

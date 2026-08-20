@@ -402,6 +402,36 @@ try {
          (Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim() -eq '1') `
         "pane=[$sb1] sent_back=$((Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim())"
 
+    # ---- R6 / D-R11: THE WRITE-UP IS THE POINT, so it reaches the OPERATOR ----------------
+    #
+    # `manager_review` carries a `note` written for the person deciding whether to merge, and
+    # until R6 that note went into the store and was read by NOTHING. The approval ask is where
+    # it lands: one `questions` row per ticket, refreshed in place as the review comes back.
+    #
+    # THIS SUITE OWNS THE WITH-NOTE HALF, and `ui-use` owns the at-a-live-window half. The split
+    # is a budget decision, recorded as D-R19: a real review needs autostart cleared and a
+    # manager agent, which this section already stands up, while `ui-use` is a `SoloSuites`
+    # member whose every second lands on the gate's wall clock directly (I7). So: the note
+    # reaches the row here; the row reaches the screen and the yes grants the token there.
+    #
+    # The token in the assertion is the ROUND'S OWN (`mgrmsg:` rides into the fake's `note`), so
+    # this cannot pass on some other review's write-up.
+    Wait-Until { [int]((Rows "SELECT COUNT(*) FROM questions WHERE kind='land' AND state='open'").Trim()) -ge 1 } `
+        25000 'the approval ask' | Out-Null
+    $lq = (RowsTry "SELECT id FROM questions WHERE kind='land' AND state='open' ORDER BY id DESC LIMIT 1").Trim()
+    # A row id or nothing usable -- never an empty string spliced into the SQL below, which would
+    # make `WHERE id=` a sqlite syntax error, throw inside this suite's own try, and report every
+    # later check as MISSING instead of as a verdict (the shape `dev prove` cannot read).
+    if ($lq -notmatch '^\d+$') { $lq = '-1' }
+    Wait-Until { (RowsTry "SELECT input FROM questions WHERE id=$lq") -match 'SCHEMA-UNMENTIONED' } `
+        25000 "the manager's note in the ask" | Out-Null
+    $lqText = "$(RowsTry "SELECT input FROM questions WHERE id=$lq")"
+    Check 'the_managers_write_up_reaches_the_operators_approval_ask' `
+        ((RowsTry "SELECT subject FROM questions WHERE id=$lq").Trim() -eq "$mtid" -and
+         $lqText -match 'SCHEMA-UNMENTIONED' -and $lqText -match 'sent this back, round 1 of 3' -and
+         $lqText -match 'Approve the merge') `
+        "q=$lq text=[$($lqText -replace '\s+', ' ')] rows=$((RowsTry "SELECT id, kind, state, subject FROM questions") -replace '\s+', ' ')"
+
     # ---- D-R10: IT MAY BLOCK, IT MAY NOT BLESS -- the load-bearing rule of the whole plan ----
     #
     # The fake manager is asked for `approve` ON PURPOSE, a verdict the schema does not offer,
@@ -420,6 +450,15 @@ try {
          $tokAfter -match 'not approved' -and
          (Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim() -eq '1') `
         "token-request=[$tokAfter] approved=$((Rows "SELECT approved FROM tickets WHERE id=$mtid").Trim()) sent_back=$((Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim())"
+    # ...AND IT DID NOT ANSWER THE ASK EITHER (R6). This is the same rule at the surface R6 adds,
+    # and it is a new way to break it: the approval question is a row with an `answer` column, so
+    # "the manager said ok, so approve it" would be one `QuestionAnswer` call away. Nothing that
+    # is not a person may answer a question of kind `land` -- no verdict, no timeout, no default.
+    # The manager has just been asked for `approve` on purpose, and the question is still open.
+    Check 'a_manager_verdict_never_answers_the_approval_ask' `
+        ((RowsTry "SELECT state FROM questions WHERE id=$lq").Trim() -eq 'open' -and
+         [int]((Rows "SELECT COUNT(*) FROM questions WHERE kind='land' AND state='answered'").Trim()) -eq 0) `
+        ((Rows "SELECT id, state, answer, subject FROM questions WHERE kind='land'") -replace '\s+', ' ')
 
     # ---- round 2: the cheap tier is unsure, so the SAME question goes to the expensive one ----
     # D-R12 bounds the READING as well as the loop: the diffstat plus the agent's report on the
@@ -488,6 +527,18 @@ try {
     Check 'the_bound_hands_the_operator_the_history_instead_of_a_fourth_round' `
         ($ann -match 'sent back 3 times' -and $ann -match 'SCHEMA-UNMENTIONED' -and
          $ann -match 'STILL-UNMENTIONED' -and $ann -match 'THIRD-TIME') $ann
+    # AND THE ASK SAYS SO (R6). At the bound the operator is being handed a DIFFERENT question
+    # from an ordinary approval -- three rounds of objection are spent and it is theirs to judge
+    # regardless -- so an overlay that looked identical to a clean ticket's would be the honest
+    # part of D-R18 lost at the last surface. One question still, refreshed in place.
+    Wait-Until { (Rows "SELECT input FROM questions WHERE kind='land' AND state='open' AND subject='$mtid'") -match 'the bound' } `
+        25000 'the bound reaching the ask' | Out-Null
+    $lqBound = "$(Rows "SELECT input FROM questions WHERE kind='land' AND state='open' AND subject='$mtid'")"
+    Check 'the_ask_says_the_bound_was_reached_rather_than_looking_like_an_ordinary_approval' `
+        ($lqBound -match 'sent this back 3 times' -and $lqBound -match 'the bound' -and
+         $lqBound -match 'yours to judge' -and
+         [int]((Rows "SELECT COUNT(*) FROM questions WHERE kind='land' AND subject='$mtid'").Trim()) -eq 1) `
+        "text=[$($lqBound -replace '\s+', ' ')] rows=$((Rows "SELECT id, state, subject FROM questions WHERE kind='land'") -replace '\s+', ' ')"
     # Hand the rest of the suite the machine it expects back: the ticket agent goes, and autostart
     # goes back off so the sections below own their own lifetimes again.
     Dodona @("lane-stop", "$mlane") | Out-Null

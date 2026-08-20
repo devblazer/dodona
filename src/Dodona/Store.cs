@@ -441,6 +441,93 @@ sealed class Store : IDisposable, ILaneSink
         }
     }
 
+    /// <summary>
+    /// Open a question of this (kind, subject), or REFRESH the one that is already open.
+    /// Returns its id and whether this call is what opened it.
+    ///
+    /// R6 (`docs/REVIEW-AND-MERGE-PLAN.md` D-R11) is what needs the second half. The approval
+    /// ask is raised the moment a ticket's completion record exists, and the manager's write-up
+    /// arrives seconds later — so the row's text has to be able to change under a question that
+    /// is already on screen. The alternatives were both worse: a SECOND row would put a queue of
+    /// overlays in front of the operator for one decision, and waiting for the review before
+    /// asking would make the approval depend on a model having answered, which is the
+    /// fail-closed-on-judgement mistake D-R10 exists to prevent.
+    ///
+    /// **ATOMIC, because the two writers are two threads.** `BuildRecord` opens it from the
+    /// record's own task and `ManagerReview` refreshes it from the review's, and a
+    /// read-then-insert done outside this lock would race into two rows for one ticket. The
+    /// daemon holds no lock across this — <see cref="Daemon"/>'s `_recordLocks` is deliberately
+    /// released before the review fires — so the store's own lock is the only serialisation
+    /// there is.
+    ///
+    /// The `open` state is part of the key on purpose: a question that was answered or
+    /// withdrawn is finished, and asking the same thing again later is a NEW question rather
+    /// than the resurrection of an old one (`QuestionAnswer` is guarded on `state='open'` for
+    /// the same reason).
+    /// </summary>
+    public (long Id, bool Opened) QuestionUpsert(string kind, string subject, string input, string candidatesJson)
+    {
+        lock (_lock)
+        {
+            using (var f = _db.CreateCommand())
+            {
+                f.CommandText = "SELECT id FROM questions WHERE state = 'open' AND kind = $k AND subject = $s ORDER BY id LIMIT 1;";
+                f.Parameters.AddWithValue("$k", kind);
+                f.Parameters.AddWithValue("$s", subject);
+                if (f.ExecuteScalar() is { } found and not DBNull)
+                {
+                    var id = Convert.ToInt64(found);
+                    using var u = _db.CreateCommand();
+                    u.CommandText = "UPDATE questions SET input = $i, candidates = $c WHERE id = $id;";
+                    u.Parameters.AddWithValue("$i", input);
+                    u.Parameters.AddWithValue("$c", candidatesJson);
+                    u.Parameters.AddWithValue("$id", id);
+                    u.ExecuteNonQuery();
+                    return (id, false);
+                }
+            }
+            using var c = _db.CreateCommand();
+            c.CommandText = "INSERT INTO questions(ts, input, candidates, state, kind, subject) " +
+                            "VALUES ($ts,$i,$c,'open',$k,$s);";
+            c.Parameters.AddWithValue("$ts", Now());
+            c.Parameters.AddWithValue("$i", input);
+            c.Parameters.AddWithValue("$c", candidatesJson);
+            c.Parameters.AddWithValue("$k", kind);
+            c.Parameters.AddWithValue("$s", subject);
+            c.ExecuteNonQuery();
+            using var q = _db.CreateCommand();
+            q.CommandText = "SELECT last_insert_rowid();";
+            return (Convert.ToInt64(q.ExecuteScalar()!), true);
+        }
+    }
+
+    /// <summary>
+    /// Withdraw every open question of this (kind, subject), because the thing it asked about
+    /// has been settled some other way. Returns how many were put down.
+    ///
+    /// **An ask that outlives its reason is CLAUDE.md §0.1's "outdated" wearing an overlay**: an
+    /// approval question standing over a ticket that has already landed offers the operator a
+    /// decision that has already been made, and answering it would do nothing while looking like
+    /// it did something. So the withdrawal is wired into the ticket's own state changes
+    /// (<see cref="TicketState"/> and <see cref="LandCommit"/>) rather than at the four call
+    /// sites that move a ticket — a rule the daemon has to remember is a rule that gets skipped,
+    /// which is the whole of §0.
+    /// </summary>
+    public int WithdrawQuestions(string kind, string subject, string answer)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "UPDATE questions SET state = 'withdrawn', answer = $a, answered_ts = $ts " +
+                            "WHERE state = 'open' AND kind = $k AND subject = $s;";
+            c.Parameters.AddWithValue("$a", answer);
+            c.Parameters.AddWithValue("$ts", Now());
+            c.Parameters.AddWithValue("$k", kind);
+            c.Parameters.AddWithValue("$s", subject);
+            return c.ExecuteNonQuery();
+        }
+    }
+
     public QuestionRow? Question(long id)
     {
         lock (_lock)
@@ -1191,7 +1278,15 @@ sealed class Store : IDisposable, ILaneSink
         }
     }
 
-    public void TicketState(long id, string state) => Set("UPDATE tickets SET state = $v WHERE id = $id;", id, state);
+    /// <summary>A ticket's state, and — when it stops being `open` — the approval ask that was
+    /// standing over it (R6). Abandoning a ticket must take its question with it, or the overlay
+    /// keeps offering to approve a merge that can no longer happen. Wired HERE rather than at
+    /// each caller for the reason <see cref="WithdrawQuestions"/> gives.</summary>
+    public void TicketState(long id, string state)
+    {
+        Set("UPDATE tickets SET state = $v WHERE id = $id;", id, state);
+        if (state != "open") WithdrawQuestions(Ask.KindLand, id.ToString(), $"ticket {state}");
+    }
     public void TicketApprove(long id) => Set("UPDATE tickets SET approved = 1 WHERE id = $id AND $v = $v;", id, "1");
 
     const string TicketCols = "id, lane_id, title, branch, worktree, state, merge_mode, approved, repo, repo_path";
@@ -1444,6 +1539,15 @@ sealed class Store : IDisposable, ILaneSink
                     DELETE FROM claims WHERE ticket_id = $t;
                     DELETE FROM token_queue WHERE ticket_id = $t;
                     UPDATE merge_token SET holder_ticket = NULL WHERE repo_path = $p;
+                    -- R6: the approval ask goes down IN THE SAME TRANSACTION that lands the
+                    -- ticket, so there is no window in which the overlay offers to approve a
+                    -- merge that has already happened. `subject` is TEXT and $t is bound as an
+                    -- integer, so the CAST is load-bearing: without it this matches nothing and
+                    -- fails silently, which is the shape of bug this file keeps a comment for.
+                    -- The literal 'land' is `Ask.KindLand` and must stay equal to it -- a raw
+                    -- SQL string cannot interpolate it without also eating the $t parameters.
+                    UPDATE questions SET state = 'withdrawn', answer = 'landed', answered_ts = $ts
+                        WHERE state = 'open' AND kind = 'land' AND subject = CAST($t AS TEXT);
                     """;
                 c.Parameters.AddWithValue("$t", ticketId);
                 c.Parameters.AddWithValue("$p", repo.Path);

@@ -286,7 +286,14 @@ while ((line = Console.ReadLine()) is not null)
                 {
                     verdict = mv.Success ? mv.Groups[1].Value : "ok",
                     confidence = text.Contains("mgrlow") && !isHi ? "low" : "high",
-                    note = $"fake manager on the {(isHi ? "hi" : "lo")} tier",
+                    // THE NOTE CARRIES THE DIRECTIVE'S OWN TOKEN (R6). `note` is the field
+                    // D-R11 calls the point of the whole review -- it is written for the
+                    // OPERATOR and R6 renders it in the approval ask -- so a fixed string
+                    // here would let a check assert that "a note" arrived while proving
+                    // nothing about WHICH review it came from. With the token in it,
+                    // `brain:the_managers_write_up_reaches_the_operators_approval_ask` names
+                    // exactly the round it expects to be reading.
+                    note = $"fake manager on the {(isHi ? "hi" : "lo")} tier" + (mm.Success ? $": {mm.Groups[1].Value}" : ""),
                     message = mm.Success ? mm.Groups[1].Value : "",
                 }),
             });

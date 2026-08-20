@@ -1471,4 +1471,39 @@ public class AskTests
     {
         Assert.Empty(Ask.Choices(Ask.RouteCandidates(Array.Empty<string>())));
     }
+
+    /// <summary>R6/D-R11: the approval question's own candidates, held to the same round trip as
+    /// the other two — the daemon writes this blob and the window parses it, and this is the one
+    /// place a disagreement between them would be invisible to every acceptance check.
+    ///
+    /// The VALUE `no` is asserted rather than assumed: `Daemon.AnswerQuestion` reads a literal
+    /// `no` as a declination and records the row `withdrawn` instead of `answered`, so a
+    /// friendlier value here would silently turn "not yet" into an answer nobody can tell
+    /// apart from "yes".</summary>
+    [Fact]
+    public void An_approval_questions_candidates_parse_back_to_yes_and_no()
+    {
+        var choices = Ask.Choices(Ask.LandCandidates(7));
+        Assert.Equal(new[] { "yes", "no" }, choices.Select(c => c.Value));
+        Assert.Contains("7", choices[0].Label);
+        Assert.False(string.IsNullOrEmpty(choices[0].Why));
+        Assert.False(string.IsNullOrEmpty(choices[1].Why));
+    }
+
+    /// <summary>CLAUDE.md §3.1 again, and it bites hardest here: this question is about a TICKET,
+    /// which the system knows by number — and a ticket has a worktree and a repository path
+    /// hanging off it that must never reach a choice. `ui-use`'s
+    /// `the_ask_offers_no_filesystem_navigation` asserts this on the rendered choices of whichever
+    /// question happens to be up; this asserts it on the source, for the one kind whose subject is
+    /// a thing that lives on disk.</summary>
+    [Fact]
+    public void An_approval_question_carries_no_path_anywhere_in_it()
+    {
+        foreach (var c in Ask.Choices(Ask.LandCandidates(3)))
+        {
+            Assert.DoesNotContain("\\", c.Value);
+            Assert.DoesNotContain("/", c.Value);
+            Assert.DoesNotMatch("^[A-Za-z]:", c.Value);
+        }
+    }
 }

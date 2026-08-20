@@ -150,4 +150,41 @@ public static class Ask
     /// constant: an unused `kind` with no `case` behind it reads as support that is not there,
     /// and for two days rung 4 asked a question nothing could render.</summary>
     public const string KindRoute = "route";
+
+    /// <summary>
+    /// The `kind` the APPROVAL ask carries (`docs/REVIEW-AND-MERGE-PLAN.md` R6, D-R11).
+    /// `subject` is the ticket id as text, and answering `yes` is the operator's approval —
+    /// the one legitimate path to `Store.TicketApprove` besides typing `dodona approve`.
+    ///
+    /// **D-R10 is the reason this constant is worth a paragraph.** The manager may block and
+    /// may never bless, so nothing that is not a person may answer a question of this kind:
+    /// there is no timeout that answers it, no default, and no path from `ManagerReview` to
+    /// `Daemon.ApproveTicket`. A model as the sole gate on the one irreversible step is *a
+    /// prompt providing safety*, which `WORK-ISOLATION-PLAN` §2 forbids however the model is
+    /// dressed.
+    /// </summary>
+    public const string KindLand = "land";
+
+    /// <summary>
+    /// The candidates for the approval ask. Two answers, and the VALUES are `yes`/`no` for a
+    /// reason beyond brevity: `Daemon.AnswerQuestion` reads a literal `no` as a DECLINATION and
+    /// records the row `withdrawn` rather than `answered`, which is the difference between "the
+    /// operator said not yet" and "the operator said land it" when somebody reads the row back.
+    ///
+    /// **No path, no folder, no drive letter** (CLAUDE.md §3.1, and `ui-use`'s
+    /// `the_ask_offers_no_filesystem_navigation` asserts it on the choice values): this is a
+    /// question about a TICKET, which the system already knows by number, not about a place.
+    ///
+    /// **"not yet" is a real answer, not a dismissal.** Escape puts the overlay down and leaves
+    /// the row open; `no` closes the row and changes nothing else, and the next completed turn
+    /// that moves the worktree opens a fresh one. Neither can lose the ticket, which is what
+    /// makes declining safe to offer at all.
+    /// </summary>
+    public static string LandCandidates(long ticket) => JsonSerializer.Serialize(new[]
+    {
+        new { id = "yes", name = $"approve the merge of ticket {ticket}",
+              why = "the agent can then take the merge token and fast-forward main" },
+        new { id = "no",  name = "not yet",
+              why = "the ticket stays open, the agent keeps working, and you are asked again when the work changes" },
+    });
 }
