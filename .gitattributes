@@ -1,0 +1,16 @@
+# Audio fixtures are BINARY, said out loud.
+#
+# Git already detects this correctly (m4a is full of NUL bytes, and `git diff --numstat` reports
+# `-` for them), so this file changes no behaviour today. It exists because the cost of being
+# wrong is asymmetric: tests\assets\recordings holds the ONLY speech this project has, it is what
+# `tools\transcribe.ps1` scores the engine against, and a fixture silently mangled by newline
+# normalisation would not fail loudly -- it would decode to noise and read as "the engine got
+# worse", which is the exact misdiagnosis docs\VOICE-ENGINE-PLAN.md was written to prevent.
+#
+# DELIBERATELY NOT `* text=auto`. This repo has already paid for line-ending confusion once
+# (VOICE-INPUT-PLAN.md D-V10: a working copy with 869 CRLF and 108 bare LF lines, invisible to
+# `git diff` because git normalises what it is handed, and red on one machine while green on
+# another). A repo-wide normalisation rule introduced casually is how that bill gets paid twice.
+# These two lines match nothing but audio.
+*.m4a binary
+*.wav binary
