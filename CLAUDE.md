@@ -391,8 +391,14 @@ operator sees Dodona through the installed app; work that never reaches it does 
 from where they are sitting.
 
 ```powershell
-# Resolve the INSTALLED binary the way Ver.BinRoot does, newest build wins.
+# Resolve the INSTALLED binary: newest build that is actually COMPLETE.
+# `dodona.dll` is the test, and it is not decoration -- a versioned directory holding only
+# `dodona.exe` exists on this machine twice over (2026-08-20 and 2026-08-21). A publish that
+# raced another publish left one, and `Select-Object -Last 1` then resolves to a stamp whose
+# .dll is missing: "The application to execute does not exist". This snippet said newest-by-name
+# until an agent following it hit exactly that and spent a diagnosis on it.
 $dodona = Join-Path (Get-ChildItem "$env:LOCALAPPDATA\Dodona\bin" -Directory |
+    Where-Object { Test-Path (Join-Path $_.FullName 'dodona.dll') } |
     Sort-Object Name | Select-Object -Last 1).FullName 'dodona.exe'
 & $dodona publish --project . --all
 ```
