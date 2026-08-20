@@ -935,6 +935,22 @@ public partial class MainWindow : Window
         // connect that answers after the operator switched the toggle off would put the indicator
         // back to `listening` for a recogniser that no longer exists.
         _armEpoch++;
+
+        // ══ THE UNSETTLED TAIL MUST NOT OUTLIVE THE MICROPHONE AS UNTRACKED TEXT ══
+        //
+        // D-E17 put the tail in the box, which makes this necessary and it is not obvious. Leaving
+        // it here on disarm would leave the WORDS in InputBox.Text while `_pendingAt` still pointed
+        // at them — so the next time dictation started, ShowPending's ClearPending would delete a
+        // range the operator had by then been looking at for minutes. A DELAYED, mysterious
+        // deletion is strictly worse than an immediate one.
+        //
+        // So the tail is removed here, and the engine's flush (DeepgramRecognizer's cancellation
+        // path) re-delivers the same words a moment later as SETTLED text. The operator's own
+        // observation is what makes that safe: because the tail is now visible as it arrives, they
+        // can see their words are in the box, so the momentary removal-and-recommit reads as the
+        // text settling rather than as a loss. The fake holds nothing, so for every suite this is
+        // simply "an unsettled hypothesis that never settled does not persist".
+        ClearPending();
         try { _mic?.Stop(); _mic?.Dispose(); } catch { /* stopping must not be able to fail */ }
         _mic = null;
         _partial = "";

@@ -486,9 +486,41 @@ the one thing this plan was most confident about.
   **13 of 19 target terms correct**. Nothing resembling SAPI's gibberish, but the specific fix this
   document prescribed does not work as prescribed.
 
-  **The lead worth trying next:** `VOICE-INPUT-PLAN.md` §6.2 read the bundle as sending keyterms as
-  **repeated query parameters**; §2 of this document "corrected" that to a header. That correction
-  may itself be the regression, and it is a cheap A/B to run.
+- **D-E21 / D-E22 — THE LEAD WAS RUN AND IT FAILED. KEYTERMS DO NOT WORK THROUGH THIS PROXY, THREE
+  WAYS.** §6.2's reading (repeated query parameters) was tried alongside the header — `keyterm=`,
+  URL-escaped, one per term, which is also Deepgram's own documented Nova-3 interface. **Identical
+  transcript.** So was disabling `use_conversation_engine`, on the theory that it was swallowing the
+  hints: identical vocabulary errors, and *fewer* sentences settled, so `true` stays (which is what
+  the extension sends anyway). Both mechanisms are left in place — they are correct per the
+  documentation and cost one URL — but they are **measured ineffective**, and that is written here
+  so nobody spends a second afternoon on it.
+
+- **D-E23 — SO THE FOUR WORDS ARE REPAIRED IN A PURE FUNCTION, AND ONE OF THEM DELIBERATELY IS
+  NOT.** `SpeechStream.Vocabulary` runs on settled text only: `work tree → worktree`,
+  `s q light → SQLite`, `ff only → ff-only`, `demon → daemon`. Measured effect on the operator's own
+  recording: **technical words went from 13/19 to 17/19.**
+
+  **`wall → WAL` is refused, on purpose, and that refusal is the more important half.** D-V9 already
+  settled the principle: a box that edits your words where you did not ask is worse than one that
+  types the wrong thing, because the second is visible and the first is not. That does not stop
+  applying because the fix is convenient. So the bar is *the mistaken form must not be plausible
+  English* — "work tree" and "s q light" clear it, "wall" does not, and WAL therefore stays visibly
+  mistranscribed. `diff → death` is refused for the same reason. Two unit checks pin both
+  directions, the second proved red by adding `("wall","WAL")` and watching "the wall of the server
+  room" get corrupted.
+
+  It lives in `Dictation.Decide` rather than in the engine so that `ui heard` reaches it — a repair
+  only a socket could exercise would be a repair no acceptance check could see.
+
+- **D-E24 — SPOKEN PUNCTUATION IS RETIRED AS A FEATURE, on operator instruction.** Their words:
+  *"I think you should all but give up on punctuation dictation. Even the system I'm using to voice
+  record these messages does that stuff automatically, and I don't bother with it beyond that."*
+  D-E20 had already measured it inert. **The code is NOT ripped out** — it costs nothing, still
+  works through `ui heard`, and would matter if a future engine stopped auto-formatting — but no
+  further effort goes into it and nothing may describe it as working. Note for whoever reads this
+  next: the inert-word safety ("enter", "send", "submit", "go") does **not** depend on that table.
+  Those words are safe precisely because they were never in it, so retiring punctuation cannot
+  weaken the operator's hard constraint.
 
 - **D-E19 — SWITCHING THE MIC OFF SILENTLY DISCARDED EVERYTHING SINCE THE LAST ENDPOINT.** Found by
   the recordings and by nothing else. The server sends `TranscriptEndpoint` **far** more lazily than

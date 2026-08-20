@@ -270,6 +270,60 @@ public static class SpeechStream
         return string.Join(",", kept);
     }
 
+    /// <summary>
+    /// The words the engine reliably mishears, repaired on SETTLED text only (D-E23).
+    ///
+    /// **THIS EXISTS BECAUSE KEYTERMS DO NOT WORK, and that was measured three ways.** The header
+    /// (`x-config-keyterms`), repeated `keyterm=` query parameters, and turning the conversation
+    /// engine off all produced identical transcripts, and the four words the keyterm list exists
+    /// for failed in every one of them: *worktree → "work tree", daemon → "demon", WAL → "wall",
+    /// SQLite → "s q light"*. Whatever the proxy does with vocabulary hints, it is not boosting
+    /// these.
+    ///
+    /// ══ WHY THIS IS NARROW, AND WHY "wall" IS DELIBERATELY NOT IN IT ══
+    ///
+    /// D-V9 already settled the principle at stake: **a dictation box that edits your words where
+    /// you did not ask is worse than one that types the wrong thing, because the second is visible
+    /// and the first is not.** That argument does not evaporate because the fix is convenient here,
+    /// so the bar is: a repair is allowed ONLY when the mistaken form is not plausible English that
+    /// the operator might actually have said.
+    ///
+    /// - `work tree` → `worktree` — "work tree" is not a phrase anybody says. Safe.
+    /// - `s q light` / `sq light` → `SQLite` — likewise, not English.
+    /// - `f f only` / `ff only` → `ff-only` — restores the hyphen the engine drops.
+    /// - `demon` → `daemon` — a real word, but in a box whose entire purpose is orchestrating
+    ///   daemons it is overwhelmingly the wrong one. Judged worth it; the reversible half is that
+    ///   deleting this one line restores the literal text.
+    /// - **`wall` → `WAL` is NOT here, on purpose.** "Wall" is ordinary English and this repair
+    ///   would silently corrupt any sentence containing it. So WAL stays mistranscribed, visibly,
+    ///   which is the honest failure. A word that cannot be repaired safely does not get repaired.
+    ///
+    /// Applied to final text only — never to an interim, which rewrites itself anyway — and it is a
+    /// pure function, so `dev test unit` covers every case in about a millisecond.
+    /// </summary>
+    public static string Vocabulary(string settled)
+    {
+        if (string.IsNullOrEmpty(settled)) return settled;
+        var s = settled;
+        foreach (var (heard, meant) in Repairs)
+            s = System.Text.RegularExpressions.Regex.Replace(
+                s, @"\b" + System.Text.RegularExpressions.Regex.Escape(heard) + @"\b", meant,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return s;
+    }
+
+    /// <summary>Longest first, so "s q light" is repaired before any shorter overlap could
+    /// consume part of it.</summary>
+    static readonly (string Heard, string Meant)[] Repairs =
+    {
+        ("s q light", "SQLite"),
+        ("sq light", "SQLite"),
+        ("work tree", "worktree"),
+        ("f f only", "ff-only"),
+        ("ff only", "ff-only"),
+        ("demon", "daemon"),
+    };
+
     static string NormalizeTerm(string? raw)
     {
         if (raw is null) return "";

@@ -165,7 +165,13 @@ public static class Dictation
 
         // Everything else, INCLUDING "enter" / "send" / "submit" / "go", is text. There is no
         // branch above this one that could have taken them anywhere else.
-        return new Decision(DictationAct.Insert, text);
+        //
+        // The vocabulary repair runs on SETTLED text only, and here rather than in the engine so
+        // that `ui heard` reaches it — a repair only the socket could exercise would be a repair no
+        // acceptance check could see (§3: drive the affordance, not a rehearsal of it). It is
+        // deliberately narrow: see SpeechStream.Vocabulary on why "wall" is not repaired and
+        // "work tree" is.
+        return new Decision(DictationAct.Insert, SpeechStream.Vocabulary(text));
     }
 
     // ---- where it lands (§4) ---------------------------------------------------------

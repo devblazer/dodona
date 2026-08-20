@@ -217,18 +217,45 @@ sealed class DeepgramRecognizer : IRecognizer
         await _pump;
     }
 
-    static string Query() => string.Join("&", new[]
+    static string Query()
     {
-        "encoding=linear16",
-        "sample_rate=" + Pcm16.Rate,
-        "channels=1",
-        "endpointing_ms=300",
-        "utterance_end_ms=1000",
-        "language=en",
-        "use_conversation_engine=true",
-        "stt_provider=deepgram-nova3",
-        // forward_interims is sent ONLY when typed-interims is on, and it is not (plan §2).
-    });
+        var parts = new List<string>
+        {
+            "encoding=linear16",
+            "sample_rate=" + Pcm16.Rate,
+            "channels=1",
+            "endpointing_ms=300",
+            "utterance_end_ms=1000",
+            "language=en",
+            // Overridable purely to test whether IT is what swallows the keyterms and lazies the
+            // endpointing (D-E22). The extension sends true, so true stays the default.
+            "use_conversation_engine=" +
+                (Environment.GetEnvironmentVariable("DODONA_STT_NO_CONVERSATION") is null or "" ? "true" : "false"),
+            "stt_provider=deepgram-nova3",
+            // forward_interims is sent ONLY when typed-interims is on, and it is not (plan §2).
+        };
+
+        // ══ KEYTERMS AS REPEATED QUERY PARAMETERS, AS WELL AS THE HEADER (D-E21) ══
+        //
+        // Measured: the header alone does NOTHING. The same recording with `x-config-keyterms` on
+        // and off produced byte-for-byte identical transcripts, while the four words the list
+        // exists for — worktree, daemon, WAL, SQLite — all came back wrong (D-E18).
+        //
+        // `VOICE-INPUT-PLAN.md` §6.2 read the bundle as sending keyterms as **repeated query
+        // parameters**; VOICE-ENGINE-PLAN §2 "corrected" that to a header only. That correction is
+        // the prime suspect, and Deepgram's own documented interface for Nova-3 keyterm prompting
+        // is a repeated `keyterm` query parameter — which is what this endpoint is a proxy for.
+        //
+        // BOTH are sent now rather than swapping one for the other: the header is what the bundle
+        // definitely does, the query parameters are what the engine underneath definitely reads,
+        // and sending both costs one URL. `DODONA_STT_NO_KEYTERMS` still turns the whole lot off so
+        // the A/B stays runnable.
+        if (Environment.GetEnvironmentVariable("DODONA_STT_NO_KEYTERMS") is null or "")
+            foreach (var term in SpeechStream.Keyterms)
+                parts.Add("keyterm=" + Uri.EscapeDataString(term));
+
+        return string.Join("&", parts);
+    }
 
     /// <summary>
     /// The read pump: the five message types of plan §2, and the close frame that carries the

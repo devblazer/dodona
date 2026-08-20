@@ -231,6 +231,54 @@ public class SpeechStreamTests
         Assert.DoesNotContain("term0399", h);
     }
 
+    // ══ the vocabulary repair, and the words it refuses to touch ══════════════════════════
+
+    /// <summary>
+    /// The four words the engine reliably mishears, repaired — because keyterms do not work
+    /// (measured three ways, D-E18/D-E21/D-E22).
+    ///
+    /// Proved RED by break-and-revert: emptying the `Repairs` table gave
+    ///   Assert.Equal() Failure: Expected "publish from the worktree", Actual "publish from the
+    ///   work tree"
+    /// which is the exact sentence the operator recorded and the exact miss it came back with.
+    /// </summary>
+    [Fact]
+    public void The_vocabulary_repair_fixes_what_the_engine_reliably_mishears()
+    {
+        Assert.Equal("publish from the worktree",
+            SpeechStream.Vocabulary("publish from the work tree"));
+        Assert.Equal("read the SQLite store", SpeechStream.Vocabulary("read the s q light store"));
+        Assert.Equal("the ff-only merge failed", SpeechStream.Vocabulary("the ff only merge failed"));
+        Assert.Equal("the daemon outlived its window",
+            SpeechStream.Vocabulary("the demon outlived its window"));
+        // Case-insensitive in, canonical spelling out: the engine capitalises sentence starts.
+        Assert.Equal("worktree", SpeechStream.Vocabulary("Work Tree"));
+    }
+
+    /// <summary>
+    /// **THE HALF THAT MATTERS MORE.** D-V9's principle is that a box which edits your words where
+    /// you did not ask is worse than one that types the wrong thing, because the second is visible
+    /// and the first is not. So a repair is only allowed where the mistaken form is not plausible
+    /// English — and "wall" is plausible English, so WAL stays mistranscribed on purpose.
+    ///
+    /// Proved RED by adding ("wall", "WAL") to the table:
+    ///   Assert.Equal() Failure: Expected "the wall of the server room", Actual "the WAL of the
+    ///   server room"
+    /// </summary>
+    [Fact]
+    public void The_vocabulary_repair_leaves_ordinary_English_alone()
+    {
+        // The one deliberately NOT repaired.
+        Assert.Equal("the wall of the server room",
+            SpeechStream.Vocabulary("the wall of the server room"));
+        // Word boundaries: a repair must not fire inside a longer word.
+        Assert.Equal("demonstrate the network", SpeechStream.Vocabulary("demonstrate the network"));
+        Assert.Equal("networking", SpeechStream.Vocabulary("networking"));
+        // Nothing to do, nothing done.
+        Assert.Equal("run the suites", SpeechStream.Vocabulary("run the suites"));
+        Assert.Equal("", SpeechStream.Vocabulary(""));
+    }
+
     /// <summary>Dodona's own list must actually FIT, or the words at the end are decoration. If a
     /// future edit pushes it over, this is the check that says so instead of the engine quietly
     /// never hearing "PowerShell".</summary>

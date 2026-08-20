@@ -198,6 +198,25 @@ try {
         ($null -ne $d -and $tailCopies -eq 1 -and (CommittedText) -eq $committedBefore) `
         "text=[$($d.input.text)] copies=$tailCopies committed=[$(CommittedText)]"
 
+    # ---- an unsettled tail does not outlive the microphone ------------------------------------
+    # A consequence of D-E17 that is not obvious. Leaving the tail in the box on disarm would leave
+    # the WORDS there while the tracked range still pointed at them, so the NEXT dictation would
+    # delete a range the operator had been looking at for minutes -- a delayed, mysterious deletion,
+    # which is strictly worse than an immediate one. Committed text must be untouched either way.
+    #
+    # Proved RED by removing the ClearPending call from DisarmMic:
+    #   FAIL boxAfterOff=[...this tail is unsettled now] pendingAfter=29
+    $committedAtOff = CommittedText
+    Dodona @('ui', 'listen', 'off') | Out-Null
+    Wait-Until { (DumpOrNull).listen.state -eq 'off' } 20000 'the mic reports off' | Out-Null
+    $d = DumpOrNull
+    Check 'an_unsettled_tail_does_not_outlive_the_microphone' `
+        ($null -ne $d -and "$($d.input.text)" -notmatch 'unsettled' `
+         -and [int]$d.input.pending -eq 0 -and "$($d.input.text)" -eq $committedAtOff) `
+        "boxAfterOff=[$($d.input.text)] pendingAfter=$($d.input.pending) committedBefore=[$committedAtOff]"
+    Dodona @('ui', 'listen', 'on') | Out-Null
+    Wait-Until { (DumpOrNull).listen.state -eq 'listening' } 20000 'the mic is back on' | Out-Null
+
     # ---- the submit race, end to end (section 4) --------------------------------------------
     # A result recognised under an older epoch is the tail of a sentence already sent. Spliced,
     # it would open the NEXT message with the end of the last one -- the one bug here a person
@@ -371,6 +390,51 @@ try {
         ($null -ne $d -and $d.listen.engine -eq 'fake' -and $sockets.Count -eq 0) `
         "engine=[$($d.listen.engine)] sockets=$($sockets.Count)"
 
+    # ---- A REWRITING INTERIM STREAM LEAVES EXACTLY ONE COPY (D-E17) --------------------------
+    # A real engine sends a SEQUENCE that rewrites itself -- "publish", "publish from", "publish
+    # from the worktree" -- and the failure this pins is the one that would look almost right:
+    # every hypothesis spliced in turn, giving "publishpublish frompublish from the worktree".
+    #
+    # IT SHARES THE MIC-OFF WINDOW ON PURPOSE, and that is a cost decision rather than laziness.
+    # This suite went 13 s -> 46 s when the cloud engine's five checks landed, because each one
+    # restarted the window (~6 s of process start apiece) -- and that pushed the whole gate over
+    # I7's 260 s budget. The budget may be raised for GROWTH but not for waste, so the two blocks
+    # that need the SAME environment (DODONA_UI_MIC=off, no token, no endpoint override) were
+    # merged into one window instead. The three that follow each need different env AT PROCESS
+    # START, so they genuinely cannot share and still restart.
+    Dodona @('ui', 'listen', 'on') | Out-Null
+    Wait-Until { (DumpOrNull).listen.state -eq 'listening' } 20000 'the shared window is listening' | Out-Null
+    $beforeStream = BoxText
+    foreach ($hyp in 'publish', 'publish from', 'publish from the worktree') {
+        Dodona @('ui', 'heard', $hyp, '--partial') | Out-Null
+    }
+    Wait-Until { (DumpOrNull).listen.partial -eq 'publish from the worktree' } 20000 'the last interim is held' | Out-Null
+    $dMid = DumpOrNull
+    # Now the settled text, the way TranscriptEndpoint promotes it.
+    Dodona @('ui', 'heard', 'publish from the worktree') | Out-Null
+    Wait-Until { (BoxText) -match 'publish from the worktree' } 20000 'the settled text lands' | Out-Null
+    $d = DumpOrNull
+    $box = "$($d.input.text)"
+    # Exactly once: three interims plus a final must not leave four copies, or any prefix of one.
+    # IGNORECASE, and the first version of this check was wrong for the lack of it -- the box read
+    # "Publish from the worktree" because Dictation.Splice capitalises the start of an empty box
+    # (section 4), so a case-sensitive count found 0 and the check failed while the behaviour was
+    # correct. A false red costs exactly as much as a false green (CLAUDE.md 0.2).
+    $occurrences = ([regex]::Matches($box, [regex]::Escape('publish from the worktree'),
+                                     'IgnoreCase')).Count
+    # THE VALUABLE HALF SURVIVES D-E17 UNCHANGED: a rewriting stream must leave exactly ONE copy.
+    # What changed is the mid-stream expectation -- the tail is now IN the box (visible, pending>0)
+    # rather than absent from it, and the settled text replaces it rather than joining it. The
+    # failure this pins is the same one either way: "publishpublish frompublish from the worktree".
+    Check 'an_interim_stream_leaves_exactly_one_copy_in_the_box' `
+        ($null -ne $dMid -and "$($dMid.input.text)" -match 'publish from the worktree' `
+         -and [int]$dMid.input.pending -gt 0 `
+         -and $occurrences -eq 1 -and $box -notmatch 'publishpublish' `
+         -and [int]$d.input.pending -eq 0 -and "$($d.listen.partial)".Length -eq 0) `
+        ("midBox=[$($dMid.input.text)] midPending=$($dMid.input.pending) box=[$box] " +
+         "occurrences=$occurrences pendingAfter=$($d.input.pending)")
+
+
     # ---- A DEAD NETWORK READS AS ERROR, NEVER AS LISTENING -----------------------------------
     # On and deaf must never look like on (section 5) -- and with a socket engine this is the
     # likely everyday failure rather than an exotic one.
@@ -468,47 +532,6 @@ try {
         ($sawStarting -and $leftStarting -and $null -ne $d -and $d.listen.state -eq 'error' `
          -and "$($d.listen.says)" -notmatch 'listening' -and "$($d.listen.error)".Trim().Length -gt 0) `
         "sawStarting=$sawStarting state=[$($d.listen.state)] says=[$($d.listen.says)] error=[$($d.listen.error)]"
-
-    # ---- AN INTERIM NEVER ENTERS THE BOX, against a REWRITING stream (D-V6) ------------------
-    # partial_is_not_in_input_text above sends one partial. A real engine sends a SEQUENCE that
-    # rewrites itself -- "run", "run the", "run the suites" -- and the failure mode this pins is
-    # the one that would look almost right: every interim spliced, giving
-    # "runrun therun the suites" in the box. Only the settled text may land, once.
-    Dodona @('ui', 'close') | Out-Null
-    Wait-Until { $null -eq (DumpOrNull) } 20000 'the window is gone before the interim-stream window' | Out-Null
-    Reset-UiWindow
-    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
-    Wait-Until { $null -ne (DumpOrNull) } 30000 'the interim-stream window answers' | Out-Null
-    Dodona @('ui', 'listen', 'on') | Out-Null
-    $beforeStream = BoxText
-    foreach ($hyp in 'publish', 'publish from', 'publish from the worktree') {
-        Dodona @('ui', 'heard', $hyp, '--partial') | Out-Null
-    }
-    Wait-Until { (DumpOrNull).listen.partial -eq 'publish from the worktree' } 20000 'the last interim is held' | Out-Null
-    $dMid = DumpOrNull
-    # Now the settled text, the way TranscriptEndpoint promotes it.
-    Dodona @('ui', 'heard', 'publish from the worktree') | Out-Null
-    Wait-Until { (BoxText) -match 'publish from the worktree' } 20000 'the settled text lands' | Out-Null
-    $d = DumpOrNull
-    $box = "$($d.input.text)"
-    # Exactly once: three interims plus a final must not leave four copies, or any prefix of one.
-    # IGNORECASE, and the first version of this check was wrong for the lack of it -- the box read
-    # "Publish from the worktree" because Dictation.Splice capitalises the start of an empty box
-    # (section 4), so a case-sensitive count found 0 and the check failed while the behaviour was
-    # correct. A false red costs exactly as much as a false green (CLAUDE.md 0.2).
-    $occurrences = ([regex]::Matches($box, [regex]::Escape('publish from the worktree'),
-                                     'IgnoreCase')).Count
-    # THE VALUABLE HALF SURVIVES D-E17 UNCHANGED: a rewriting stream must leave exactly ONE copy.
-    # What changed is the mid-stream expectation -- the tail is now IN the box (visible, pending>0)
-    # rather than absent from it, and the settled text replaces it rather than joining it. The
-    # failure this pins is the same one either way: "publishpublish frompublish from the worktree".
-    Check 'an_interim_stream_leaves_exactly_one_copy_in_the_box' `
-        ($null -ne $dMid -and "$($dMid.input.text)" -match 'publish from the worktree' `
-         -and [int]$dMid.input.pending -gt 0 `
-         -and $occurrences -eq 1 -and $box -notmatch 'publishpublish' `
-         -and [int]$d.input.pending -eq 0 -and "$($d.listen.partial)".Length -eq 0) `
-        ("midBox=[$($dMid.input.text)] midPending=$($dMid.input.pending) box=[$box] " +
-         "occurrences=$occurrences pendingAfter=$($d.input.pending)")
 
     # ---- the pose, so a screenshot can see the indicator --------------------------------------
     $poseReply = (Dodona @('ui', 'pose', 'listening')) | Out-String
