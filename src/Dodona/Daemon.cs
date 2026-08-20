@@ -2606,6 +2606,42 @@ sealed class Daemon
         foreach (var dir in Directory.GetDirectories(binRoot))
         {
             if (Path.GetFullPath(dir).TrimEnd('\\').Equals(mine, StringComparison.OrdinalIgnoreCase)) continue;
+
+            // NEVER COLLECT A STAMP NEWER THAN OUR OWN — A PUBLISH IN FLIGHT IS NOT GARBAGE.
+            //
+            // Measured on the operator's own machine, 2026-08-21, twice in one evening. Merging to
+            // main and then running `publish` by hand means TWO publishes: the manual one, and
+            // `autoPublish`'s watcher noticing the same commit within its 15 s poll. They build
+            // into stamps a second or two apart. The first to finish swaps its daemon in, that
+            // daemon reaches this loop, and "not mine, not locked" was true of the OTHER
+            // publish's brand-new directory — so it deleted it. What the operator saw:
+            //
+            //   building Dodona → ...\bin\20260820-222405        (succeeded; dodona.exe verified)
+            //   error: no such binary: ...\bin\20260820-222405\dodona.exe
+            //
+            // and, when a file happened to be locked partway through `Directory.Delete`, a
+            // HALF-DELETED corpse left behind: `20260820-221926` reduced to a single dodona.exe,
+            // `20260820-115855` to two files. Those corpses are the second half of the damage —
+            // they are newest-by-name, so anything resolving the installed binary that way gets a
+            // directory with no `dodona.dll` and the unreadable "The application to execute does
+            // not exist" (CLAUDE.md §2's snippet did exactly this until the same day).
+            //
+            // The rule needs no coordination, no lock file and no knowledge of who else is
+            // publishing: a stamp NEWER than the running image is either a publish in flight or a
+            // successor about to take over, and neither is garbage. Old ones are the entire point
+            // of a garbage collector, and they still go.
+            //
+            // Only STAMPS are compared, and only when both parse. `yyyyMMdd-HHmmss` is ordinal-
+            // sortable by construction, which is why the compare is a string compare. A directory
+            // whose name is not a stamp is judged exactly as it was before — no new retention, so
+            // nothing starts accumulating on the strength of a name nobody recognises.
+            var dirStamp = Path.GetFileName(Path.GetFullPath(dir).TrimEnd('\\'));
+            var myStamp = Path.GetFileName(mine);
+            if (IsStamp(dirStamp) && IsStamp(myStamp) && string.CompareOrdinal(dirStamp, myStamp) > 0)
+            {
+                _store.Event("binary_gc_kept", null, $"{dir}: newer than this build ({myStamp}) — a publish in flight is not garbage");
+                continue;
+            }
             // AND NOT ONE A LIVE AGENT'S GATE STILL POINTS AT (WORK-ISOLATION-PLAN D-17).
             //
             // Hooks are read at SESSION START and never re-read (measured 2026-08-20 -- see the
@@ -2625,6 +2661,15 @@ sealed class Daemon
             catch (Exception ex) { _store.Event("binary_gc_skipped", null, $"{dir}: {ex.Message}"); }
         }
     }
+
+    /// <summary>Is this directory name a publish stamp — `yyyyMMdd-HHmmss`? Only stamps are
+    /// compared for age in <see cref="GcOldBuilds"/>, so a directory named anything else is
+    /// judged exactly as it was before the newer-than-mine rule existed. Shape only, never
+    /// `DateTime.TryParse`: the format is ordinal-sortable by construction and parsing it would
+    /// drag in a culture that has no business deciding whether a build is garbage.</summary>
+    static bool IsStamp(string name) =>
+        name.Length == 15 && name[8] == '-' &&
+        name.All(c => char.IsAsciiDigit(c) || c == '-');
 
     /// <summary>Does any workspace's per-lane gate file name this build directory? See
     /// <see cref="GcOldBuilds"/> for why that must veto collection. Text, not JSON: the question

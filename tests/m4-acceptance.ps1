@@ -64,10 +64,20 @@ function Dodona([string[]]$a) {
 }
 function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$name] = if ($cond) { 'PASS' } else { "FAIL $detail".Trim() } }
 function Sql([string]$q) {
+    # THE QUERY GOES ON ITS OWN LINE INSIDE THE TRIPLE QUOTES, and that is a fix rather than a
+    # style choice. Interpolated inline, a query ENDING in a single quote -- which every
+    # `WHERE kind=<quoted>` does -- put four quotes together and Python read them as a syntax
+    # error: the process printed nothing, this function returned empty, and the caller read that
+    # empty string as a legitimate ZERO. Cost a debugging round on 2026-08-21 -- a real retention
+    # event sat in the store while the check asking for it reported none -- and the only reason
+    # the older queries here work is a trailing space nobody had written down. A newline is
+    # nothing to sqlite and cannot collide with a quote.
     (python -c "
 import sqlite3
 db = sqlite3.connect(r'$storeDb')
-for r in db.execute('''$q'''): print('|'.join(str(x) for x in r))
+for r in db.execute('''
+$q
+'''): print('|'.join(str(x) for x in r))
 ") | Out-String
 }
 
@@ -102,9 +112,28 @@ try {
     Dodona @("say", "$lane", "sleep:6 then say $token") | Out-Null
     Wait-Until { (Sql "SELECT COUNT(*) FROM pane_events WHERE lane_id=$lane AND kind='user_input'").Trim() -ne '0' } 15000 'the turn has been handed to the agent' | Out-Null
 
+    # A DECOY STANDING IN FOR A CONCURRENT PUBLISH, planted BEFORE the first publish so that no
+    # GC pass in this suite can miss it. It is a stamp NEWER than anything this suite will ever
+    # build, which is precisely the shape `GcOldBuilds` used to destroy: on the operator's machine,
+    # merging to main and then publishing by hand runs TWO publishes (the manual one and
+    # `autoPublish`'s watcher, on the same commit, seconds apart), and whichever swapped first
+    # deleted the other's brand-new directory out from under it. Measured twice on 2026-08-21.
+    #
+    # THE FIRST DRAFT PLANTED IT AFTER THE PUBLISH AND WAS WORTHLESS: the swapped-in daemon runs
+    # its GC during reconcile, which had already happened, so the decoy survived by never having
+    # been a candidate. It passed while asserting nothing -- caught only because the retention
+    # EVENT was missing, which is why this check asserts the event and not just the directory.
+    $futureDir = Join-Path $binRoot '29991231-235959'
+    New-Item -ItemType Directory -Force $futureDir | Out-Null
+    Set-Content "$futureDir\dodona.exe" 'not a real binary, and it does not need to be'
+
     $publish = Dodona @("publish", "--project", $repo)
     Set-Content "$out\publish.txt" $publish
-    Check 'publish_builds_versioned_dir' (@(Get-ChildItem -Directory $binRoot -ErrorAction SilentlyContinue).Count -eq 1) $publish
+    # Scaffolding excluded (the decoy above): the claim is that PUBLISH made one versioned
+    # directory, not that the suite's own fixtures are absent from a folder it plants them in.
+    Check 'publish_builds_versioned_dir' `
+        (@(Get-ChildItem -Directory $binRoot -ErrorAction SilentlyContinue |
+           Where-Object { $_.Name -notin @('bogus', '29991231-235959') }).Count -eq 1) $publish
     Check 'publish_hands_off' ($publish -match 'handed off to build') $publish
 
     # daemon #1 must be GONE (it exited after the handoff) and #2 must own the pipe
@@ -153,7 +182,7 @@ try {
     # string would pass an equality check against itself and prove nothing -- the build used to
     # report a timestamp mapping to nothing, and the fix is only real if the value resolves.
     $head = (& git -C $repo rev-parse HEAD 2>$null).Trim()
-    $pubDir = @(Get-ChildItem -Directory $binRoot | Where-Object { $_.Name -ne 'bogus' })[0].FullName
+    $pubDir = @(Get-ChildItem -Directory $binRoot | Where-Object { $_.Name -notin @('bogus', '29991231-235959') })[0].FullName
     $vj = & "$pubDir\dodona.exe" version --json 2>$null | ConvertFrom-Json
     Check 'published_build_carries_its_commit' ($vj.commit -eq $head -and $head.Length -eq 40) "commit=$($vj.commit) head=$head"
     Check 'published_commit_is_a_real_commit' `
@@ -284,8 +313,32 @@ try {
     # its gate names the build it was launched from, so that directory must NOT have been collected
     # while every other old one was. Asserting only "one directory left" would have made the
     # retention look like a GC bug.
-    $dirs = @(Get-ChildItem -Directory $binRoot | Where-Object { $_.Name -ne 'bogus' })
+    # Both scaffolding directories out: `bogus` is the no-exe swap target, and the future stamp is
+    # the concurrent-publish decoy. Neither is a build this suite made.
+    $dirs = @(Get-ChildItem -Directory $binRoot | Where-Object { $_.Name -notin @('bogus', '29991231-235959') })
     $kept = [int](Sql "SELECT COUNT(*) FROM events WHERE kind='binary_gc_kept' ").Trim()
+
+    # A PUBLISH IN FLIGHT IS NOT GARBAGE. The decoy planted before the first swap carries a stamp
+    # newer than the running build, so it is either a publish still copying or a successor about
+    # to take over -- and the GC deleting it is what produced, on the operator's machine:
+    #
+    #   building Dodona -> ...\bin\20260820-222405        (succeeded, exe verified)
+    #   error: no such binary: ...\bin\20260820-222405\dodona.exe
+    #
+    # ...plus, when a file was locked partway through the delete, a half-deleted corpse that is
+    # newest-by-name and has no dodona.dll -- which is what any "resolve the installed binary"
+    # snippet then picks. TWO assertions, because either alone is worthless: the decoy SURVIVED,
+    # and the GC still ran and still collected something (`old_builds_gcd_except_those_a_live_gate
+    # _names` above is the other half). A GC that kept everything would pass a survival check while
+    # being a worse bug than the one being fixed.
+    # ONE invocation each, landed in variables first: a detail string that recomputes what it
+    # asserted on can disagree with the assertion, and nested double quotes inside an interpolated
+    # string is its own trap in PS 5.1.
+    $decoyThere = Test-Path (Join-Path $futureDir 'dodona.exe')
+    $decoyKept = [int](Sql "SELECT COUNT(*) FROM events WHERE kind='binary_gc_kept' AND detail LIKE '%29991231%'").Trim()
+    $keptRows = (Sql "SELECT detail FROM events WHERE kind='binary_gc_kept'") -replace '\s+', ' '
+    Check 'a_build_directory_newer_than_the_running_one_survives_the_gc' `
+        ($decoyThere -and $decoyKept -ge 1) "exists=$decoyThere kept-events=$decoyKept rows=[$keptRows]"
     # Asserted as "retention HAPPENED", not "at most two directories": SKY is alive (proved two
     # checks up) and its gate names the build it was launched from, so a run where nothing was kept
     # means the retention never fired and this check would be agreeing with a collected exe.
