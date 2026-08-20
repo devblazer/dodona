@@ -10,6 +10,14 @@ ticket path in code. **Revised twice the same day**, both times on the operator'
    its brain", and the router merely "decides where a typed sentence goes". §4 now puts
    coordination where it belongs, and behind the fast path rather than in front of it.
 
+**SUPERSEDED IN PART, 2026-08-20, by `REVIEW-AND-MERGE-PLAN.md`.** After P1 and P2 landed, the
+operator challenged the claim system and was right: declared file claims are retired as a LOCK, so
+**D-4 and P8 are dead** (not rescheduled — the idea is gone), and **P3, P4 and P5 move** into that
+plan's R1/R4/R6, because "verify before the merge", "examine at end of turn" and "raise the approval
+question" are three slices of one review flow rather than three phases. Read §5 and §6 here with
+that in mind; every marker is in place below. What this plan still owns, and what is built, is
+**isolation**: layers 1, 2 and 3.
+
 The authority for this work. It extends `WORKSPACES-CONCIERGE.md` §5/§5.1 (the routing ladder)
 and consumes `LANE-LIFECYCLE.md` §2/§3 (how a lane ends, and what was already rejected there)
 rather than re-deciding them. `M5-DELIVERY-PLAN.md` owns a *foreign* project's ceremony; this
@@ -145,6 +153,12 @@ which tree it owns, which paths another lane holds.
 The operator's question — *can the manager be smart enough to know when it is done?* — comes
 apart into three, and only one of them is a judgement at all.
 
+**MOVED, 2026-08-20.** This whole section is the finishing side, and it is now
+`REVIEW-AND-MERGE-PLAN.md` §3–§6: (a) is that plan's §3 and D-R4, (b) is its D-R8, and the manager's
+role in it is D-R9/D-R10 — where it gained the power to send work back, and the rule that it may
+**block but never bless**. The three-questions framing below is unchanged and still correct; only the
+phases moved.
+
 **(a) Is the work CORRECT? — code, never an opinion.** It builds, the suites pass, the diff is
 inside the claim, and it fast-forwards. That is `dev gate` plus the existing backstop, and it is
 the whole of "clearly done" in any sense worth acting on.
@@ -199,7 +213,20 @@ correction). A wrong `false` is cheap now, because layer 1 catches it.
 the verdict lands, presence `preparing…`, sentence delivered when the agent attaches.
 `LaneCreate` already precedes `AttachShimAsync`.
 
-**D-4. Claims are elastic while the ticket is scoping.** A spoken sentence cannot supply claim
+**D-4. DEAD, 2026-08-20 — see `REVIEW-AND-MERGE-PLAN.md` D-R5.** Elastic claims were the fix for a
+frozen wrong claim stranding an agent. The operator's challenge went one level deeper: the claim
+should not bound the agent's own worktree at all, because *"two agents about to work on the same file
+— that's often the case, very often the case, and if that is problematic it's the manager's job to
+say something about it."* Two agents on one file is ordinary development; files are not the unit of
+work. So there is nothing left to make elastic. Two things also came out of tracing the merge while
+implementing P1/P2, and either alone would have retired this: **a disjoint claim does not make
+concurrent landing work** (both branches still fail `--ff-only` the moment one lands, because main
+moved), and **layer 1 already replaced the gate's remaining job** — an agent that physically cannot
+write outside its worktree makes "did it touch what it declared" a review question, not a safety one.
+The original text follows, kept because the stranding case it names is real and R3 must not
+reintroduce it from the other side.
+
+**D-4 (superseded). Claims are elastic while the ticket is scoping.** A spoken sentence cannot supply claim
 paths, and a frozen wrong claim strands the agent mid-work. While `scoping`, an out-of-claim
 write **auto-extends and announces**; the gate refuses only what another **open ticket** claims,
 naming it (D-13). The claim freezes at the first `token-request`.
@@ -341,19 +368,21 @@ predicted here:
 |---|---|---|
 | **P1** | **Layer 1**: the gate on every lane; refuse a write inside a project but outside a worktree, naming the holder. | `m1`: a plain lane's write into the shared checkout is refused. `dev prove` red first — today there is no gate there at all. |
 | **P2** | **Layer 2**: promotion on that refusal — ticket, worktree, gate, respawn-with-resume, announce, undo. | `m2`: a plain lane attempting a write ends in a worktree, session resumed, nothing written to the live tree. |
-| **P3** | D-15 + D-16: end-of-turn examination in the worktree; green raises the ask, red tells the lane and stays quiet. | `m1`: a green ticket lane raises exactly one question row; a red one raises none and records why. |
-| **P4** | D-5 + D-6: verify before the merge; `dodona.json` verify becomes `dev gate`. Shares its machinery with P3. | `m1`: a red verify leaves main's sha unchanged. `dev prove` first — most likely phase to look green against the old order. |
-| **P5** | D-7: the approval question row; overlay + `ui answer`. | `ui-use`: the ask offers the approval and answering it grants the token, at a live window. |
+| ~~P3~~ | **MOVED to `REVIEW-AND-MERGE-PLAN.md` R4.** The end-of-turn examination is where that plan's PR-shaped record is assembled, so it gained the agent's own report and the diffstat. |
+| ~~P4~~ | **MOVED to R1.** Verify before the merge is one step of the standard merge flow (bring main in, re-verify in the worktree, then fast-forward), not a phase of its own. D-6 (`dev gate` rather than a bare `dotnet build`) travels with it. |
+| ~~P5~~ | **MOVED to R6.** The approval row is the same row; what changed is that it now carries the manager's write-up, which is what makes answering it a two-second decision. |
 | **P6** | §4: the manager's review-behind gains the ownership picture and the coordination questions; the router's fact sheet gains only what changes a destination. | `unit`: both renderings. `m2`: a colliding sentence is corrected behind, announced, not blocked. |
 | **P7** | **Layer 3**: `isolate` on the verdict; isolated spawn; fallback to a plain lane when `ticket-create` refuses. | `unit`: verdict parses, defaults false, ignored unless `new-task`. `m2`: an isolating sentence is born in a worktree, skipping promotion. |
-| **P8** | D-4: elastic claims — auto-extend while scoping, announce, freeze at `token-request`, still refuse another ticket's paths. | `unit`: the algebra. `m1`: a scoping widen is allowed and announced; a second ticket's path refused. |
+| ~~P8~~ | **DEAD — see D-4 above and `REVIEW-AND-MERGE-PLAN.md` R3**, which deletes the three claim refusals instead of making one of them elastic. |
 | **P9** | D-10: the prompt tail, the `publish` refusal, the `dev worktree` refusal. | `publish`: `publish --project <a ticket worktree>` refuses and names `--from`. |
 | **P10** | D-11: wire landing into `LANE-LIFECYCLE.md` §3's completion question. | `m1` + `m3`: after a land the lane is dormant, the question asked once, preconditions gating it. |
 
-**P1–P2 are the safety and come first**: they make the operator's named failure — real work
-started outside a worktree — structurally impossible, with no model work at all. **P3–P5 are the
-finishing side**, which is what turns "it got its own branch" into "it got off it again". P6–P7
-are the responsiveness. P4 is a bug fix landable on its own.
+**P1–P2 are the safety and are BUILT** (committed 2026-08-20): they make the operator's named
+failure — real work started outside a worktree — structurally impossible, with no model work at all.
+**The finishing side is now `REVIEW-AND-MERGE-PLAN.md` R1–R6**, which is what turns "it got its own
+branch" into "it got off it again". What remains here is **P6, P7, P9 and P10** — the
+responsiveness, the isolating verdict, and the prompt tail — and R1–R3 come before any of them,
+because until the merge flow works a landed ticket is still a manual rebase.
 
 ## 8. Rejected — do not re-propose
 
@@ -371,6 +400,15 @@ are the responsiveness. P4 is a bug fix landable on its own.
   opinion. The manager is asked whether a lane looks *stuck*, never whether the code is *right*.
 - **Brain-proposed claims, frozen at creation.** The stranding case: the agent needs one file
   nobody predicted, the gate denies, and by voice there is no way to extend.
+- **Claims as a lock at all** (added 2026-08-20, operator's decision — see D-4 and
+  `REVIEW-AND-MERGE-PLAN.md` D-R5/§9). Two agents on one file is ordinary; a lock on the agent's own
+  private checkout blocks the work it was given; and a disjoint claim never made concurrent landing
+  work anyway. Kept only as a signal, and derived from `git diff` rather than declared.
+- **Preventing two agents from touching one file.** Files are not the unit of work. The overlap that
+  matters is duplicated *effort*, which the manager raises (§4) rather than a mechanism forbids.
+- **A manager that can APPROVE a land.** It may block. `REVIEW-AND-MERGE-PLAN.md` D-R10: rejection is
+  reversible, a ref advance is not, and a model as sole gate on the irreversible step is this plan's
+  own §2 violated with the model renamed.
 - **A whole-repo `path:.` claim instead.** Bounds nothing, makes every other ticket a conflict.
 - **Promotion AFTER a lane has edited the shared checkout.** The edits are in the wrong tree and
   `git stash` is repo-global (§5.2), so two lanes stashing interleave one stack. Layer 2 promotes

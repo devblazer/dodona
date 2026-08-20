@@ -890,6 +890,11 @@ correction, 2026-08-20: an agent reading either half alone will skip the other.
 - `docs/ORCHESTRATOR-DESIGN.md` — **the authority.** Every `§n` in this codebase (§8
   attention, §11 lifecycle, §17 testing) points here.
 - `docs/ORCHESTRATOR-REVIEW.md` — the milestone plan, the measurements, what is carried.
+- `docs/WORK-ISOLATION-PLAN.md` — work isolation: no agent writes into a project outside a
+  worktree, and the refused write promotes itself into one. Layers 1 and 2 are BUILT.
+- `docs/REVIEW-AND-MERGE-PLAN.md` — how a ticket's work is reviewed and lands: the ordinary
+  bring-main-in-then-fast-forward flow, and a manager that reviews the work and can send it
+  back but **never approve**. Supersedes the declared-claims-as-a-lock idea entirely.
 - `docs/LANE-LIFECYCLE.md` — decisions already taken and **ideas already rejected** about
   closing lanes and the attention model. Read before proposing either.
 - `DEBUGGING.md` — the schema, every event kind, the pipes, and how to read a store with
