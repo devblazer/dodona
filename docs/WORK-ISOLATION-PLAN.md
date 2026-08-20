@@ -240,6 +240,52 @@ from inside a ticket worktree.
 
 **D-11. How the lane ends is already decided** — `LANE-LIFECYCLE.md` §3. Wire into it.
 
+**D-17. The gate is handed to the agent at LAUNCH, not written into the project.** The operator's
+challenge, and it is correct: a hook in a project's `settings.local.json` binds **anything** that
+runs Claude Code in that folder — including the operator's own IDE session. Only the process
+Dodona started should be gated.
+
+The CLI already supports this, and `ClaudeArgs` already uses the neighbouring flag
+(`--setting-sources user` for utility roles):
+
+- **`--settings <file-or-json>`** — "load **additional** settings from". *Additional*, so a
+  project's own tracked settings and hooks keep working; this is not a replacement.
+- **`--setting-sources user,project,local`** — which sources load at all.
+
+So the gate becomes a per-lane settings file under `<DODONA_HOME>\workspaces\<id>\`, passed as one
+more argument in `ClaudeArgs`. A **file rather than inline JSON**: the command line stays short and
+the gate stays inspectable when something goes wrong, and `ProcessStartInfo.ArgumentList` escaping
+is not a thing to bet a quoting bug on.
+
+What this deletes outright:
+
+- **The overwrite hazard, entirely.** `DeployGate` writes `settings.local.json` with
+  `File.WriteAllText` — a whole-file overwrite. Safe until now purely by accident: a ticket
+  worktree is a fresh checkout and the file is untracked, so there has never been one there to
+  destroy. Deploying into a live project tree would have silently wiped the developer's own
+  allowed-commands list with nothing in git to restore from. Nothing is written to a project now,
+  so there is no file to merge and no backup to remember.
+- **Both footprints in a repo that is not Dodona's** — the settings file and the appended
+  `.git/info/exclude` block. Most repos this will drive are not the operator's to modify.
+- **The stale-artifact cleanup**: the `dodona-gate.ps1` removal, and the reason it exists.
+- **Scope creep onto the human.** The operator's own session in the same folder is untouched,
+  which is the whole point of the change.
+
+**Measure two things before P1 relies on it**, because "the flag exists" is not "the hook fires":
+
+1. **Does a `PreToolUse` hook supplied via `--settings` actually fire under `-p` with
+   `bypassPermissions`?** The existing measurement (hooks fire under `bypassPermissions`) was
+   taken against a hook in a project file. One `claude -p` turn answers it. This is the first
+   task of P1 and everything else in the phase depends on it.
+2. **Are hooks re-read after a publish, or fixed at session start?** The gate command names
+   `Environment.ProcessPath`, and `GcOldBuilds` deletes old build directories — which is exactly
+   why gate *redeployment* exists today (`gate_redeploy_failed` carries the incident: a hook
+   pointing at an exe that had been collected). If hooks are fixed at session start, a live agent
+   keeps the old path either way and redeployment was never solving it for a running lane; if they
+   are re-read, the per-lane file must be rewritten on swap the same way the worktree copy is
+   today. **Do not delete the redeployment machinery until this is answered** — it is the one part
+   of `DeployGate` this decision may not subsume.
+
 ## 7. Phases
 
 | | what | proof |
@@ -353,23 +399,9 @@ rot; names do not. **One phase per commit**, each with its proof, in the order �
   `role == "work"` only: management lanes run in the neutral directory and write nothing.
 - **`DeployGate(worktree, ticketId, repo)`** gains a lane-only form writing `--lane` instead of
   `--ticket`. Keep one function with the ticket optional; two would drift.
-- **BLOCKER, and it must be fixed before P1 deploys anywhere: `DeployGate` writes
-  `settings.local.json` with `File.WriteAllText` — a whole-file overwrite.** That has been safe
-  purely by accident. A ticket's worktree is a fresh checkout and the file is untracked, so there
-  has never been one there to destroy. P1 deploys into the **live tree of every project**, where
-  a developer's own `settings.local.json` — their allowed commands, their preferences — very
-  likely exists. It would be silently wiped, and it is not in git, so there is nothing to restore
-  it from.
-  **`DeployGate` must MERGE**: read any existing file, add or replace only Dodona's own
-  `PreToolUse` entry, keep every other key byte-for-byte, and back the original up before writing.
-  This is the same mistake the code already fixed once in the other direction — an earlier version
-  wrote `settings.json` and overwrote the repo's *tracked* file, so the repo lost its hooks and
-  the agent saw a dirty file it had not changed. `settings.local.json` was the fix for that; the
-  overwrite came along for the ride.
-- **Two footprints in a project that is not Dodona's**, worth stating plainly because most repos
-  Dodona will drive are not the operator's to modify: `.claude/settings.local.json` in the working
-  directory, and an appended block in that repo's `.git/info/exclude`. Both are untracked and
-  neither can be committed, but the announcement should say so once rather than never.
+- **The gate is passed at launch, not written into the project (D-17).** No
+  `settings.local.json`, no `info/exclude` block, nothing in anybody's tree. See D-17 for why
+  this replaces `DeployGate`'s file entirely and what has to be measured first.
 - **Measure before calling it done** (§9): time an `Edit` with and without the hook. The two
   hooks deleted in D-7 cost 255 ms each, 136 ms of that merely starting PowerShell. This one is
   `dodona.exe` directly rather than a script shelling out to it, so it should be far cheaper —
