@@ -74,6 +74,21 @@ nothing while looking installed).
 - **Quota is the scarce resource** (§2.6): suites stay model-free, real-model runs are
   rare and deliberate, the router/compressor stay on cheap models, and you never spawn
   subagent swarms when one focused session will do.
+- **THE HEAVY SUITES ARE NOT AUTHORIZED AS A DEFAULT — anywhere** (standing directive,
+  2026-08-20, in their words: *"I don't have the bandwidth to run those heavy handed test
+  suites all the time. Run it sparsely only when you actually absolutely have to. And then
+  when you do run it, don't run everything. Run modules that matter."*). This corrects a
+  plan that had written `dev gate` in as the verify step on **every land**
+  (`REVIEW-AND-MERGE-PLAN` D-6/§11) — nobody had asked for that, and the operator's
+  position is the opposite of it. So:
+  - **A full run needs a reason that names itself.** "Before merging to main" is the one
+    standing case (§1), and it is once per merge, not once per phase or per edit.
+  - **Automated verification never gets the full set.** Anything the machine runs on its
+    own — a land's `verify`, a watcher, a hook — runs the modules that matter and says
+    which ones it chose. `dodona.json`'s `//verify` block carries this reasoning at the
+    point of use.
+  - **Do not propose widening it back** on the grounds that a subset might miss something.
+    It might; that is the trade the operator has made, twice now, knowing it.
 - **Act, announce, allow undo** (§11) applies to you too: make the routine call, say what
   you did, keep it reversible. Blocking questions are for genuinely unsafe forks only.
 - Feedback like "that's bullshit" about a proposal is a decision — record it (rejected

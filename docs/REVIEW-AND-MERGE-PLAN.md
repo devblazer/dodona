@@ -291,11 +291,18 @@ the review. R7 is the foreign-repo case and can wait.
     `say`. At 275 s that is CLAUDE.md §0.1's *never hung* violated by four and a half minutes, on
     the one operation an operator is definitely watching.
 
-  So the touched subset is the default **for now, on that measurement**, and the real fix is not a
-  narrower verify — it is **an asynchronous land**, which is the only thing that makes the full
-  gate affordable here. That is the recommended next piece of work in this area and it is not in
-  R1: it changes the land's protocol (the caller gets *landing…* and a later announcement), so it
-  wants its own phase and its own decision. Note that the verify cost is **not** doubled the way
+  **And the full set was never authorized here at all** — which is the part D-6 got wrong, not the
+  timing. The operator's standing directive (CLAUDE.md §0.1, 2026-08-20): *"I don't have the
+  bandwidth to run those heavy handed test suites all the time. Run it sparsely only when you
+  actually absolutely have to. And then when you do run it, don't run everything. Run modules that
+  matter."* D-6 wrote `dev gate` into **every land** without that having been asked for. So the
+  subset is **the default, not a stopgap**, and this question is closed rather than deferred: do
+  not widen it back on the grounds that a subset might miss something.
+
+  The asynchronous land is still worth doing — but for its own reason, which is that a land must
+  not freeze the daemon, **not** as a way to afford the full gate. It changes the land's protocol
+  (the caller gets *landing…* and a later announcement), so it wants its own phase and its own
+  decision. Note that the verify cost is **not** doubled the way
   this question assumed: R1 does not add a verify, it *moves* the one that already existed from
   after the ref advance to before it. What is genuinely new is that the agent's own verify during
   development and the land's verify are now two runs of the same thing.
