@@ -18,12 +18,16 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
-    <!-- SAPI, the in-box speech recogniser (docs/VOICE-INPUT-PLAN.md Phase B). One reference,
-         no TFM change, no model download, no network at runtime and no key. It is NOT the engine
-         the plan chose (D-V8 leaves that to Spike 4, which needs a human speaking into a
-         microphone); it is the seam being real rather than a stub. No suite depends on it:
-         DODONA_UI_MIC=off makes Recognizers.Create refuse to construct it (D-V4). -->
-    <PackageReference Include="System.Speech" Version="8.0.0" />
+    <!-- Capture only, for dictation (docs/VOICE-ENGINE-PLAN.md E2). NAudio gives WaveInEvent and
+         a band limited resampler; the RECOGNITION is a WebSocket in DeepgramRecognizer.cs, so
+         nothing here does any speech work. The resample to 16 kHz is the part that matters:
+         almost every real device captures at 44.1 or 48 kHz, and sending 48 kHz audio to an
+         endpoint told sample_rate=16000 produces fast, confident nonsense indistinguishable
+         from the SAPI gibberish this replaced. AudioCapture pins the rate with a synthetic tone.
+         System.Speech is GONE with SapiRecognizer.cs (D-E6): a fallback that emits gibberish is
+         worse than an error saying "no network", because gibberish looks like the feature
+         working badly rather than not working. -->
+    <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 
   <ItemGroup>
@@ -70,6 +74,19 @@
          than remembered: DictationAct has no member meaning "send", so the decision layer
          cannot ask for a submit even if a caller wanted one (D-V1). -->
     <Compile Include="..\Dodona\Dictation.cs" Link="Dictation.cs" />
+    <!-- The cloud engine's PURE half (docs/VOICE-ENGINE-PLAN.md E3), linked for the same reason
+         and with the same force. The protocol is where the surprises were: measured on
+         2026-08-20 the plan was wrong about where the error text lives AND about the upgrade
+         status being the auth answer. A protocol living behind a socket is a protocol no check
+         can reach, so the frame parser, the interim-holding turn, the fatal/transient
+         classification and the keyterm cap are all in a file with no socket in it. -->
+    <Compile Include="..\Dodona\SpeechStream.cs" Link="SpeechStream.cs" />
+    <!-- And the audio arithmetic, for the loudest trap in the plan: a wrong resample is not a
+         crash and not a red check, it is confident nonsense that looks like a bad speech engine.
+         The resample itself is MediaFoundation's (D-E9, hand-rolled DSP here was reverted); what
+         is pure is the MEASUREMENT, so a check can push a 440 Hz tone through the real capture
+         path and demand 440 Hz comes out, catching the chipmunk failure with no ear. -->
+    <Compile Include="..\Dodona\Pcm16.cs" Link="Pcm16.cs" />
     <!-- Ver too, and for the same reason: the UI is its own build with its own hot swap
          (§13), so it has to be able to say which build it is. Ver.Build reads
          typeof(Ver).Assembly, so compiled in here it reports the UI's identity, not the

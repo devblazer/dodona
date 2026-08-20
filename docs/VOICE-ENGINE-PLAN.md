@@ -1,7 +1,23 @@
 # Replacing the dictation engine — Deepgram Nova-3 through Anthropic's pipe
 
-Status: **plan, nothing built.** Written 2026-08-20 after Phase A of `VOICE-INPUT-PLAN.md`
-shipped with SAPI behind the seam and the operator tried it.
+Status: **E1–E6 BUILT 2026-08-20. It compiles, it connects, and it has never heard a word** —
+because that needs a voice and the build was unattended. Written after Phase A of
+`VOICE-INPUT-PLAN.md` shipped with SAPI behind the seam and the operator tried it.
+
+**What is true, stated so nobody has to infer it:**
+
+- SAPI is **deleted** (D-E6). `DeepgramRecognizer` is the only engine, and there is no fallback to
+  a lesser one anywhere (D-E11).
+- **Spike E1 did not return a clean 101-and-authenticated, and it did not return a 4xx either.**
+  The endpoint is live and the *upgrade* returns 101 with no credential at all; auth is refused one
+  frame later. The credential this machine should present is **still unresolved** — reading the
+  `claude` CLI's own credential store was refused by the permission classifier, correctly, for the
+  third time across two sessions. §3 and D-E7 carry the measurement; `SpeechAuth` carries the two
+  routes that need no credential discovery.
+- **279 checks green** (`unit` 261, `voice` 22 — of which 11 are new), with **no microphone and no
+  network**, plus the full gate. Every new check has been seen red; §7 records each red verbatim.
+- **Nobody has spoken to it.** Whether it *hears* is unverified and unverifiable without the
+  operator. Do not describe dictation as working until they have.
 
 **Read `VOICE-INPUT-PLAN.md` first.** This document replaces exactly one file of it and assumes
 everything else stands. It also supersedes that plan's **D-V5** and closes **D-V8**; §9 records
@@ -250,16 +266,32 @@ is never a person.
 no network and no device. If your change makes them need either, you have broken the property
 that makes this feature testable at all.
 
-**New checks, each proved red before you believe it** (`dev prove voice:<check> ...`, one run):
+**New checks, each proved red before you believe it** (`dev prove voice:<check> ...`, one run).
 
-| check | the defect that must make it red |
-|---|---|
-| `mic_off_opens_no_socket` | `DODONA_UI_MIC=off` must short-circuit **before any connect** — not "connect then don't listen" |
-| `a_dead_network_reads_as_error_not_listening` | on-and-deaf must never look like on |
-| `a_fatal_auth_failure_stops_retrying` | a 4xx must not loop |
-| `starting_has_a_deadline` | a hung connect must land in `error`, not sit in `Starting` |
-| `an_interim_never_enters_the_box` | D-V6, now against a real interim stream |
-| `endpoint_promotes_the_last_interim` | the §2 protocol fact, as a unit test over a fake message sequence |
+**BUILT AND VERIFIED 2026-08-20.** Eleven checks, not six — the protocol half went to `unit`
+where it belongs, because a wire contract behind a socket is a wire contract no check can reach.
+The red each one printed is recorded here and in a comment above the check itself.
+
+| suite | check | verdict | the red it printed |
+|---|---|---|---|
+| `voice` | **`mic_off_opens_no_socket`** | **PROVEN by injection** | `dev prove` says VACUOUS *and is right*: HEAD has no socket engine, so "no socket" holds trivially there. Injected the reorder (MicDisabled moved after construction): `FAIL engine=[deepgram] sockets=0`. With a junk `DODONA_STT_TOKEN` added so the connect could run at all: **`FAIL engine=[deepgram] sockets=1`** — a real socket, from inside a test run, which is the whole thing this check exists to forbid. |
+| `voice` | `a_dead_network_reads_as_error_not_listening` | **PROVEN by injection** (D-E13: `dev prove` would have opened the operator's mic) | `Settle()` instead of `Fail()` on connect failure: `FAIL state=[listening] engine=[deepgram] says=[listening] error=[]` — on-and-deaf reading as on, exactly. |
+| `voice` | `starting_has_a_deadline` | **PROVEN by injection** (same reason) | deleted the `ArmStartingDeadline` call: `FAIL sawStarting=True state=[starting] says=[starting the microphone] error=[]`. It sat in `Starting`. |
+| `voice` | `an_interim_never_enters_the_box` | **PROVEN by injection** | `dev prove` says VACUOUS and is right — HEAD already kept partials out. Spliced partials into the box: `FAIL midBox=[publishpublish frompublish from the worktree] occurrences=2`. |
+| `unit` | `Endpoint_promotes_the_last_interim` | PROVEN | endpoint returning null instead of promoting: *Assert.NotNull() Failure* — every finished sentence silently discarded. |
+| `unit` | `The_live_auth_refusal_frame_yields_words` | PROVEN | deleted the nested-`error.message` branch: *Not found: Invalid authorization  In value: ""* — the empty reason that would have reached the operator. |
+| `unit` | `A_fatal_auth_failure_is_classified_fatal` | PROVEN | removed the `closeCode == 1008` arm: *Expected Fatal, Actual Transient*. |
+| `unit` | `Keyterms_stop_at_the_byte_budget_and_keep_the_earliest` | PROVEN | `break` changed to `continue`: *header was 1739 bytes* — the oversized header the server rejects outright. |
+| `unit` | `Ordinary_network_death_stays_transient` | (same break as the fatal one) | the other half: a dropped wifi connection must not permanently disarm dictation. |
+| `unit` | `TranscriptText_is_not_final`, `A_blank_interim_does_not_erase_the_held_phrase`, `A_dead_socket_flushes_the_held_interim`, `The_five_message_types_parse`, `Keyterms_are_normalised_…`, `Dodonas_own_keyterms_all_survive_the_budget` | covered by the breaks above | |
+
+**`a_fatal_auth_failure_stops_retrying` was NOT written as an acceptance check, deliberately.**
+The property is structural rather than behavioural: `DeepgramRecognizer` contains no retry loop at
+all — `Fail()` ends the read pump and returns, and re-arming happens only on a deliberate
+toggle-on. A check asserting "it did not retry" would be asserting the absence of code that does
+not exist, which is unfailable for the one reason it would exist. The *classification* it depends
+on is `unit:A_fatal_auth_failure_is_classified_fatal`, which is proved red. Said plainly rather
+than shipped as a green that means nothing.
 
 **`mic_off_opens_no_socket` is the one that matters most**, and it is new in kind: with a cloud
 engine, a suite that constructs the real recogniser is no longer merely touching a device, it is
@@ -311,6 +343,90 @@ cost for this project** (§0.1: quota is the scarce resource, and this is its si
   fallback that produces gibberish is worse than an error that says "no network", because
   gibberish looks like the feature working badly rather than not working. The seam means it can
   come back in an afternoon if anyone ever wants it, and git remembers it regardless.
+
+### Decided during the unattended build, 2026-08-20 (E1–E6)
+
+Each of these was a fork hit while building. The rule applied was CLAUDE.md §0.1's *act,
+announce, allow undo*: take the reversible option, write down why, keep going.
+
+- **D-E7 — §2'S ERROR CLASSIFICATION CANNOT WORK, AND THE UPGRADE STATUS IS NOT THE AUTH ANSWER.**
+  Measured, spike E1, against the live endpoint: the upgrade returns **101 with no
+  `Authorization` header at all**, and 101 again for a syntactically valid but wrong bearer. §2's
+  prescription — regex the upgrade for `Unexpected server response: (\d+)` and treat 4xx as fatal
+  — therefore has nothing to read here. **Auth is refused one frame later:**
+
+  ```
+  {"type":"error","error":{"type":"permission_error","message":"Invalid authorization",
+   "details":{"error_visibility":"user_facing","error_code":"account_session_invalid"}}}
+  then CLOSE 1008 PolicyViolation "Invalid authorization"
+  ```
+
+  This mattered more than a documentation fix. A recogniser that trusted the handshake would sit
+  in `Listening` at a rejected credential — deaf, silent, and looking healthy, which is §0.3's
+  believed-a-green-check one layer down in the protocol, and exactly the failure §5 exists to
+  prevent. `SpeechStream.Classify` reads the **frame text and the close code**, keeps the 4xx arm
+  for §10's fallback 1 (where auth *is* on the handshake), and keeps 1006/1000 transient so a
+  dropped wifi connection does not permanently disarm dictation. **`error_code` is
+  `account_session_invalid`, not `invalid_api_key`** — a hint that what it wants is an account
+  session credential rather than an `sk-ant-*` API key.
+
+- **D-E8 — §2 IS ALSO WRONG ABOUT WHERE THE ERROR TEXT LIVES.** It documents a top-level
+  `message`; the real frame nests it under `error.message`, with the code under
+  `error.details.error_code`. Reading only the documented shape gives an error state **with no
+  words in it**, which breaks "on and deaf must never look like on" as thoroughly as a wrong
+  colour would. Both spellings are accepted.
+
+- **D-E9 — THE RESAMPLER IS MEDIAFOUNDATION'S, NOT OURS. A HAND-ROLLED ONE WAS WRITTEN AND
+  REVERTED.** The first cut of `AudioCapture` used a windowed-sinc resampler in pure code, so that
+  the rate conversion could be a unit check. The operator flagged the deviation mid-build, and
+  they were right: **the whole premise of this document is mimicking the extension because that
+  approach is known to work**, and the extension never resamples in its own code — its native
+  addon captures at 16 kHz and its `rec`/`arecord` fallbacks are handed `-r 16000`, so a proven
+  implementation always does it. Hand-rolled DSP is unproven arithmetic in the one position where
+  a bug is **not** a crash and **not** a red check but confident nonsense — indistinguishable from
+  the SAPI gibberish this document exists to replace, and it would have been diagnosed as "the
+  cloud engine is bad too".
+
+  Testability was bought back without inventing DSP: `Pcm16.DominantHz` **measures** the frequency
+  coming out of the real path. Verified 2026-08-20 — a 440 Hz tone in reads 440 Hz out at
+  48 kHz×2, 44.1 kHz×2, 48 kHz×1 and 16 kHz×1, where a 3× rate error would read 1320 Hz.
+
+- **D-E10 — `DODONA_UI_MIC` takes `hang`, and `DODONA_STT_ENDPOINT` exists.** Same force as
+  D-V15. §6 names a hung start as the genuinely new state to get wrong, and it was otherwise
+  unreachable without a black-hole address and a long wait; `hang` is a recogniser that never
+  becomes ready. `DODONA_STT_ENDPOINT` lets a suite point the **real** engine at
+  `ws://127.0.0.1:1`, where the loopback stack refuses instantly — so the genuine socket failure
+  path (connect, refusal, classify, `Failed`, error state) is exercised with **no egress, no
+  credential and no cost**, and D-E5 survives intact. It is also §10 fallback 1's URL half, ready
+  if that day comes.
+
+- **D-E11 — NO SILENT FALLBACK TO A LESSER ENGINE, ANYWHERE.** The operator's rule, stated
+  mid-build and generalising D-E6: *"I also don't want this thing falling back to lighter inferior
+  versions. If something is not available the way we need it to be to run the proper thing, then
+  it's better to simply tell the user."* Audited against the code: there is no second engine to
+  fall back to, no degraded mode, and no retry-with-worse-settings. The one place that was soft
+  was the construction-failure path, which returned the fake and let `dump.listen.engine` report
+  **`fake`** — reading, on the operator's machine, as though an engine were installed and merely
+  quiet. It reports **`none`** now, with the reason in words in the indicator. `fake` remains the
+  truth in a suite, which asked for no engine and got none.
+
+- **D-E12 — THE WINDOW OWNS THE `Starting` DEADLINE, not just the engine.** `IRecognizer` gained a
+  `Ready` event, because with a socket "Start() returned" and "we are hearing" stopped being the
+  same fact (D-E7). `DeepgramRecognizer` has its own connect deadline, and `MainWindow` arms a
+  second one anyway: the invariant belongs to the window, so an engine that forgot to raise either
+  event cannot leave the indicator reading `starting` forever. Same reasoning that put
+  start-on-demand inside `DaemonClient.Send` rather than at each call site (§3.1) — a rule a caller
+  can forget is a rule that gets forgotten. `FakeRecognizer` raises `Ready` synchronously, which is
+  what keeps all 268 pre-existing checks byte-for-byte unchanged.
+
+- **D-E13 — TWO OF THE SIX CHECKS COULD NOT BE PROVED WITH `dev prove`, FOR A SAFETY REASON, AND
+  WERE PROVED BY INJECTION INSTEAD.** `dev prove` runs the new suite against **HEAD's code**, and
+  HEAD's `Recognizers.Create` falls through to `SapiRecognizer` for any `DODONA_UI_MIC` value
+  except `off` and `fail`. Two of the new checks deliberately unset it to reach the real engine —
+  so proving them the normal way **would have opened the operator's microphone twice**, which is
+  §4's incident class, and "they are probably not in a call" is exactly the reasoning §4 forbids.
+  They were proved by break-and-revert against the new build instead (D-V11's prescribed
+  substitute), and every red is recorded in §7's table below.
 
 ## 10. If auth closes — the fallbacks, in order
 

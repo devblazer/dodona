@@ -297,6 +297,147 @@ try {
     Check 'a_failed_mic_says_why_in_words' `
         ($null -ne $d -and "$($d.listen.says)" -match 'microphone') "says=[$($d.listen.says)]"
 
+    # ══ THE CLOUD ENGINE (docs/VOICE-ENGINE-PLAN.md E6) ═══════════════════════════════════════
+    #
+    # Everything above this line predates the engine and passes unchanged, which is the property
+    # that made swapping the engine safe at all: the suites drive `ui heard` into the real
+    # OnHeard splice, so they never needed a recogniser.
+    #
+    # These four are new in kind, because the engine is now a NETWORK CALL ON THE OPERATOR'S
+    # CREDENTIALS. A check that opened one would be CLAUDE.md 4's incident with a bill attached.
+
+    # ---- MIC OFF MUST OPEN NO SOCKET, and the ORDER is the assertion (D-E5) -------------------
+    # The most important new check in the feature. DODONA_UI_MIC=off has to short-circuit BEFORE
+    # any connect -- not "connect, then do not listen", which would pass any check that looked
+    # only at the reported state. So this reads two things: the engine the window actually built,
+    # and the TCP connections the UI process owns.
+    #
+    # Proved RED by moving the MicDisabled early-return in Recognizers.Create to AFTER the
+    # DeepgramRecognizer construction, which gave: engine=[deepgram] sockets=0.
+    #
+    # ON THE SOCKET HALF, STATED PLAINLY: with the env var cleared by _workspace.ps1 and no token
+    # file in this run's isolated DODONA_HOME, SpeechAuth has nothing to present, so the shipped
+    # code returns before a socket exists and the count is structurally 0. That half is therefore
+    # VACUOUS BY CONSTRUCTION here, exactly as no_modal_when_the_mic_fails is, and it was
+    # demonstrated the way CLAUDE.md 0.3 prescribes instead: with the reorder above AND
+    # DODONA_STT_TOKEN set to a junk string, the connect ran and it read sockets=1. It stays in
+    # the assertion because it is the thing that will still be true when a token DOES exist on
+    # this machine, which is when the ordering starts to matter for real.
+    Dodona @('ui', 'close') | Out-Null
+    Wait-Until { $null -eq (DumpOrNull) } 20000 'the window is gone before the mic-off window' | Out-Null
+    Reset-UiWindow
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
+    Wait-Until { $null -ne (DumpOrNull) } 30000 'the mic-off window answers' | Out-Null
+    Dodona @('ui', 'listen', 'on') | Out-Null
+    Wait-Until { (DumpOrNull).listen.state -eq 'listening' } 20000 'the fake reports listening' | Out-Null
+    $d = DumpOrNull
+    # A direct observation, not an inference. Remote port 443 owned by the UI process: this window
+    # reads SQLite and talks to a named pipe, so it has no other reason to hold one.
+    $sockets = @(Get-NetTCPConnection -OwningProcess $uiProc.Id -ErrorAction SilentlyContinue |
+                 Where-Object { $_.RemotePort -eq 443 })
+    Check 'mic_off_opens_no_socket' `
+        ($null -ne $d -and $d.listen.engine -eq 'fake' -and $sockets.Count -eq 0) `
+        "engine=[$($d.listen.engine)] sockets=$($sockets.Count)"
+
+    # ---- A DEAD NETWORK READS AS ERROR, NEVER AS LISTENING -----------------------------------
+    # On and deaf must never look like on (section 5) -- and with a socket engine this is the
+    # likely everyday failure rather than an exotic one.
+    #
+    # THE REAL ENGINE IS CONSTRUCTED HERE, deliberately, and it still reaches no network: the
+    # endpoint is pointed at ws://127.0.0.1:1, which the loopback stack refuses instantly. So the
+    # genuine socket failure path runs -- connect, refusal, classify, Failed, error state -- with
+    # no egress, no credential of the operator's, and nothing to pay for. That is what makes this
+    # a real test of the shipped code rather than of the fake.
+    #
+    # The junk token is required only to get past SpeechAuth; it is never sent anywhere but to a
+    # closed port on this machine.
+    Dodona @('ui', 'close') | Out-Null
+    Wait-Until { $null -eq (DumpOrNull) } 20000 'the window is gone before the dead-network window' | Out-Null
+    Reset-UiWindow
+    $micWas = $env:DODONA_UI_MIC
+    Remove-Item env:DODONA_UI_MIC -ErrorAction SilentlyContinue   # let the REAL engine be built
+    $env:DODONA_STT_ENDPOINT = 'ws://127.0.0.1:1/dead'
+    $env:DODONA_STT_TOKEN = 'not-a-real-token-and-it-goes-to-a-closed-local-port'
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
+    Wait-Until { $null -ne (DumpOrNull) } 30000 'the dead-network window answers' | Out-Null
+    Dodona @('ui', 'listen', 'on') | Out-Null
+    $reachedError = Wait-Until { (DumpOrNull).listen.state -eq 'error' } 30000 'the dead network lands in error'
+    $d = DumpOrNull
+    Check 'a_dead_network_reads_as_error_not_listening' `
+        ($reachedError -and $null -ne $d -and $d.listen.state -eq 'error' `
+         -and $d.listen.engine -eq 'deepgram' `
+         -and "$($d.listen.says)" -notmatch 'listening' -and "$($d.listen.error)".Trim().Length -gt 0) `
+        "state=[$($d.listen.state)] engine=[$($d.listen.engine)] says=[$($d.listen.says)] error=[$($d.listen.error)]"
+
+    # ---- STARTING HAS A DEADLINE -------------------------------------------------------------
+    # The genuinely new state to get wrong (section 6). SAPI's Start() was synchronous, so
+    # `Starting` could not linger and Phase A got away without a deadline; a socket connect can
+    # linger, and spike E1 found worse -- this endpoint's UPGRADE SUCCEEDS WITH NO CREDENTIAL and
+    # refuses one frame later, so "Start() returned" no longer means "we are hearing".
+    #
+    # DODONA_UI_MIC=hang is a recogniser that never becomes ready and never fails, which is the
+    # only way to reach this without a black-hole address and a long wait. It is the same
+    # reasoning that earned `fail` its place in production code (D-V15): the error state was
+    # otherwise unreachable without unplugging something.
+    #
+    # Proved RED by deleting the ArmStartingDeadline call from ArmMic: state=[starting].
+    Dodona @('ui', 'close') | Out-Null
+    Wait-Until { $null -eq (DumpOrNull) } 20000 'the window is gone before the hanging-start window' | Out-Null
+    Reset-UiWindow
+    Remove-Item env:DODONA_STT_ENDPOINT -ErrorAction SilentlyContinue
+    Remove-Item env:DODONA_STT_TOKEN -ErrorAction SilentlyContinue
+    $env:DODONA_UI_MIC = 'hang'
+    $env:DODONA_STT_CONNECT_MS = '600'     # so the deadline is ~2.6s, not ~10s
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
+    Wait-Until { $null -ne (DumpOrNull) } 30000 'the hanging-start window answers' | Out-Null
+    Dodona @('ui', 'listen', 'on') | Out-Null
+    # It must be in `starting` first, or this check would pass for a window that never tried.
+    $sawStarting = Wait-Until { (DumpOrNull).listen.state -eq 'starting' } 10000 'the hung engine reports starting'
+    $leftStarting = Wait-Until { (DumpOrNull).listen.state -eq 'error' } 20000 'the deadline lands in error'
+    $d = DumpOrNull
+    $env:DODONA_UI_MIC = $micWas
+    Remove-Item env:DODONA_STT_CONNECT_MS -ErrorAction SilentlyContinue
+    Check 'starting_has_a_deadline' `
+        ($sawStarting -and $leftStarting -and $null -ne $d -and $d.listen.state -eq 'error' `
+         -and "$($d.listen.says)" -notmatch 'listening' -and "$($d.listen.error)".Trim().Length -gt 0) `
+        "sawStarting=$sawStarting state=[$($d.listen.state)] says=[$($d.listen.says)] error=[$($d.listen.error)]"
+
+    # ---- AN INTERIM NEVER ENTERS THE BOX, against a REWRITING stream (D-V6) ------------------
+    # partial_is_not_in_input_text above sends one partial. A real engine sends a SEQUENCE that
+    # rewrites itself -- "run", "run the", "run the suites" -- and the failure mode this pins is
+    # the one that would look almost right: every interim spliced, giving
+    # "runrun therun the suites" in the box. Only the settled text may land, once.
+    Dodona @('ui', 'close') | Out-Null
+    Wait-Until { $null -eq (DumpOrNull) } 20000 'the window is gone before the interim-stream window' | Out-Null
+    Reset-UiWindow
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
+    Wait-Until { $null -ne (DumpOrNull) } 30000 'the interim-stream window answers' | Out-Null
+    Dodona @('ui', 'listen', 'on') | Out-Null
+    $beforeStream = BoxText
+    foreach ($hyp in 'publish', 'publish from', 'publish from the worktree') {
+        Dodona @('ui', 'heard', $hyp, '--partial') | Out-Null
+    }
+    Wait-Until { (DumpOrNull).listen.partial -eq 'publish from the worktree' } 20000 'the last interim is held' | Out-Null
+    $dMid = DumpOrNull
+    # Now the settled text, the way TranscriptEndpoint promotes it.
+    Dodona @('ui', 'heard', 'publish from the worktree') | Out-Null
+    Wait-Until { (BoxText) -match 'publish from the worktree' } 20000 'the settled text lands' | Out-Null
+    $d = DumpOrNull
+    $box = "$($d.input.text)"
+    # Exactly once: three interims plus a final must not leave four copies, or any prefix of one.
+    # IGNORECASE, and the first version of this check was wrong for the lack of it -- the box read
+    # "Publish from the worktree" because Dictation.Splice capitalises the start of an empty box
+    # (section 4), so a case-sensitive count found 0 and the check failed while the behaviour was
+    # correct. A false red costs exactly as much as a false green (CLAUDE.md 0.2).
+    $occurrences = ([regex]::Matches($box, [regex]::Escape('publish from the worktree'),
+                                     'IgnoreCase')).Count
+    Check 'an_interim_never_enters_the_box' `
+        ($null -ne $dMid -and "$($dMid.input.text)" -eq $beforeStream `
+         -and $occurrences -eq 1 -and $box -notmatch 'publishpublish' `
+         -and "$($d.listen.partial)".Length -eq 0) `
+        ("midBox=[$($dMid.input.text)] before=[$beforeStream] box=[$box] " +
+         "occurrences=$occurrences partialAfter=[$($d.listen.partial)]")
+
     # ---- the pose, so a screenshot can see the indicator --------------------------------------
     $poseReply = (Dodona @('ui', 'pose', 'listening')) | Out-String
     $d = DumpOrNull
@@ -325,6 +466,12 @@ finally {
     if ($storeDb) { Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue }
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_UI_MIC -ErrorAction SilentlyContinue
+    # The cloud engine's three overrides, unset unconditionally: a suite that died mid-check with
+    # DODONA_STT_ENDPOINT still set would hand the next process in this shell a recogniser aimed
+    # at a closed port, which reads as "dictation is broken" a long way from here.
+    Remove-Item env:DODONA_STT_ENDPOINT -ErrorAction SilentlyContinue
+    Remove-Item env:DODONA_STT_TOKEN -ErrorAction SilentlyContinue
+    Remove-Item env:DODONA_STT_CONNECT_MS -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     # Did this suite leak a process into the build output? Last, so it reports only what
     # survived the cleanup above. It reports; it never kills -- a check that killed what it

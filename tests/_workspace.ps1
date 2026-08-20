@@ -75,6 +75,20 @@ function Use-IsolatedDodonaHome([string]$tag) {
     # a new costume.
     $env:DODONA_UI_MIC = 'off'
 
+    # AND NO SUITE MAY EVER SPEND THE OPERATOR'S MONEY (docs/VOICE-ENGINE-PLAN.md D-E5).
+    #
+    # One step stronger than the line above, and new with the cloud engine: a device was a
+    # CLAUDE.md 4-class hazard, but a network call on the operator's credentials from inside a
+    # test run is that plus a bill. SpeechAuth reads DODONA_STT_TOKEN from the environment, and a
+    # token the operator had exported for their own shell would be INHERITED by every suite --
+    # so clearing it here is what makes "no suite ever opens a socket" a property of the harness
+    # rather than a hope about configuration.
+    #
+    # The other source is a file under DODONA_HOME, which this function has just relocated to an
+    # isolated directory, so it cannot exist either. Two sources, both closed, neither relying on
+    # anyone remembering.
+    Remove-Item env:DODONA_STT_TOKEN -ErrorAction SilentlyContinue
+
     $dir
 }
 

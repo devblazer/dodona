@@ -755,7 +755,9 @@ public partial class MainWindow : Window
         _listenReason = null;                         // instance would double every subscription
         _listen = Dictation.ListenState.Starting;
 
-        _mic = Recognizers.Create(out var why);
+        // The engine stamps an utterance at its START, so it needs to read the CURRENT submit
+        // epoch at that moment — hence a delegate rather than a value (the race, §4).
+        _mic = Recognizers.Create(() => _submitEpoch, out var why);
         if (why is not null)
         {
             _listen = Dictation.ListenState.Error;
@@ -763,24 +765,98 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Which arming attempt this is. A Ready or Failed arriving from a recogniser the window
+        // has already disarmed and replaced belongs to nobody, and applying it would resurrect an
+        // indicator for a dead engine — the submit race in a second costume.
+        var epoch = ++_armEpoch;
+
         // The engine's thread is not the UI thread; OnHeard touches controls, so it marshals.
         _mic.Heard += h => Dispatcher.InvokeAsync(() => OnHeard(h));
         _mic.Failed += r => Dispatcher.InvokeAsync(() =>
         {
+            if (epoch != _armEpoch) return;
             _listen = Dictation.ListenState.Error;
             _listenReason = r;
             UpdateListenUi();
         });
+
+        // ══ STARTING IS NOW A STATE THAT CAN BE SAT IN, AND THAT IS WHY THIS CHANGED ══
+        //
+        // Until the cloud engine landed, Start() was synchronous: SAPI had either failed or begun
+        // by the time it returned, so this method promoted Starting to Listening on the next line
+        // and §7's "Starting must have a deadline" was satisfied by a state that could not linger.
+        //
+        // A socket connect is not synchronous, and spike E1 found something worse: THIS
+        // ENDPOINT'S UPGRADE SUCCEEDS WITH NO CREDENTIAL AT ALL and refuses one frame later. So
+        // "Start() returned" no longer implies "we are hearing", and promoting here would leave
+        // the indicator reading `listening` at a rejected credential — deaf, silent, and looking
+        // healthy, which is the precise failure §5 exists to prevent.
+        //
+        // So the window HOLDS Starting and lets the engine say which way it went. It needs no
+        // timer of its own because the engine's contract guarantees exactly one of Ready/Failed
+        // always arrives — DeepgramRecognizer.ConnectTimeoutMs is the thing that un-sticks it,
+        // which is §0.1's standing directive satisfied by a condition rather than by a person.
+        _mic.Ready += () => Dispatcher.InvokeAsync(() =>
+        {
+            // A Ready from a recogniser this window has already disarmed and replaced must not
+            // resurrect the indicator. Same shape as the submit-race guard, one layer out.
+            if (epoch != _armEpoch) return;
+            if (_listen == Dictation.ListenState.Starting) _listen = Dictation.ListenState.Listening;
+            UpdateListenUi();
+        });
+
         _mic.Start();
 
-        // Start() is synchronous: it has either raised Failed by now or it is running. That is
-        // why Starting needs no deadline here — §7 asks for one so the state cannot be sat in
-        // forever, and a transition that cannot linger satisfies it more cheaply than a timer.
-        if (_listen == Dictation.ListenState.Starting) _listen = Dictation.ListenState.Listening;
+        // The fake raises Ready synchronously inside Start(), so a suite is in `listening` by the
+        // time this returns and all 268 existing checks read exactly what they read before.
+        if (_listen == Dictation.ListenState.Starting) ArmStartingDeadline(epoch);
     }
+
+    /// <summary>
+    /// **STARTING CANNOT BE SAT IN, AND THIS IS THE WINDOW'S OWN GUARANTEE OF THAT.**
+    ///
+    /// `DeepgramRecognizer` has its own connect deadline, so on the shipped path this timer
+    /// normally never fires. It exists anyway, one layer out, because the invariant belongs to the
+    /// WINDOW rather than to any one engine: §7 asked for a deadline on `Starting` and Phase A got
+    /// away without one only because SAPI's `Start()` was synchronous. An engine that forgot to
+    /// raise either event — a future one, a wrongly-built one, the `hang` fixture — would
+    /// otherwise leave the indicator reading `starting` forever, which is §0.1's standing
+    /// directive violated exactly: a wait whose un-sticking condition is a person noticing.
+    ///
+    /// So the guarantee does not depend on the engine keeping its half of the contract. That is
+    /// the same reasoning that put start-on-demand inside `DaemonClient.Send` rather than at each
+    /// call site (§3.1): a rule a caller can forget is a rule that gets forgotten.
+    /// </summary>
+    void ArmStartingDeadline(long epoch)
+    {
+        // A margin over the engine's own deadline, so on the real path the engine reports the
+        // specific reason and this only catches an engine that said nothing at all.
+        var ms = DeepgramRecognizer.ConnectTimeoutMs + 2000;
+        var timer = new System.Windows.Threading.DispatcherTimer
+        { Interval = TimeSpan.FromMilliseconds(ms) };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            if (epoch != _armEpoch) return;                       // disarmed, or re-armed since
+            if (_listen != Dictation.ListenState.Starting) return; // the engine answered: nothing to do
+            _listen = Dictation.ListenState.Error;
+            _listenReason = Dodona.SpeechStream.NoAnswerWords;
+            UpdateListenUi();
+        };
+        timer.Start();
+    }
+
+    /// <summary>Which arming attempt is current. A late Ready or Failed from a recogniser that has
+    /// since been disarmed belongs to nobody, and applying it would be the submit race in a second
+    /// costume.</summary>
+    long _armEpoch;
 
     void DisarmMic()
     {
+        // Invalidate any in-flight Ready/Failed from the engine being torn down. Without this, a
+        // connect that answers after the operator switched the toggle off would put the indicator
+        // back to `listening` for a recogniser that no longer exists.
+        _armEpoch++;
         try { _mic?.Stop(); _mic?.Dispose(); } catch { /* stopping must not be able to fail */ }
         _mic = null;
         _partial = "";
