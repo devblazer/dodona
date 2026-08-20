@@ -472,6 +472,66 @@ announce, allow undo*: take the reversible option, write down why, keep going.
   speech and a file delivered at once has none. Plumbing verified: file source → authenticated
   socket → `listening`, and correctly **no** transcript from a near-silent recording.
 
+### Measured against real speech, 2026-08-20 — six recordings, `DODONA_STT_WAV`
+
+**IT HEARS.** Ordinary English is near-perfect. The technical vocabulary is not, and the reason is
+the one thing this plan was most confident about.
+
+- **D-E18 — `x-config-keyterms` HAS NO MEASURABLE EFFECT, so D-E4 is currently decoration.** The
+  same recording run with the list on and off produced **byte-for-byte identical** transcripts. The
+  header is definitely being sent (traced: 236 bytes, all 31 terms). Yet the four words the list
+  exists for are the four that failed: **worktree → "work tree", daemon → "demon", WAL → "wall",
+  SQLite → "s q light"** — while `backstop`, `shim`, `respawn`, `concierge`, `compressor`, `epoch`,
+  `utterance`, `PowerShell` all landed correctly *without* needing it. Technical-word accuracy:
+  **13 of 19 target terms correct**. Nothing resembling SAPI's gibberish, but the specific fix this
+  document prescribed does not work as prescribed.
+
+  **The lead worth trying next:** `VOICE-INPUT-PLAN.md` §6.2 read the bundle as sending keyterms as
+  **repeated query parameters**; §2 of this document "corrected" that to a header. That correction
+  may itself be the regression, and it is a cheap A/B to run.
+
+- **D-E19 — SWITCHING THE MIC OFF SILENTLY DISCARDED EVERYTHING SINCE THE LAST ENDPOINT.** Found by
+  the recordings and by nothing else. The server sends `TranscriptEndpoint` **far** more lazily than
+  `endpointing_ms=300` implies — traced: three endpoints in the first twenty seconds, then
+  twenty-three seconds of continuous transcription with none at all. So there is nearly always a
+  settled-but-unpromoted phrase being held. `Stop()` cancels the read pump, and the cancellation
+  handler was **empty** — so the held phrase went in the bin. You finish a sentence, click the mic
+  off, and the sentence is gone. It flushes now. This is §6's own instruction ("losing the tail
+  silently is worse than a visible reconnect") arriving by the route nobody instrumented: the
+  **happy path**.
+
+- **D-E20 — SPOKEN PUNCTUATION (D-V9) DOES NOT FIRE WITH THIS ENGINE.** Saying "comma" alone
+  produced `Comma,` — the engine applies its own smart formatting AND groups the words, so
+  `Dictation.Punctuation` never sees a bare "comma". The whole-utterance table is effectively dead
+  code against Deepgram. **D-V9's protective half still holds and is what mattered**: "I need a
+  comma separated list of lanes" and "the grace period is thirty minutes" both stayed literal, which
+  is the mangling D-V9 was written to prevent. Leave the table (it costs nothing and the engine may
+  change); do not describe spoken punctuation as a working feature.
+
+- **D-E17 — THE UNSETTLED TAIL NOW RENDERS IN THE BOX AT THE CARET. D-V6 IS REVERSED.** The
+  operator, after using it: *"while I'm recording, the word should appear in the text box from
+  wherever the cursor was left. Currently it's kinda showing above the text box, which was weird."*
+  They are right and D-V6's reasoning does not survive the complaint — it kept partials out of
+  `InputBox.Text` to protect check determinism, which is a **testability** argument spent against
+  the thing the feature exists for. It is also what Claude Code's own extension does; §6.2 called
+  this "the one open UI question" and this closes it.
+
+  Determinism is kept a better way: the pending range is **tracked**, `dump.input.pending` /
+  `pendingAt` expose it, and a check subtracts it (`CommittedText`). The indicator above the box was
+  also reduced to just the state — once the tail is at the caret, echoing it above showed the same
+  words twice, one of them in the place the operator had just asked it not to be. Three checks that
+  encoded D-V6 were **rewritten, not loosened**.
+
+- **What the recordings confirmed that only speech could:** the operator's hard constraint, end to
+  end. "enter", "send", "submit", "go" spoken aloud all landed as **text**, the box still held them,
+  and nothing was submitted. Also confirmed: the G733 is not muted (RMS 0.010–0.019, peaks to 0.44),
+  a file with **no trailing silence** still delivers its last words, and 41 s of continuous session
+  held without a keepalive drop.
+
+- **Still not measured:** latency against the ~300 ms budget. The interim stream updates live in the
+  box, but `TranscriptEndpoint` is lazy enough (see D-E19) that *settling* is nowhere near 300 ms.
+  Whether that matters in practice is an operator judgement, not a number I can produce.
+
 - **D-E13 — TWO OF THE SIX CHECKS COULD NOT BE PROVED WITH `dev prove`, FOR A SAFETY REASON, AND
   WERE PROVED BY INJECTION INSTEAD.** `dev prove` runs the new suite against **HEAD's code**, and
   HEAD's `Recognizers.Create` falls through to `SapiRecognizer` for any `DODONA_UI_MIC` value

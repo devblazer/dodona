@@ -153,8 +153,15 @@ sealed class DeepgramRecognizer : IRecognizer
         // KEYTERMS GO IN A HEADER, not as repeated query parameters (plan §2 corrects
         // VOICE-INPUT-PLAN §6.2). The 1024-byte cap truncates SILENTLY, which is why the list is
         // ordered by significance (D-E4).
-        var keyterms = SpeechStream.KeytermHeader(SpeechStream.Keyterms);
+        // DODONA_STT_NO_KEYTERMS turns the list OFF, so the same recording can be run both ways
+        // and the difference measured (T1). Without that A/B, "keyterms help" is an assumption
+        // dressed as a decision — and D-E4 spent real care on the ORDER of a list whose effect
+        // nobody had observed.
+        var keyterms = Environment.GetEnvironmentVariable("DODONA_STT_NO_KEYTERMS") is null or ""
+            ? SpeechStream.KeytermHeader(SpeechStream.Keyterms)
+            : "";
         if (keyterms.Length > 0) ws.Options.SetRequestHeader("x-config-keyterms", keyterms);
+        Trace("keyterms " + (keyterms.Length > 0 ? keyterms.Length + " bytes: " + keyterms : "OFF"));
 
         _ws = ws;
 
@@ -260,6 +267,7 @@ sealed class DeepgramRecognizer : IRecognizer
 
                 if (r.MessageType != WebSocketMessageType.Text) continue;
                 var m = SpeechStream.Parse(Encoding.UTF8.GetString(buf, 0, r.Count));
+                Trace($"{m.Kind,-16} len={m.Text.Length,4}  {m.Text}");
 
                 switch (m.Kind)
                 {
@@ -297,7 +305,24 @@ sealed class DeepgramRecognizer : IRecognizer
                 }
             }
         }
-        catch (OperationCanceledException) { /* Stop(); the ordinary way out */ }
+        catch (OperationCanceledException)
+        {
+            // ══ THE ORDINARY WAY OUT STILL HAS TO HAND BACK WHAT IT WAS HOLDING ══
+            //
+            // This used to be an empty handler, and that was a silent data loss the suites could
+            // never have caught. Measured on the first real recording: the server sends
+            // `TranscriptEndpoint` far more lazily than `endpointing_ms=300` suggests — three
+            // endpoints in twenty seconds, then twenty-three seconds of continuous transcription
+            // with none at all. So at any given moment there is usually a settled-but-unpromoted
+            // phrase being held.
+            //
+            // Switching the microphone off cancels this token. With nothing here, everything spoken
+            // since the last endpoint was DISCARDED — you finish a sentence, click the mic off, and
+            // the sentence is gone. That is §6's "losing the tail silently is worse than a visible
+            // reconnect", and §0.1's silent degrade, arriving by the one route nobody instrumented:
+            // the HAPPY path.
+            Emit(_turn.Flush(_utteranceEpoch));
+        }
         catch (Exception ex)
         {
             Emit(_turn.Flush(_utteranceEpoch));
@@ -342,6 +367,30 @@ sealed class DeepgramRecognizer : IRecognizer
         ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
 
     void Emit(Dictation.Heard? h) { if (h is not null) Heard?.Invoke(h); }
+
+    /// <summary>
+    /// A frame-level trace, to a file named by `DODONA_STT_TRACE`, off unless that is set.
+    ///
+    /// It exists because the first real recording produced a question no dump could answer: the box
+    /// received four sentences while the interim stream had reached the eighth, so **endpoints went
+    /// sparse partway through** and there was no way to see whether the server had stopped sending
+    /// them or this code had stopped acting on them. Guessing between those two is exactly the kind
+    /// of thing §0.3 says to instrument rather than reason about.
+    ///
+    /// Off by default and never on in a suite: a per-frame log on the operator's machine is a
+    /// transcript of everything they say, written to disk.
+    /// </summary>
+    static void Trace(string line)
+    {
+        var path = Environment.GetEnvironmentVariable("DODONA_STT_TRACE");
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try
+        {
+            System.IO.File.AppendAllText(path,
+                DateTime.UtcNow.ToString("HH:mm:ss.fff") + "  " + line + Environment.NewLine);
+        }
+        catch { /* a trace that cannot write must not break dictation */ }
+    }
 
     /// <summary>Exactly one of Ready/Failed, exactly once — the contract <c>ArmMic</c> relies on
     /// to leave `Starting` without a timer of its own.</summary>

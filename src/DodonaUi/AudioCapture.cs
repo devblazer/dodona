@@ -287,9 +287,31 @@ sealed class AudioCapture : IDisposable
                 // sentences, and the gaps are what the server's endpointing reads.
                 await Task.Delay(20, ct);
             }
-            // Deliberately quiet at the end: the file running out is not a failure, and putting
-            // the indicator in `error` here would look like the engine breaking at exactly the
-            // moment it finished working.
+
+            // ══ THE FILE MUST KEEP BEHAVING LIKE A MICROPHONE AFTER IT RUNS OUT ══
+            //
+            // Measured on the first real recording: eight sentences went in, four came out. The
+            // server had transcribed all eight — the interim stream proved it — but only four
+            // `TranscriptEndpoint` frames ever arrived, so the last four never settled and never
+            // reached the box. Fourteen seconds of waiting changed nothing.
+            //
+            // The cause is that ENDPOINTING IS DRIVEN BY AUDIO, not by the clock: the server
+            // decides an utterance ended when it hears the configured silence. Simply ceasing to
+            // send frames is not silence, it is absence — so the pending text sat there forever.
+            // A real microphone never does this, because it keeps streaming quiet room tone for as
+            // long as it is armed, which is exactly why this only shows up on the file path.
+            //
+            // So the file's tail is padded with real silence rather than with nothing. Two seconds
+            // is well past `utterance_end_ms=1000`.
+            var quiet = new byte[Pcm16.FrameBytes];
+            for (var i = 0; i < 100 && !ct.IsCancellationRequested; i++)
+            {
+                Frame?.Invoke((byte[])quiet.Clone());
+                await Task.Delay(20, ct);
+            }
+            // Deliberately quiet at the end otherwise: the file running out is not a failure, and
+            // putting the indicator in `error` here would look like the engine breaking at exactly
+            // the moment it finished working.
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Failed?.Invoke(Describe(ex)); }

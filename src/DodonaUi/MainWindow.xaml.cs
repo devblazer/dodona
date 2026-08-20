@@ -314,6 +314,12 @@ public partial class MainWindow : Window
                 // so a test can prove the size outlived the window rather than the process.
                 fit = (int)Math.Round(_inputFit),
                 remembered = UiSettings.Load().InputHeight,
+                // How much of `text` is the UNSETTLED dictation tail, and where it starts
+                // (D-E17). The tail lives in the box now, so a check that wants committed text
+                // only has to be able to subtract it -- which is the determinism D-V6 was
+                // protecting, kept without pushing the words out of the box.
+                pending = PendingLength,
+                pendingAt = _pendingAt,
             },
             // Dictation testifies too (docs/VOICE-INPUT-PLAN.md §5). `says` is the SAME sentence
             // the indicator shows, from the same function, so a check that reads the dump is
@@ -444,6 +450,10 @@ public partial class MainWindow : Window
             _listen = Dictation.ListenState.Listening;
             _listenReason = null;
             _partial = "run the suites for";
+            // The tail goes in the BOX now (D-E17), so the fixture has to put it there too --
+            // otherwise the one screenshot that exists for reviewing dictation would show the
+            // old layout and nobody would see the change they were reviewing.
+            ShowPending(_partial);
             UpdateListenUi();
             _vm.Status = $"pose: {name}";
             return $"pose {name} applied";
@@ -683,13 +693,31 @@ public partial class MainWindow : Window
             // Never into InputBox.Text (D-V6): unsettled hypotheses rewrite themselves, and in
             // the box they would make `ui dump`'s input.text non-deterministic — every existing
             // input check would go intermittent.
+            // ══ THE UNSETTLED TAIL NOW RENDERS IN THE BOX, AT THE CARET (D-E17 reverses D-V6) ══
+            //
+            // The operator, after using it: *"while I'm recording, the word should appear in the
+            // text box from wherever the cursor was left. Currently it's kinda showing above the
+            // text box, which was weird."* They are right, and D-V6's reasoning does not survive
+            // the complaint: it kept partials out of `InputBox.Text` because they would make
+            // `ui dump`'s input.text non-deterministic and every input check intermittent. That is
+            // a TESTABILITY argument being spent against the thing the feature is for — watching
+            // your words appear as you say them — which is the wrong way round, and it is also what
+            // Claude Code's own extension does (VOICE-INPUT-PLAN §6.2 called this the one open UI
+            // question; this closes it).
+            //
+            // Determinism is kept a different way: the pending range is TRACKED, so it can be
+            // removed exactly rather than guessed at, and `dump.input.pending` says how many
+            // characters of the box are unsettled. A check can therefore still assert on committed
+            // text alone, which is what D-V6 actually needed.
             case Dictation.DictationAct.Partial:
                 _partial = d.Text;
+                ShowPending(d.Text);
                 break;
 
             case Dictation.DictationAct.Insert:
             {
                 _partial = "";
+                ClearPending();                // the settled text replaces the tail, never joins it
                 var (insert, caret) = Dictation.Splice(InputBox.Text, InputBox.SelectionStart,
                                                        InputBox.SelectionLength, d.Text);
                 ComposeInput(insert);          // the method a typed character lands in
@@ -702,10 +730,12 @@ public partial class MainWindow : Window
             // identically.
             case Dictation.DictationAct.Newline:
                 _partial = "";
+                ClearPending();
                 InputKey(shift: true);
                 break;
             case Dictation.DictationAct.Paragraph:
                 _partial = "";
+                ClearPending();
                 InputKey(shift: true);
                 InputKey(shift: true);
                 break;
@@ -716,10 +746,58 @@ public partial class MainWindow : Window
             // dictation aside overwriting them would be a second silent degrade.
             case Dictation.DictationAct.Drop:
                 _dropped++;
+                ClearPending();
                 break;
         }
         UpdateListenUi();
         return d.Act.ToString().ToLowerInvariant();
+    }
+
+    /// <summary>Where the unsettled tail sits in <c>InputBox.Text</c>, and how long it is.
+    /// -1 means nothing is pending. Tracked rather than searched for: the tail can be any text,
+    /// including text identical to something the operator typed, so "find and remove it" would
+    /// eventually delete the wrong copy.</summary>
+    int _pendingAt = -1;
+    int _pendingLen;
+
+    /// <summary>How many characters of the box are NOT yet settled — `dump.input.pending`. This is
+    /// what lets a check still reason about committed text after D-E17 put the tail in the box:
+    /// `text` minus the last `pending` characters at `pendingAt` is what a person has actually
+    /// finished saying.</summary>
+    public int PendingLength => _pendingAt < 0 ? 0 : _pendingLen;
+
+    /// <summary>
+    /// Show the unsettled tail at the caret, replacing whatever tail was there before.
+    ///
+    /// It goes through <see cref="Dictation.Splice"/> exactly as a settled result does, so the
+    /// pending text sits where the final text will and the words do not visibly jump when the
+    /// phrase settles.
+    /// </summary>
+    void ShowPending(string text)
+    {
+        ClearPending();
+        if (text.Length == 0) return;
+        var at = InputBox.SelectionStart;
+        var (insert, caret) = Dictation.Splice(InputBox.Text, at, InputBox.SelectionLength, text);
+        _pendingAt = at;
+        _pendingLen = insert.Length;
+        InputBox.SelectedText = insert;
+        InputBox.CaretIndex = caret;
+    }
+
+    /// <summary>Remove the unsettled tail and put the caret back where it began. Bounds-checked
+    /// against the live text because the operator can edit the box mid-utterance — they are
+    /// allowed to, and a stale range must never be able to delete their typing.</summary>
+    void ClearPending()
+    {
+        if (_pendingAt < 0) return;
+        var at = _pendingAt;
+        var len = _pendingLen;
+        _pendingAt = -1;
+        _pendingLen = 0;
+        if (at < 0 || len <= 0 || at + len > InputBox.Text.Length) return;
+        InputBox.Text = InputBox.Text.Remove(at, len);
+        InputBox.CaretIndex = Math.Min(at, InputBox.Text.Length);
     }
 
     /// <summary>
@@ -881,10 +959,12 @@ public partial class MainWindow : Window
     void UpdateListenUi()
     {
         var words = Dictation.Describe(_listen, _listenReason);
-        // The unsettled tail renders BESIDE the words, never in the box (D-V6). Whether it
-        // should render inline instead is the one open UI question in the proposal (§6.2); it
-        // costs a RichTextBox and does not change what a check reads.
-        ListenStatus.Text = _partial.Length > 0 ? $"{words} · {_partial}" : words;
+        // JUST THE STATE. The unsettled tail used to be appended here, which is what the operator
+        // called weird -- and once D-E17 put the tail in the box at the caret, echoing it here as
+        // well showed the same words twice, in two places, one of them the place they had just
+        // asked for it not to be. The indicator says WHERE THE MICROPHONE IS; the box says what it
+        // heard. `dump.listen.partial` still carries the tail for checks, so nothing lost coverage.
+        ListenStatus.Text = words;
         ListenStatus.Visibility = words.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
 
         var colour = _listen switch

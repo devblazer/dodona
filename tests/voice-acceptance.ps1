@@ -58,6 +58,17 @@ function DumpOrNull() { try { Dump } catch { $null } }
 # The box's text, with "there is no window" folded to empty -- every check below reads it, and a
 # null property access inside a Wait-Until scriptblock is a silent false rather than a diagnosis.
 function BoxText() { $d = DumpOrNull; if ($null -eq $d) { '' } else { "$($d.input.text)" } }
+# The box MINUS the unsettled dictation tail (D-E17). The tail lives in input.text now, so any
+# check about what a person has FINISHED saying has to be able to subtract it -- which is exactly
+# the determinism D-V6 was protecting, kept without pushing the words out of the box.
+function CommittedText() {
+    $d = DumpOrNull
+    if ($null -eq $d) { return '' }
+    $t = "$($d.input.text)"
+    $at = [int]$d.input.pendingAt
+    $len = [int]$d.input.pending
+    if ($at -ge 0 -and $len -gt 0 -and ($at + $len) -le $t.Length) { $t.Remove($at, $len) } else { $t }
+}
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $AE = [System.Windows.Automation.AutomationElement]
@@ -158,31 +169,52 @@ try {
         ($null -ne $d -and $d.input.lines -eq ($linesBefore + 1)) `
         "lines=$($d.input.lines) before=$linesBefore"
 
-    # ---- an unsettled hypothesis never enters the box (D-V6) --------------------------------
-    # In the box it would make input.text non-deterministic and turn every existing input check
-    # in ui-use intermittent.
-    $beforePartial = BoxText
+    # ---- the unsettled tail SHOWS IN THE BOX, at the caret (D-E17 reverses D-V6) -------------
+    # The operator's words after using it: "while I'm recording, the word should appear in the text
+    # box from wherever the cursor was left. Currently it's kinda showing above the text box, which
+    # was weird." D-V6 had kept partials out of input.text to protect check determinism -- a
+    # testability argument spent against the thing the feature is FOR, which is the wrong trade.
+    #
+    # Determinism is kept by TRACKING the tail instead: dump.input.pending/pendingAt say which part
+    # of the box is unsettled, so CommittedText() can subtract it. This check pins both halves --
+    # the tail is visible in the box, AND it is subtractable.
+    $committedBefore = CommittedText
     Dodona @('ui', 'heard', 'this tail is unsettled', '--partial') | Out-Null
-    Wait-Until { (DumpOrNull).listen.partial -match 'unsettled' } 20000 'the partial reaches the indicator' | Out-Null
+    Wait-Until { (DumpOrNull).input.text -match 'unsettled' } 20000 'the partial reaches the box' | Out-Null
     $d = DumpOrNull
-    Check 'partial_is_not_in_input_text' `
-        ($null -ne $d -and $d.input.text -notmatch 'unsettled' -and $d.listen.partial -match 'unsettled' `
-         -and $d.input.text -eq $beforePartial) `
-        "text=[$($d.input.text)] partial=[$($d.listen.partial)]"
+    Check 'the_unsettled_tail_shows_in_the_box_at_the_caret' `
+        ($null -ne $d -and $d.input.text -match 'unsettled' -and $d.listen.partial -match 'unsettled' `
+         -and [int]$d.input.pending -gt 0 -and (CommittedText) -eq $committedBefore) `
+        "text=[$($d.input.text)] pending=$($d.input.pending) committed=[$(CommittedText)]"
+
+    # A REWRITING hypothesis must REPLACE the tail, never append to it. This is the failure that
+    # would look almost right: every interim spliced in turn, giving "this tail is unsettledthis
+    # tail is unsettled now" in the box.
+    Dodona @('ui', 'heard', 'this tail is unsettled now', '--partial') | Out-Null
+    Wait-Until { (DumpOrNull).input.text -match 'unsettled now' } 20000 'the rewritten partial lands' | Out-Null
+    $d = DumpOrNull
+    $tailCopies = ([regex]::Matches("$($d.input.text)", [regex]::Escape('this tail is unsettled'), 'IgnoreCase')).Count
+    Check 'a_rewritten_partial_replaces_the_tail_instead_of_appending' `
+        ($null -ne $d -and $tailCopies -eq 1 -and (CommittedText) -eq $committedBefore) `
+        "text=[$($d.input.text)] copies=$tailCopies committed=[$(CommittedText)]"
 
     # ---- the submit race, end to end (section 4) --------------------------------------------
     # A result recognised under an older epoch is the tail of a sentence already sent. Spliced,
     # it would open the NEXT message with the end of the last one -- the one bug here a person
     # would find baffling in the wild.
-    $beforeStale = BoxText
+    #
+    # Compared on COMMITTED text (D-E17): there is a live unsettled tail in the box from the two
+    # checks above, and a stale FINAL clears it, so raw input.text legitimately changes while the
+    # property under test -- nothing was committed -- holds.
+    $beforeStale = CommittedText
     $droppedBefore = (DumpOrNull).listen.dropped
     Dodona @('ui', 'heard', 'tail of the last message', '--epoch', '-1') | Out-Null
     Wait-Until { (DumpOrNull).listen.dropped -gt $droppedBefore } 20000 'the stale result is counted as dropped' | Out-Null
     $d = DumpOrNull
     Check 'stale_epoch_result_dropped_at_the_window' `
         ($null -ne $d -and $d.input.text -notmatch 'tail of the last message' `
-         -and $d.input.text -eq $beforeStale -and $d.listen.dropped -eq ($droppedBefore + 1)) `
-        "text=[$($d.input.text)] dropped=$($d.listen.dropped) before=$droppedBefore"
+         -and (CommittedText) -eq $beforeStale -and $d.listen.dropped -eq ($droppedBefore + 1)) `
+        "committed=[$(CommittedText)] before=[$beforeStale] dropped=$($d.listen.dropped)"
 
     # ---- and Enter STILL SENDS, which is the other half of the operator's sentence ----------
     $sentText = BoxText
@@ -466,12 +498,17 @@ try {
     # correct. A false red costs exactly as much as a false green (CLAUDE.md 0.2).
     $occurrences = ([regex]::Matches($box, [regex]::Escape('publish from the worktree'),
                                      'IgnoreCase')).Count
-    Check 'an_interim_never_enters_the_box' `
-        ($null -ne $dMid -and "$($dMid.input.text)" -eq $beforeStream `
+    # THE VALUABLE HALF SURVIVES D-E17 UNCHANGED: a rewriting stream must leave exactly ONE copy.
+    # What changed is the mid-stream expectation -- the tail is now IN the box (visible, pending>0)
+    # rather than absent from it, and the settled text replaces it rather than joining it. The
+    # failure this pins is the same one either way: "publishpublish frompublish from the worktree".
+    Check 'an_interim_stream_leaves_exactly_one_copy_in_the_box' `
+        ($null -ne $dMid -and "$($dMid.input.text)" -match 'publish from the worktree' `
+         -and [int]$dMid.input.pending -gt 0 `
          -and $occurrences -eq 1 -and $box -notmatch 'publishpublish' `
-         -and "$($d.listen.partial)".Length -eq 0) `
-        ("midBox=[$($dMid.input.text)] before=[$beforeStream] box=[$box] " +
-         "occurrences=$occurrences partialAfter=[$($d.listen.partial)]")
+         -and [int]$d.input.pending -eq 0 -and "$($d.listen.partial)".Length -eq 0) `
+        ("midBox=[$($dMid.input.text)] midPending=$($dMid.input.pending) box=[$box] " +
+         "occurrences=$occurrences pendingAfter=$($d.input.pending)")
 
     # ---- the pose, so a screenshot can see the indicator --------------------------------------
     $poseReply = (Dodona @('ui', 'pose', 'listening')) | Out-String
