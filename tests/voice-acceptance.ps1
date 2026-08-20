@@ -369,6 +369,41 @@ try {
          -and "$($d.listen.says)" -notmatch 'listening' -and "$($d.listen.error)".Trim().Length -gt 0) `
         "state=[$($d.listen.state)] engine=[$($d.listen.engine)] says=[$($d.listen.says)] error=[$($d.listen.error)]"
 
+    # ---- A SUITE CANNOT AUTHENTICATE, EVEN HOLDING THE REAL ENGINE (D-E5, second lock) -------
+    # THE CHECK THAT MATTERS MOST AFTER mic_off_opens_no_socket, and it exists because route 1
+    # BROKE the property it restores. SpeechAuth reads the credential the claude CLI already holds,
+    # at %USERPROFILE%\.claude\.credentials.json -- a path DODONA_HOME does not relocate. So when
+    # that route landed, "a suite has no credential" silently stopped being true and the operator's
+    # live token became readable from inside every test run.
+    #
+    # _workspace.ps1 sets DODONA_STT_NO_CLI_AUTH for every suite. This arms the REAL engine with no
+    # endpoint override and no token override -- the exact configuration that authenticated for
+    # real when it was measured by hand -- and demands it lands in error saying it has no
+    # credential. Anything else means a suite can stream the operator's microphone on their bill.
+    #
+    # Proved RED by deleting the NoCliAuthVar early-return from ClaudeCliRoute:
+    #   FAIL state=[listening] engine=[deepgram] error=[]  -- a test run, authenticated.
+    Dodona @('ui', 'close') | Out-Null
+    Wait-Until { $null -eq (DumpOrNull) } 20000 'the window is gone before the no-auth window' | Out-Null
+    Reset-UiWindow
+    $micWas2 = $env:DODONA_UI_MIC
+    Remove-Item env:DODONA_UI_MIC -ErrorAction SilentlyContinue      # the REAL engine
+    Remove-Item env:DODONA_STT_TOKEN -ErrorAction SilentlyContinue
+    Remove-Item env:DODONA_STT_ENDPOINT -ErrorAction SilentlyContinue
+    $uiProc = Start-Process $ui -ArgumentList "--root", $root, "--test-window" -PassThru
+    Wait-Until { $null -ne (DumpOrNull) } 30000 'the no-auth window answers' | Out-Null
+    Dodona @('ui', 'listen', 'on') | Out-Null
+    $settled = Wait-Until { (DumpOrNull).listen.state -in @('listening', 'error') } 25000 'the engine settles'
+    $d = DumpOrNull
+    $noAuthSockets = @(Get-NetTCPConnection -OwningProcess $uiProc.Id -ErrorAction SilentlyContinue |
+                       Where-Object { $_.RemotePort -eq 443 })
+    $env:DODONA_UI_MIC = $micWas2
+    Check 'a_suite_cannot_authenticate_even_with_the_real_engine' `
+        ($settled -and $null -ne $d -and $d.listen.state -eq 'error' `
+         -and "$($d.listen.error)" -match 'no speech credential' -and $noAuthSockets.Count -eq 0) `
+        ("state=[$($d.listen.state)] engine=[$($d.listen.engine)] " +
+         "error=[$($d.listen.error)] sockets=$($noAuthSockets.Count)")
+
     # ---- STARTING HAS A DEADLINE -------------------------------------------------------------
     # The genuinely new state to get wrong (section 6). SAPI's Start() was synchronous, so
     # `Starting` could not linger and Phase A got away without a deadline; a socket connect can
@@ -472,6 +507,7 @@ finally {
     Remove-Item env:DODONA_STT_ENDPOINT -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_STT_TOKEN -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_STT_CONNECT_MS -ErrorAction SilentlyContinue
+    Remove-Item env:DODONA_STT_NO_CLI_AUTH -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     # Did this suite leak a process into the build output? Last, so it reports only what
     # survived the cleanup above. It reports; it never kills -- a check that killed what it

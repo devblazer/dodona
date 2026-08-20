@@ -73,6 +73,11 @@ sealed class DeepgramRecognizer : IRecognizer
     /// <summary>Plan §2 (`imr`): on open, and then every 8000 ms.</summary>
     const int KeepAliveMs = 8000;
 
+    /// <summary>How long the socket must survive unobjected-to before it counts as authenticated
+    /// (see the note at the grace timer). E1 measured the refusal arriving as one frame, well
+    /// inside a second; this is generous against that.</summary>
+    const int AuthGraceMs = 1500;
+
     public event Action<Dictation.Heard>? Heard;
     public event Action<string>? Failed;
 
@@ -174,11 +179,31 @@ sealed class DeepgramRecognizer : IRecognizer
             return;
         }
 
-        // The socket is OPEN, which by finding 1 above says nothing about auth yet. So the
-        // microphone is started (it is what a rejection needs in order to be provoked) but Ready
-        // is NOT raised until the read pump has seen the stream survive its first frames.
+        // The socket is OPEN, which by finding 1 above says nothing about auth yet.
         await Send(ws, "{\"type\":\"KeepAlive\"}", ct);
         if (!_capture.Start()) { await CloseQuietly(ws); return; }
+
+        // ══ SURVIVING THE GRACE PERIOD IS WHAT "AUTHENTICATED" MEANS HERE ══
+        //
+        // Ready cannot wait for the first transcript frame, and getting this wrong made dictation
+        // unusable in a way no check would have caught. A correctly authenticated microphone that
+        // nobody is talking into receives NOTHING — so waiting for a transcript would hold
+        // `Starting` through the whole connect deadline and land in `error`, meaning dictation only
+        // ever worked if you started speaking within eight seconds of toggling it on. Silence is
+        // the normal state of a microphone, not a failure of one.
+        //
+        // What actually distinguishes authenticated from refused is TIME: the refusal is one frame
+        // and it arrives immediately (measured in E1: a single error frame, then a 1008 close, well
+        // inside a second). So the reading is "the socket is still open and nothing has objected".
+        // If a slow network delivers the refusal later, the indicator flips from listening to error
+        // and still says why — late and correct beats early and wrong.
+        _ = Task.Run(async () =>
+        {
+            try { await Task.Delay(AuthGraceMs, ct); } catch { return; }
+            // Settle is idempotent and Fail claims the same flag, so whichever happened first
+            // wins: a rejection already reported leaves this a no-op.
+            if (ws.State == WebSocketState.Open) Settle();
+        }, ct);
 
         _keepalive = Task.Run(() => KeepAliveAsync(ws, ct), ct);
         _pump = ReadAsync(ws, ct);

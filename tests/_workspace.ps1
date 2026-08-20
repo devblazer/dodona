@@ -89,6 +89,18 @@ function Use-IsolatedDodonaHome([string]$tag) {
     # anyone remembering.
     Remove-Item env:DODONA_STT_TOKEN -ErrorAction SilentlyContinue
 
+    # AND THE ONE THAT CLEARING AN ENV VAR CANNOT COVER.
+    #
+    # SpeechAuth's route 1 reads the credential the `claude` CLI already holds, at
+    # %USERPROFILE%\.claude\.credentials.json -- which DODONA_HOME does NOT relocate. So the moment
+    # that route landed, "a suite has no credential to present" stopped being true: the operator's
+    # live token became readable from inside every test run, one DODONA_UI_MIC slip away from a
+    # suite streaming audio on their account and their bill.
+    #
+    # This is the second lock, restored explicitly. Two independent refusals again: the recogniser
+    # is not constructed, and if it were it could not authenticate.
+    $env:DODONA_STT_NO_CLI_AUTH = '1'
+
     $dir
 }
 

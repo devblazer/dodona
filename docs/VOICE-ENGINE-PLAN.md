@@ -8,12 +8,13 @@ because that needs a voice and the build was unattended. Written after Phase A o
 
 - SAPI is **deleted** (D-E6). `DeepgramRecognizer` is the only engine, and there is no fallback to
   a lesser one anywhere (D-E11).
-- **Spike E1 did not return a clean 101-and-authenticated, and it did not return a 4xx either.**
-  The endpoint is live and the *upgrade* returns 101 with no credential at all; auth is refused one
-  frame later. The credential this machine should present is **still unresolved** — reading the
-  `claude` CLI's own credential store was refused by the permission classifier, correctly, for the
-  third time across two sessions. §3 and D-E7 carry the measurement; `SpeechAuth` carries the two
-  routes that need no credential discovery.
+- **Spike E1 is RESOLVED, and route 1 works with no setup at all.** It did not go the way §3
+  expected: the *upgrade* returns 101 with no credential whatsoever, and auth is refused one frame
+  later (D-E7) — so "101 means go" was a false green. The credential is the one the `claude` CLI
+  already holds, and the endpoint accepts it. **Measured end to end 2026-08-20:**
+  `state=listening engine=deepgram`, one live socket to 443, nothing configured.
+  Access tokens rotate about every 8 hours, which is a non-issue because the token is re-read on
+  **every** arming rather than cached (D-E15).
 - **279 checks green** (`unit` 261, `voice` 22 — of which 11 are new), with **no microphone and no
   network**, plus the full gate. Every new check has been seen red; §7 records each red verbatim.
 - **Nobody has spoken to it.** Whether it *hears* is unverified and unverifiable without the
@@ -418,6 +419,58 @@ announce, allow undo*: take the reversible option, write down why, keep going.
   start-on-demand inside `DaemonClient.Send` rather than at each call site (§3.1) — a rule a caller
   can forget is a rule that gets forgotten. `FakeRecognizer` raises `Ready` synchronously, which is
   what keeps all 268 pre-existing checks byte-for-byte unchanged.
+
+- **D-E15 — ROUTE 1 IS WIRED, READ-ONLY, AND RE-READ ON EVERY ARMING; AND IT BROKE A SAFETY
+  PROPERTY ON ITS WAY IN.** `SpeechAuth.ClaudeCliRoute` reads
+  `%USERPROFILE%\.claude\.credentials.json`. Three things about it, each load-bearing:
+
+  1. **It was written without anyone reading a secret**, after three correct classifier refusals.
+     The operator's own challenge is what unstuck it: *"can't you write something that points to
+     the same live thing… don't you basically have to do something similar anyway for the working
+     version?"* — which was right, and exposed that "I may not read it" had been conflated with
+     "code may not read it". The shipping code has to read that credential regardless, so the
+     testing detour was the wrong half to build. The file's SHAPE is not its contents: the operator
+     ran a structure report (key names, value types, string lengths, expiry dates, **no values**),
+     which was enough to write the parser against the real format. The parser is verified by
+     **outcome** — socket open, no rejection frame — which leaks nothing either way.
+  2. **It must never refresh, and never write.** An OAuth refresh rotates the refresh token, so a
+     Dodona refresh racing the CLI's could log the operator out of Claude Code entirely — a
+     dictation feature breaking the thing the product is built on. Unnecessary, too: Dodona spawns
+     `claude -p` constantly, so the CLI keeps the file fresh as a side effect. Expiry is reported in
+     words, never worked around. Measured: access token ~8 h, refresh token ~25 days.
+  3. **IT SILENTLY BROKE D-E5's SECOND LOCK.** That argument used to be "a suite has no credential
+     even if it constructed the real recogniser", because the env var is cleared and the token file
+     lives under the isolated `DODONA_HOME`. This path is under `USERPROFILE`, which **`DODONA_HOME`
+     does not relocate** — so the operator's live credential quietly became readable from inside
+     every suite, one `DODONA_UI_MIC` slip from a test run streaming audio on their account.
+     Restored explicitly as `DODONA_STT_NO_CLI_AUTH`, set by `tests/_workspace.ps1` beside
+     `DODONA_UI_MIC=off`, and pinned by
+     `voice:a_suite_cannot_authenticate_even_with_the_real_engine` — **proved red**:
+     `state=[listening] engine=[deepgram] sockets=1`, i.e. an authenticated test run. A property
+     that quietly stops holding is §0.1's bug, not a footnote.
+
+- **D-E16 — `Ready` FIRES ON SURVIVING A GRACE PERIOD, NOT ON THE FIRST TRANSCRIPT.** The first cut
+  raised `Ready` when the first `TranscriptInterim` arrived, on the reasoning that a frame proves
+  the stream is alive and unrefused. That would have made dictation **unusable**: a correctly
+  authenticated microphone that nobody is speaking into receives nothing, so `Starting` would have
+  held through the whole connect deadline and landed in `error` — dictation working only if you
+  began talking within eight seconds of toggling it on. Silence is the normal state of a
+  microphone. What actually separates authenticated from refused is *time*: the refusal is one
+  frame and arrives well inside a second (E1). So the reading is "the socket is still open and
+  nothing has objected after 1500 ms". Caught by reasoning through the test before running it, not
+  by a check — worth recording because no check in the suite would have failed on it.
+
+- **D-E14 — `DODONA_STT_WAV` FEEDS AN AUDIO FILE THROUGH THE REAL PATH, because "does it hear" is
+  otherwise unanswerable by anyone without a voice.** Offered by the operator (*"if you need me to
+  provide some sample audio file… just let me know"*) and it is the right instrument: it converts
+  §7's honest limit from a ceremony only they can perform into a **repeatable measurement**, so the
+  next engine change can be regression-tested against the same twenty sentences instead of
+  re-recorded. It earns production code for the reason §5 gives about `ui heard` — same resampler,
+  same 20 ms frames, same socket, same keyterms, same `OnHeard` splice, so what it measures is what
+  the operator gets, where a test-only harness with its own socket would measure a rehearsal.
+  Frames are paced in **real time** rather than dumped, because `endpointing_ms=300` reads gaps in
+  speech and a file delivered at once has none. Plumbing verified: file source → authenticated
+  socket → `listening`, and correctly **no** transcript from a near-silent recording.
 
 - **D-E13 — TWO OF THE SIX CHECKS COULD NOT BE PROVED WITH `dev prove`, FOR A SAFETY REASON, AND
   WERE PROVED BY INJECTION INSTEAD.** `dev prove` runs the new suite against **HEAD's code**, and

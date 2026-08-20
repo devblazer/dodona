@@ -1,3 +1,4 @@
+using System.IO;
 using NAudio.CoreAudioApi;
 using NAudio.MediaFoundation;
 using NAudio.Wave;
@@ -61,6 +62,7 @@ sealed class AudioCapture : IDisposable
     WasapiCapture? _capture;
     BufferedWaveProvider? _buffer;
     MediaFoundationResampler? _resampler;
+    MediaFoundationReader? _fileReader;
     CancellationTokenSource? _pumpCts;
     Task? _pump;
 
@@ -72,11 +74,44 @@ sealed class AudioCapture : IDisposable
     public string DeviceName { get; private set; } = "";
     public int DeviceRate { get; private set; }
 
+    /// <summary>
+    /// An audio FILE instead of the microphone (D-E14) — the only way anyone without a voice can
+    /// answer the question this whole engine exists for: **does it hear?**
+    ///
+    /// Everything else about dictation is checkable headlessly. Recognition quality is not: it
+    /// needs speech, and a session building this unattended has none. That is why plan §7 says
+    /// *"what no suite can verify is whether it hears"* and why no word-error-rate number was ever
+    /// reported. A recording closes that gap — the operator speaks twenty sentences once, and from
+    /// then on it is a **repeatable measurement** rather than a ceremony, which also means the next
+    /// engine change can be regression-tested against the same audio instead of re-recorded.
+    ///
+    /// It earns its place in production code for the reason §5 gives about `ui heard` and D-V15
+    /// gives about `DODONA_UI_MIC=fail`: it feeds the REAL path — same resampler, same frame size,
+    /// same socket, same keyterms — so what it measures is what the operator gets. A test-only
+    /// harness that opened its own socket would be measuring a rehearsal.
+    ///
+    /// Any format Media Foundation reads (wav, mp3, m4a) and any rate: it is converted the same way
+    /// the microphone is. Frames are paced in REAL TIME rather than dumped, because the endpoint's
+    /// `endpointing_ms=300` and `utterance_end_ms=1000` are about gaps in speech, and a file
+    /// delivered at once is a file with no gaps in it.
+    /// </summary>
+    static string? WavSource
+    {
+        get
+        {
+            var p = Environment.GetEnvironmentVariable("DODONA_STT_WAV");
+            return string.IsNullOrWhiteSpace(p) ? null : p.Trim();
+        }
+    }
+
     /// <summary>Never throws. Both failures that matter live here: no capture endpoint at all,
     /// and one Windows will not hand over (a call has it, or speech is off in privacy
     /// settings).</summary>
     public bool Start()
     {
+        var wav = WavSource;
+        if (wav is not null) return StartFromFile(wav);
+
         try
         {
             // Media Foundation has to be started once per process before a resampler exists.
@@ -197,6 +232,69 @@ sealed class AudioCapture : IDisposable
         }
     }
 
+    /// <summary>The file source. Same resampler, same 20 ms frames, same everything downstream —
+    /// only the origin of the samples differs.</summary>
+    bool StartFromFile(string path)
+    {
+        try
+        {
+            lock (MfLock)
+            {
+                if (!_mfStarted) { MediaFoundationApi.Startup(); _mfStarted = true; }
+            }
+            if (!File.Exists(path))
+            {
+                Failed?.Invoke("the audio file named by DODONA_STT_WAV does not exist");
+                return false;
+            }
+
+            var reader = new MediaFoundationReader(path);
+            _fileReader = reader;
+            DeviceName = "file: " + Path.GetFileName(path);
+            DeviceRate = reader.WaveFormat.SampleRate;
+            _resampler = new MediaFoundationResampler(reader, WireFormat) { ResamplerQuality = 60 };
+
+            _pumpCts = new CancellationTokenSource();
+            _pump = Task.Run(() => PumpFileAsync(_pumpCts.Token));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Failed?.Invoke(Describe(ex));
+            return false;
+        }
+    }
+
+    async Task PumpFileAsync(CancellationToken ct)
+    {
+        var frame = new byte[Pcm16.FrameBytes];
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var got = 0;
+                while (got < frame.Length)
+                {
+                    var n = _resampler!.Read(frame, got, frame.Length - got);
+                    if (n <= 0) break;
+                    got += n;
+                }
+                if (got == 0) break;                       // end of file
+                if (got < frame.Length) Array.Clear(frame, got, frame.Length - got);
+                Frame?.Invoke((byte[])frame.Clone());
+
+                // Real time, one frame at a time. Faster would collapse the gaps between
+                // sentences, and the gaps are what the server's endpointing reads.
+                await Task.Delay(20, ct);
+            }
+            // Deliberately quiet at the end: the file running out is not a failure, and putting
+            // the indicator in `error` here would look like the engine breaking at exactly the
+            // moment it finished working.
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Failed?.Invoke(Describe(ex)); }
+    }
+
     public void Stop()
     {
         try { _pumpCts?.Cancel(); } catch { }
@@ -212,6 +310,8 @@ sealed class AudioCapture : IDisposable
         // The resampler owns nothing of the capture, but it must go before the buffer it reads.
         try { _resampler?.Dispose(); } catch { }
         try { _capture?.Dispose(); } catch { }
+        try { _fileReader?.Dispose(); } catch { }
+        _fileReader = null;
         _resampler = null; _buffer = null; _capture = null; _pumpCts = null; _pump = null;
     }
 
