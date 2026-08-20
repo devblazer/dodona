@@ -820,6 +820,12 @@ public partial class MainWindow : Window
             _ => Color.FromRgb(0x5A, 0x60, 0x69),
         };
         var brush = new SolidColorBrush(colour);
+        // The WORDS take the state's colour too, not just the glyph. Caught by looking at the
+        // capture rather than by any check: with `Foreground` left at the XAML's blue, an error
+        // read "no microphone" in the same calm blue as "listening", and the only thing saying
+        // anything was wrong was a 9-pixel glyph. That is one shade away from the failure this
+        // feature is most likely to ship -- on and deaf looking like on (§5).
+        ListenStatus.Foreground = brush;
         MicGlyph.Stroke = brush;
         // Outline when off, filled when armed — readable at a glance without reading the words.
         MicGlyph.Fill = _listen == Dictation.ListenState.Off ? Brushes.Transparent : brush;
