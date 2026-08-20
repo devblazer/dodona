@@ -353,10 +353,23 @@ rot; names do not. **One phase per commit**, each with its proof, in the order �
   `role == "work"` only: management lanes run in the neutral directory and write nothing.
 - **`DeployGate(worktree, ticketId, repo)`** gains a lane-only form writing `--lane` instead of
   `--ticket`. Keep one function with the ticket optional; two would drift.
-- **Consideration, not a blocker:** for a plain lane the cwd *is* the shared checkout, so this
-  writes `.claude/settings.local.json` into the operator's live tree. Already covered by the
-  `info/exclude` deployment `DeployGate` performs, so it can never be committed — but it is a
-  file appearing in their tree and the announcement should say so once.
+- **BLOCKER, and it must be fixed before P1 deploys anywhere: `DeployGate` writes
+  `settings.local.json` with `File.WriteAllText` — a whole-file overwrite.** That has been safe
+  purely by accident. A ticket's worktree is a fresh checkout and the file is untracked, so there
+  has never been one there to destroy. P1 deploys into the **live tree of every project**, where
+  a developer's own `settings.local.json` — their allowed commands, their preferences — very
+  likely exists. It would be silently wiped, and it is not in git, so there is nothing to restore
+  it from.
+  **`DeployGate` must MERGE**: read any existing file, add or replace only Dodona's own
+  `PreToolUse` entry, keep every other key byte-for-byte, and back the original up before writing.
+  This is the same mistake the code already fixed once in the other direction — an earlier version
+  wrote `settings.json` and overwrote the repo's *tracked* file, so the repo lost its hooks and
+  the agent saw a dirty file it had not changed. `settings.local.json` was the fix for that; the
+  overwrite came along for the ride.
+- **Two footprints in a project that is not Dodona's**, worth stating plainly because most repos
+  Dodona will drive are not the operator's to modify: `.claude/settings.local.json` in the working
+  directory, and an appended block in that repo's `.git/info/exclude`. Both are untracked and
+  neither can be committed, but the announcement should say so once rather than never.
 - **Measure before calling it done** (§9): time an `Edit` with and without the hook. The two
   hooks deleted in D-7 cost 255 ms each, 136 ms of that merely starting PowerShell. This one is
   `dodona.exe` directly rather than a script shelling out to it, so it should be far cheaper —
