@@ -1628,16 +1628,33 @@ function Do-Gate {
     # nine timing checks. The way to earn 45 s is to stop ui-use being the long pole (it is
     # four suites wearing one name) and to stop the suites leaking; neither is this phase.
     #
+    # RAISED 260 -> 300 s ON 2026-08-20, for work-isolation P1 and P2 (layer 1's write gate on
+    # every lane, and promotion on the refused write). Measured twice, all thirteen suites GREEN:
+    # 243.9 s at P1 and 250.6 s at P2, against 902 checks where the 260 s line was set at 720. The
+    # growth is traceable rather than spread thin -- m1 51 checks (a ticket agent and a plain lane
+    # it never used to start), m2 14 -> 24 (the whole promotion path, a real `git worktree add` and
+    # a prune), m4 40 -> 42, unit 274 -> 278 -- and the run is slower because there is more of it.
+    #
+    # It passes the test the paragraph above sets: NOTHING WAS RED and no suite is inflated. 250.6 s
+    # against a 260 s line is 96% of the budget, so the next phase would have presented earned
+    # coverage as a gate failure -- which is the exact mistake the 180 -> 260 raise was made to
+    # avoid. 300 s is 1.20x the measurement, tighter than the 1.33x that set 260, because two
+    # consecutive full runs came in 6.7 s apart (243.9 and 250.6) rather than spread wide.
+    #
+    # The long pole is unchanged and so is the way to buy the budget back: ui-use, workspace and
+    # brain are three monoliths at ~100, ~60 and ~56 s, and splitting any of them is worth more than
+    # any number here.
+    #
     # PARTIAL runs cannot judge it: three suites finishing quickly says nothing about twelve.
     # It says so rather than passing a row it did not earn (CLAUDE.md 0.3).
     if ($partial) {
         Say "  n/a   I7  only $(@($suites).Count) of $((AllSuites).Count) suites ran in $([math]::Round($suiteWall, 1))s, so the budget was NOT tested"
     }
-    elseif ($suiteWall -lt 260) {
-        Say ("  PASS  I7  the full suite run finished in {0:N1}s, inside the 260s budget (was 320s sequential)" -f $suiteWall)
+    elseif ($suiteWall -lt 300) {
+        Say ("  PASS  I7  the full suite run finished in {0:N1}s, inside the 300s budget (was 320s sequential)" -f $suiteWall)
     }
     else {
-        Say ("  FAIL  I7  the full suite run took {0:N1}s, over the 260s budget" -f $suiteWall)
+        Say ("  FAIL  I7  the full suite run took {0:N1}s, over the 300s budget" -f $suiteWall)
         Say ("            slowest: " + ((($results | Sort-Object Seconds -Descending | Select-Object -First 3 |
                     ForEach-Object { "$($_.Name) $($_.Seconds)s" }) -join ', ')))
         # TWO causes, and the machine one is listed FIRST because it is the one that actually

@@ -294,6 +294,22 @@ static class Projects
         return null;
     }
 
+    /// <summary>The `--resume` pair for a session, or nothing.
+    ///
+    /// ONE SPELLING, because there are now two callers and they must not disagree: `lane-respawn`
+    /// and layer 2's promotion (docs/WORK-ISOLATION-PLAN.md P2). Promotion is only cheap BECAUSE
+    /// the session survives -- `--resume` rebuilds the context the agent already has, so moving a
+    /// lane into its own checkout costs nothing the operator can perceive. A promotion that lost
+    /// the conversation would be worse than the refusal it replaces.
+    ///
+    /// A `fake-` session is the acceptance suites' stand-in agent (section 17) and is not resumable
+    /// by claude, so it is excluded -- and that exclusion is the whole reason this is a function
+    /// rather than two inline conditions: it is a rule about which sessions are real.</summary>
+    public static List<string> ResumeArgs(string? session) =>
+        session is { Length: > 0 } s && !s.StartsWith("fake-", StringComparison.Ordinal)
+            ? new List<string> { "--resume", s }
+            : new List<string>();
+
     /// <summary>
     /// TRAP T1, ENFORCED (docs/LOCATIONS-PLAN.md Phase 2): the prompt must name the folder the
     /// process is actually started in. Returns null when they agree, or the refusal to print.

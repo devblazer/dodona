@@ -136,7 +136,94 @@ for r in db.execute('SELECT tier, delivered_lane, retargeted FROM routing_decisi
 ") | Out-String
     Check 'routing_rows_recorded' ([bool]($rows -match 'prefix' -and $rows -match 'focus')) $rows
 
+    # ---- LAYER 2: THE REFUSAL IS A PROMOTION, NOT A WALL (WORK-ISOLATION-PLAN P2) ----
+    #
+    # P1 made the shared checkout refuse writes. On its own that is a locked door with no key: on a
+    # one-project workspace every plain lane opens in the shared checkout, so a lane asked to do
+    # real work could not do any. Layer 2 is the key -- the first refused write creates the ticket,
+    # materialises the worktree, deploys the gate and moves the lane in, resuming its session.
+    #
+    # NOTHING HAS BEEN WRITTEN YET, which is exactly why layer 1 sits at the write ATTEMPT and not
+    # at the commit: edits made first would be in the wrong tree, and there is no safe way to move
+    # them -- `git stash` is repo-global, so two lanes stashing interleave one stack (CLAUDE.md 5.2).
+    $promoted = Dodona @("lane-start", "--title", "ENGINE", "--child", $fake)
+    Check 'promotion_lane_started' ($promoted -match 'lane (\d+)') $promoted
+    $pLane = if ($promoted -match 'lane (\d+)') { $Matches[1] } else { 0 }
+    # A path NO open ticket claims -- ticket 1 holds src/water and src/sky/box.cs, so src/engine is
+    # free. The claim-conflict route is the OTHER case and m1 covers it.
+    $engine = "$root\src\engine\e.cs"
+    $pHook = "`"$dodona`" gate-hook --lane $pLane --workspace `"$($ws.Id)`""
+    $pJson = @{ tool_name = 'Write'; tool_input = @{ file_path = $engine } } | ConvertTo-Json -Compress
+    $ErrorActionPreference = 'Continue'
+    $perr = Join-Path $out 'promote.err'
+    $pOut = ($pJson | & cmd /c $pHook 2> $perr | Out-String) + (Get-Content $perr -Raw -ErrorAction SilentlyContinue)
+    $pFlat = ($pOut -replace '\s+', ' ')
+    # Captured native stderr is WRAPPED to the console width, so a phrase can be split mid-sentence
+    # -- collapse before matching (CLAUDE.md 0.2, which cost a false red once already).
+    Check 'the_write_is_still_refused' ($pFlat -match '"permissionDecision":"deny"') $pFlat
+    # The denial is a REWRITE, not a wall: it names the ticket and where the same file now lives.
+    Check 'the_refusal_names_the_new_ticket_and_the_new_path' `
+        ($pFlat -match 'ticket \d+' -and $pFlat -match 'wt[\\/]+t\d+' -and $pFlat -match 'Nothing was written') $pFlat
+
+    # The lane ends up IN the worktree. Asserted from the store rather than from the message: the
+    # move is deliberately behind the answer (it respawns the process that is waiting for it), so
+    # this is a condition-wait, not a sleep.
+    $pWt = ''
+    Wait-Until {
+        $script:pWt = (Invoke-StoreSql $storeDb "SELECT cwd FROM lanes WHERE id = $pLane").Trim()
+        $script:pWt -match 'wt[\\/]+t\d+'
+    } 20000 'the promoted lane is respawned into its ticket worktree' | Out-Null
+    Check 'the_lane_ends_up_in_a_worktree' ($pWt -match 'wt[\\/]+t\d+') "cwd=$pWt"
+    Check 'the_promotion_is_recorded' `
+        ([int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='lane_promoted' AND lane_id=$pLane").Trim()) -ge 1) `
+        (Invoke-StoreSql $storeDb "SELECT kind, detail FROM events WHERE lane_id=$pLane")
+    # THE POINT OF DOING IT AT THE WRITE ATTEMPT. The shared checkout is untouched.
+    Check 'nothing_was_written_to_the_shared_checkout' (-not (Test-Path $engine)) "$engine should not exist"
+    # The lane is the thread and it survives its agent (section 11): same row, same id, and the
+    # ticket now points at it.
+    # EVERY QUERY BELOW IS GUARDED ON THE TICKET EXISTING, and that is not defensive style -- it is
+    # what makes these checks provable. The first version interpolated an empty id into
+    # `WHERE id = `, sqlite refused it, `Invoke-StoreSql` threw, and the whole suite tore out of its
+    # try block: against HEAD every check here came back MISSING rather than RED, which is worth
+    # nothing (a check that cannot be seen to fail has no teeth). A check must FAIL on the old
+    # behaviour, not crash on it.
+    $pTicket = (Invoke-StoreSql $storeDb "SELECT id FROM tickets WHERE lane_id = $pLane AND state = 'open'").Trim()
+    Check 'the_ticket_is_linked_to_the_same_lane' ($pTicket -match '^\d+$') "ticket=[$pTicket] lane=$pLane"
+
+    # ---- D-9: THE UNDO LINE HAS TO BE TRUE ----
+    # Promotion announces `dodona lane-stop <n>` as the undo, so stopping the lane must actually
+    # undo it: ticket abandoned, worktree pruned, branch deleted, claims released. An announcement
+    # offering an undo that does not undo is worse than offering none.
+    $pWtPath = $pWt
+    $pBranch = if ($pTicket -match '^\d+$') { (Invoke-StoreSql $storeDb "SELECT branch FROM tickets WHERE id = $pTicket").Trim() } else { '' }
+    $stopOut = Dodona @("lane-stop", $pLane)
+    $pState = if ($pTicket -match '^\d+$') { (Invoke-StoreSql $storeDb "SELECT state FROM tickets WHERE id = $pTicket").Trim() } else { '' }
+    Check 'stopping_a_promoted_lane_abandons_its_ticket' ($pState -eq 'abandoned') "state=[$pState] ticket=[$pTicket] $stopOut"
+    $wtGone = ($pWtPath -match 'wt[\\/]+t\d+') -and (-not (Test-Path $pWtPath))
+    $branchGone = ($pBranch -ne '') -and ((git -C $root branch --list $pBranch | Out-String).Trim() -eq '')
+    Check 'the_undo_prunes_the_worktree_and_the_branch' ($wtGone -and $branchGone) `
+        "wt=[$pWtPath] gone=$wtGone branch=[$pBranch] gone=$branchGone"
+    # ...and a ticket the OPERATOR created is not collateral. Ticket 1 was made by ticket-create,
+    # so stopping ITS lane must leave it alone -- section 11's "nothing is deleted" is about their
+    # work, and only a PROMOTED ticket is Dodona's to withdraw.
+    #
+    # VACUOUS BY CONSTRUCTION -- HEAD abandons nothing, so no code state makes this red -- and kept
+    # anyway, for the same reason `workspace`'s `a_disjoint_directory_in_the_renamed_repository_is_still_free`
+    # is kept: it is what catches this widening later, when someone simplifies the promoted-ticket
+    # test out of `lane-stop` and starts deleting the operator's branches on their behalf.
+    $t1lane = Dodona @("ticket-agent", "1", "--child", $fake)
+    if ($t1lane -match 'lane (\d+)') {
+        $t1id = $Matches[1]
+        Dodona @("lane-stop", $t1id) | Out-Null
+        Check 'stopping_a_deliberate_ticket_lane_leaves_the_ticket_alone' `
+            ((Invoke-StoreSql $storeDb "SELECT state FROM tickets WHERE id = 1").Trim() -ne 'abandoned') `
+            (Invoke-StoreSql $storeDb "SELECT id, state FROM tickets")
+    }
+    else { Check 'stopping_a_deliberate_ticket_lane_leaves_the_ticket_alone' $false "ticket-agent 1 failed: $t1lane" }
+    $ErrorActionPreference = 'Stop'
+
     Dodona @("stop-daemon") | Out-Null
+
 }
 finally {
     Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue

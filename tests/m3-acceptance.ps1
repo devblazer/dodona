@@ -122,7 +122,14 @@ try {
     # it) and the overlay is the "what actually came over the wire" answer, so it must show the
     # four reads individually -- the fold is a pane rendering, never a filter on the truth.
     Dodona @("ui", "overlay", "SKY") | Out-Null
-    Wait-Until { $null -ne (DumpOrNull).overlay } 25000 'the overlay opens over SKY' | Out-Null
+    # WAIT FOR WHAT THIS CHECK ASSERTS, not for the overlay merely EXISTING. This waited on
+    # `.overlay` being non-null and then asserted on `.overlayLines`, so a dump taken between the
+    # overlay opening and its rows arriving read as a failure: measured intermittent 1 run in 3,
+    # against an unchanged binary, with the detail showing the PANE's folded lines where the raw
+    # per-step rows belong. A flaky check is worse than no check -- it teaches people to re-run
+    # instead of read, which is the same disease as a check that is always green (CLAUDE.md 3).
+    Wait-Until { (((DumpOrNull).overlayLines) -join '|') -match 'read a\.cs' } 25000 `
+        'the overlay lists the individual steps' | Out-Null
     $ov = ((Dump).overlayLines) -join '|'
     Check 'the_overlay_still_shows_every_step' ($ov -match 'read a\.cs' -and $ov -match 'read d\.cs' -and
         $ov -notmatch 'read 4 files') $ov

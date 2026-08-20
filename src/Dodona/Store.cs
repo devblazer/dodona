@@ -639,6 +639,40 @@ sealed class Store : IDisposable, ILaneSink
 
     // ------------------------------------------------------------- events & lanes
 
+    /// <summary>The most recent detail this lane recorded for an event kind, or null.
+    ///
+    /// Reads what was WRITTEN rather than what the config would say now -- which is the difference
+    /// promotion needs (WORK-ISOLATION-PLAN P2): a lane must come back as the same agent binary it
+    /// was running, not as whatever `dodona.json` currently names.</summary>
+    public string? LastEventDetail(string kind, long laneId)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "SELECT detail FROM events WHERE kind = $k AND lane_id = $l ORDER BY id DESC LIMIT 1;";
+            c.Parameters.AddWithValue("$k", kind);
+            c.Parameters.AddWithValue("$l", laneId);
+            return c.ExecuteScalar() as string;
+        }
+    }
+
+    /// <summary>Has this lane ever recorded an event of this kind whose detail matches? Written
+    /// for D-9's undo: `lane-stop` may only abandon a ticket the lane was PROMOTED into, never one
+    /// the operator created deliberately -- and the promotion event is the only record of the
+    /// difference. `like` is a SQL LIKE pattern; pass "%" for "any".</summary>
+    public bool HasEvent(string kind, long laneId, string like)
+    {
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "SELECT COUNT(*) FROM events WHERE kind = $k AND lane_id = $l AND detail LIKE $d;";
+            c.Parameters.AddWithValue("$k", kind);
+            c.Parameters.AddWithValue("$l", laneId);
+            c.Parameters.AddWithValue("$d", like);
+            return Convert.ToInt64(c.ExecuteScalar() ?? 0L) > 0;
+        }
+    }
+
     public void Event(string kind, long? laneId, string? detail)
     {
         lock (_lock)

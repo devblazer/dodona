@@ -117,3 +117,33 @@ public class TreesTests
     public void An_empty_path_is_outside_every_project() =>
         Assert.Equal(Trees.Where.OutsideEveryProject, Locate("   ", new string[0], new string[0]));
 }
+
+/// <summary>
+/// THE SESSION IS WHAT MAKES PROMOTION FREE (docs/WORK-ISOLATION-PLAN.md P2). Layer 2 moves a lane
+/// into its own checkout by respawning it, and that is only acceptable because `--resume` rebuilds
+/// the context the agent already has -- a promotion that lost the conversation would be worse than
+/// the refusal it replaces. Two callers now build that argument (`lane-respawn` and promotion), so
+/// the rule about which sessions are real lives in one function.
+///
+/// It is held HERE and not in an acceptance suite because it cannot be held there: the suites run a
+/// stand-in agent whose session ids start with `fake-`, so the branch that matters is exactly the
+/// branch they never take.
+/// </summary>
+public class ResumeArgsTests
+{
+    [Fact]
+    public void A_real_session_is_resumed() =>
+        Assert.Equal(new[] { "--resume", "abc-123" }, Projects.ResumeArgs("abc-123"));
+
+    /// <summary>The acceptance suites' stand-in agent (section 17). Claude cannot resume it, and
+    /// passing the flag anyway would make every promoted lane in every suite fail to start.</summary>
+    [Fact]
+    public void A_fake_session_is_not() =>
+        Assert.Empty(Projects.ResumeArgs("fake-2b25f8d3942040baa48ee7b1458ea9ec"));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void No_session_asks_for_nothing(string? session) =>
+        Assert.Empty(Projects.ResumeArgs(session));
+}

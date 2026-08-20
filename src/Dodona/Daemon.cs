@@ -1075,8 +1075,7 @@ sealed class Daemon
                         : TicketSystemPrompt(t2.Id, t2.Title,
                             string.Join(", ", _store.TicketClaims(t2.Id).Select(cl => $"{cl.Kind}:{cl.Value}")));
                     args2 = ClaudeArgs(cfg2, cfg2.Model, cfg2.Effort, sys2, acceptEdits: true);
-                    if (row.Session is { Length: > 0 } sess && !sess.StartsWith("fake-"))
-                    { args2.Add("--resume"); args2.Add(sess); }
+                    args2.AddRange(Projects.ResumeArgs(row.Session));
                 }
                 // The pipe name is deterministic per lane, and the old shim is gone —
                 // the name is free to reclaim, which is the whole point of never keying
@@ -1109,6 +1108,22 @@ sealed class Daemon
                 if (_store.KvGet("focused_lane") == lane.ToString()) _store.KvSet("focused_lane", "");
                 _store.Event("lane_stopped", lane, "operator");
                 w.WriteLine($"stopped lane {lane}");
+
+                // D-9: THE UNDO LINE HAS TO BE TRUE. Promotion announces `dodona lane-stop <n>` as
+                // the way to undo it, so stopping a lane that was PROMOTED must actually undo the
+                // promotion: abandon the ticket, prune the worktree, delete the branch, release the
+                // claims (the conflict query only sees `state='open'`, so the state change is the
+                // release). An announcement offering an undo that does not undo is worse than no
+                // undo at all.
+                //
+                // ONLY A PROMOTED TICKET, and the distinction is the whole care here. A ticket the
+                // operator created deliberately with `ticket-create` is THEIR work; deleting its
+                // branch because a lane was stopped would be section 11's "nothing is deleted"
+                // violated on their behalf. The promotion event is the only record of which is
+                // which, which is why `Store.HasEvent` exists.
+                var stopped = _store.Tickets().FirstOrDefault(t => t.State == "open" && t.LaneId == lane);
+                if (stopped is not null && _store.HasEvent("lane_promoted", lane, $"ticket {stopped.Id} %"))
+                    foreach (var line in AbandonTicket(stopped, $"lane {lane} stopped")) w.WriteLine(line);
                 break;
             }
             case "tail":
@@ -1336,73 +1351,25 @@ sealed class Daemon
 
                 // Repo-exclusivity, layer 3 (Registry's doc comment): asked HERE because
                 // here is where a merge token first comes into existence for this repo.
-                // Attach-time enforcement and the partial unique index both cover the
-                // ordinary case; neither can cover a BARE FOLDER legitimately attached to
-                // two workspaces (exempt, harmless) that someone later ran `git init` in.
-                // Only a check at the point of use notices the ground moved — the same
-                // reasoning that puts a diff backstop behind the claim gate (§6).
-                try
+                // MATERIALISED BY `MakeTicket`, which layer 2's promotion calls too (P2). It used
+                // to be inline here and nowhere else; two implementations of "make a ticket" would
+                // drift on exactly the checks that matter -- repo exclusivity and claim conflict.
+                var made = MakeTicket(repo, title, mode, claims, specs);
+                if (made.Conflicts.Count > 0)
                 {
-                    using var reg = new Registry();
-                    if (reg.RepoConflict(repo.Path, _instanceId) is Workspace other)
-                    {
-                        _store.Event("ticket_repo_not_exclusive", null, $"'{title}': {repo.Path} also in {other.Id}");
-                        w.WriteLine($"error: {repo.Path} also belongs to workspace \"{other.Name}\" ({other.Id})");
-                        w.WriteLine("       a repo belongs to at most ONE workspace at a time — two workspaces over one");
-                        w.WriteLine("       repo is two merge tokens over one main, the race this system exists to prevent");
-                        w.WriteLine($"       move it:  dodona workspace-move --member \"{repo.Path}\" --workspace \"{_wsName}\"");
-                        w.WriteLine("##exit 1");
-                        break;
-                    }
-                }
-                catch (Exception ex) { _store.Event("registry_unreadable", null, ex.Message); }
-
-                var repoCfg = Config.For(_primary, repo.Path);
-                if (!Git.HasCommit(repo.Path))
-                {
-                    w.WriteLine($"error: {repo.Name} is a git repository with no commits, so there is no '{repoCfg.Main}' to branch from");
-                    w.WriteLine("       run `dodona repo-init` to make the first commit");
+                    foreach (var cf in made.Conflicts) w.WriteLine($"conflict: {cf}");
                     w.WriteLine("##exit 1");
                     break;
                 }
-
-                // Both: the display name the claims were written relative to, and the canonical
-                // path that says WHICH repository this is whatever it gets called later (P0.1).
-                var (id, conflicts) = _store.TicketCreate(null, title, mode, repo.Name, Repos.Key(repo.Path), claims);
-                if (id < 0)
+                if (made.Error is not null)
                 {
-                    _store.Event("claim_conflict", null, $"'{title}': {string.Join(" | ", conflicts)}");
-                    foreach (var cf in conflicts) w.WriteLine($"conflict: {cf}");
-                    w.WriteLine("##exit 1");
+                    foreach (var line in made.Error.Split('\n')) w.WriteLine(line);
+                    if (made.Exit1) w.WriteLine("##exit 1");
                     break;
                 }
-
-                // Branch names are workspace-unique because ticket ids are. The worktree
-                // lives beside the MEMBER holding this repository — worktrees are the one
-                // piece of state that deliberately did NOT move into workspace territory
-                // (WORKSPACES-CONCIERGE.md §1: they are volume- and path-sensitive, and
-                // moving them buys nothing). For a one-member workspace this is the exact
-                // path it has always been.
-                var branch = $"ticket/{id}";
-                var wt = Path.Combine(Paths.Worktrees(repo.MemberPath), $"t{id}");
-                var (code, output) = Git.Run(repo.Path, "worktree", "add", "-b", branch, wt, repoCfg.Main);
-                if (code != 0)
-                {
-                    _store.TicketState(id, "abandoned");
-                    _store.Event("ticket_git_failed", null, $"ticket {id} repo {repo.Name}: {output}");
-                    w.WriteLine($"error: worktree add failed in {repo.Name}: {output}");
-                    break;
-                }
-                _store.TicketSetGit(id, branch, wt);
-                // NO GATE DEPLOYED HERE ANY MORE (D-17). A ticket has no lane yet -- `ticket-agent`
-                // creates it -- and the gate is now per-LANE and handed over on the launch line, so
-                // `AttachShimAsync` is the one place that writes it. That is the same funnel
-                // correction `DaemonClient.Send` needed for start-on-demand: a call site cannot
-                // forget what it does not do.
-                _store.Event("ticket_created", null, $"ticket {id} '{title}' repo {repo.Name} branch {branch} claims [{string.Join(", ", specs)}]");
                 // A single-repo project never sees the word "repo": there is only one, and
                 // naming it would be noise in the ordinary case.
-                w.WriteLine($"ticket {id}{RepoTag(repo.Name)} branch {branch} worktree {wt}");
+                w.WriteLine($"ticket {made.Id}{RepoTag(repo.Name)} branch {made.Branch} worktree {made.Worktree}");
                 break;
             }
             // ---------------- layer 1: which TREE a write is in (WORK-ISOLATION-PLAN section 3) ----
@@ -1432,16 +1399,51 @@ sealed class Daemon
                 var where = Trees.Locate(full, ProjectPaths());
                 if (Trees.Allowed(where)) { w.WriteLine($"tree-ok: {where.ToString().ToLowerInvariant()} {full}"); break; }
 
+                // LAYER 2: THE REFUSAL IS A PROMOTION, NOT A WALL (P2).
+                //
+                // A plain work lane that tried to write here needed a checkout of its own, so it
+                // gets one: ticket, worktree, gate, and the same session carried in. Nothing has
+                // been written yet, which is the entire reason layer 1 sits at the write attempt
+                // rather than at the commit -- afterwards the edits would be in the wrong tree and
+                // there is no safe way to move them (`git stash` is repo-global, so two lanes
+                // stashing interleave one stack; CLAUDE.md 5.2).
+                //
+                // Three lanes do NOT get promoted, each for its own reason:
+                //   * one that already works a ticket -- it HAS a worktree and should be writing
+                //     there. Promoting again would give one lane two, and this is the hole P1
+                //     found in `claim-check` (an absolute path inside its own claim), so the
+                //     message names the worktree it already owns.
+                //   * a management lane -- it runs in the neutral directory and writes nothing.
+                //   * a path in no repository of this workspace -- there is nothing to branch.
+                var openTicket = _store.Tickets().FirstOrDefault(t => t.State == "open" && t.LaneId == lane);
+                var rr = RepoRelOf(full);
+                if (row is not null && row.Role == "work" && openTicket is null && rr is not null)
+                {
+                    var (pmsg, move) = PromoteLane(row, rr.Value.Repo, rr.Value.Rel, full);
+                    _store.Event("tree_check_denied", lane, $"{full} -> promotion");
+                    w.WriteLine(pmsg);
+                    w.WriteLine("##exit 1");
+                    // AFTER the reply is on the wire, never before: the move respawns this lane,
+                    // and the process it kills is the one currently waiting for this answer.
+                    move?.Invoke();
+                    break;
+                }
+
                 // D-13: A REFUSAL NAMES THE HOLDER. "outside your claim" sends the reader
                 // hunting (CLAUDE.md 0.3); the holder is a store read and therefore free.
                 var holder = ClaimHolder(full);
-                var msg = $"denied: {full} is in the SHARED CHECKOUT, not a worktree" +
-                          (holder is null ? "" : $" -- that path is held by {holder}") +
-                          ". The shared checkout is a source of truth, not a workspace: other lanes and " +
-                          "your operator are in it, and its pre-commit hook refuses commits from it, so work " +
-                          "done here cannot be delivered. Work that changes files needs a ticket worktree of " +
-                          "its own.";
-                _store.Event("tree_check_denied", lane, $"{full} holder={holder ?? "-"}");
+                var msg = openTicket is not null
+                    ? $"denied: {full} is in the SHARED CHECKOUT, not a worktree. You already have one for " +
+                      $"ticket {openTicket.Id}: write this file under {openTicket.Worktree} instead. Editing the " +
+                      "shared checkout would put your work in the tree your operator and every other lane are " +
+                      "using, and its pre-commit hook refuses commits from there, so it could not be delivered."
+                    : $"denied: {full} is in the SHARED CHECKOUT, not a worktree" +
+                      (holder is null ? "" : $" -- that path is held by {holder}") +
+                      ". The shared checkout is a source of truth, not a workspace: other lanes and " +
+                      "your operator are in it, and its pre-commit hook refuses commits from it, so work " +
+                      "done here cannot be delivered. Work that changes files needs a ticket worktree of " +
+                      "its own.";
+                _store.Event("tree_check_denied", lane, $"{full} holder={holder ?? "-"} ticket={openTicket?.Id.ToString() ?? "-"}");
                 w.WriteLine(msg);
                 w.WriteLine("##exit 1");
                 break;
@@ -2880,6 +2882,209 @@ sealed class Daemon
     /// fake-agent lane still proves *which project's config was resolved* without the event
     /// pretending to be evidence of an argv that was never built.
     /// </summary>
+    /// <summary>The OUTCOME of trying to materialise a ticket: the row, its branch and its
+    /// worktree, or why not. `Conflicts` is separate from `Error` because a claim conflict is the
+    /// one refusal a caller may want to act on rather than print -- promotion (P2) degrades to a
+    /// refused write naming the holder, while `ticket-create` prints the conflicts.</summary>
+    sealed record TicketMade(long Id, string Branch, string Worktree,
+                             string? Error, bool Exit1, List<string> Conflicts)
+    {
+        public bool Ok => Id > 0 && Error is null && Conflicts.Count == 0;
+        public static TicketMade Failed(string error, bool exit1 = true) =>
+            new(-1, "", "", error, exit1, new List<string>());
+    }
+
+    /// <summary>
+    /// Create a ticket and materialise its branch and worktree. FACTORED OUT OF THE
+    /// `ticket-create` HANDLER, where it existed only inline, so that layer 2 can call it: a
+    /// refused write in the shared checkout promotes itself into a ticket
+    /// (docs/WORK-ISOLATION-PLAN.md section 3, P2), and two implementations of "make a ticket"
+    /// would drift on exactly the checks that matter -- repo exclusivity and claim conflict.
+    ///
+    /// Every refusal in here is a refusal for BOTH callers, which is the point. The messages keep
+    /// their CLI shape (leading spaces, several lines) because `ticket-create` prints them
+    /// verbatim; `Exit1` carries the one case that deliberately did not set `##exit 1`.
+    /// </summary>
+    TicketMade MakeTicket(RepoRef repo, string title, string mode,
+                          List<(string, string)> claims, IEnumerable<string> specs)
+    {
+        // Attach-time enforcement and the partial unique index both cover the
+        // ordinary case; neither can cover a BARE FOLDER legitimately attached to
+        // two workspaces (exempt, harmless) that someone later ran `git init` in.
+        // Only a check at the point of use notices the ground moved -- the same
+        // reasoning that puts a diff backstop behind the claim gate (section 6).
+        try
+        {
+            using var reg = new Registry();
+            if (reg.RepoConflict(repo.Path, _instanceId) is Workspace other)
+            {
+                _store.Event("ticket_repo_not_exclusive", null, $"'{title}': {repo.Path} also in {other.Id}");
+                return TicketMade.Failed(
+                    $"error: {repo.Path} also belongs to workspace \"{other.Name}\" ({other.Id})\n" +
+                    "       a repo belongs to at most ONE workspace at a time -- two workspaces over one\n" +
+                    "       repo is two merge tokens over one main, the race this system exists to prevent\n" +
+                    $"       move it:  dodona workspace-move --member \"{repo.Path}\" --workspace \"{_wsName}\"");
+            }
+        }
+        catch (Exception ex) { _store.Event("registry_unreadable", null, ex.Message); }
+
+        var repoCfg = Config.For(_primary, repo.Path);
+        if (!Git.HasCommit(repo.Path))
+            return TicketMade.Failed(
+                $"error: {repo.Name} is a git repository with no commits, so there is no '{repoCfg.Main}' to branch from\n" +
+                "       run `dodona repo-init` to make the first commit");
+
+        // Both: the display name the claims were written relative to, and the canonical
+        // path that says WHICH repository this is whatever it gets called later (P0.1).
+        var (id, conflicts) = _store.TicketCreate(null, title, mode, repo.Name, Repos.Key(repo.Path), claims);
+        if (id < 0)
+        {
+            _store.Event("claim_conflict", null, $"'{title}': {string.Join(" | ", conflicts)}");
+            return new TicketMade(-1, "", "", null, true, conflicts);
+        }
+
+        // Branch names are workspace-unique because ticket ids are. The worktree
+        // lives beside the MEMBER holding this repository -- worktrees are the one
+        // piece of state that deliberately did NOT move into workspace territory
+        // (WORKSPACES-CONCIERGE.md section 1: they are volume- and path-sensitive, and
+        // moving them buys nothing). For a one-member workspace this is the exact
+        // path it has always been.
+        var branch = $"ticket/{id}";
+        var wt = Path.Combine(Paths.Worktrees(repo.MemberPath), $"t{id}");
+        var (code, output) = Git.Run(repo.Path, "worktree", "add", "-b", branch, wt, repoCfg.Main);
+        if (code != 0)
+        {
+            _store.TicketState(id, "abandoned");
+            _store.Event("ticket_git_failed", null, $"ticket {id} repo {repo.Name}: {output}");
+            // NO `##exit 1` here, preserved from the inline original: this path printed the error
+            // and broke without one, and changing an exit code while moving code is how a
+            // refactor becomes a behaviour change nobody asked for.
+            return TicketMade.Failed($"error: worktree add failed in {repo.Name}: {output}", exit1: false);
+        }
+        _store.TicketSetGit(id, branch, wt);
+        // NO GATE DEPLOYED HERE (D-17). A ticket has no lane yet -- `ticket-agent` creates it, or
+        // promotion attaches the one it came from -- and the gate is per-LANE and handed over on
+        // the launch line, so `AttachShimAsync` is the one place that writes it. Same funnel
+        // correction `DaemonClient.Send` needed for start-on-demand: a call site cannot forget
+        // what it does not do.
+        _store.Event("ticket_created", null,
+            $"ticket {id} '{title}' repo {repo.Name} branch {branch} claims [{string.Join(", ", specs)}]");
+        return new TicketMade(id, branch, wt, null, false, new List<string>());
+    }
+
+    /// <summary>
+    /// LAYER 2: THE REFUSAL IS A PROMOTION, NOT A WALL (WORK-ISOLATION-PLAN section 3, P2).
+    ///
+    /// A plain lane has just tried to write into the shared checkout and layer 1 refused it. So
+    /// give it the thing it actually needed: a ticket, a worktree, a gate, and the same session
+    /// carried into it. **Nothing has been written yet** -- that is the whole reason layer 1 sits
+    /// at the write attempt and not at the commit, because moving edits afterwards is not
+    /// available: they would be in the wrong tree and `git stash` is repo-global, so two lanes
+    /// stashing interleave one stack (CLAUDE.md 5.2).
+    ///
+    /// This is NOT a relaxation of `lane-respawn`'s refusal to re-home a ticket lane, which is
+    /// correct and untouched. That refusal is about moving a lane OUT of its worktree; this moves
+    /// a plain lane IN, which it never covered.
+    ///
+    /// Returns the message the gate hands back to the agent: a REWRITE naming where the same file
+    /// now lives, never a bare "no".
+    /// </summary>
+    (string Message, Action? Move) PromoteLane(Store.LaneRow row, RepoRef repo, string relForClaim, string deniedPath)
+    {
+        var made = MakeTicket(repo, row.Title, "on-approval",
+                              new List<(string, string)> { ("path", relForClaim) },
+                              new[] { $"path:{relForClaim}" });
+        if (!made.Ok)
+        {
+            // THE PROMOTION CAN FAIL AT THE MOMENT IT IS NEEDED, and it must degrade to a refused
+            // write naming the holder -- never to a silent allow (section 9). A claim conflict is
+            // the expected case: another open ticket already holds this path.
+            var why = made.Conflicts.Count > 0
+                ? string.Join("; ", made.Conflicts)
+                : (made.Error ?? "unknown").Replace("\n", " ").Trim();
+            _store.Event("promotion_refused", row.Id, $"{deniedPath}: {why}");
+            return ($"denied: {deniedPath} is in the SHARED CHECKOUT, not a worktree, and a private " +
+                    $"checkout could not be opened for it: {why}. Nothing was written.", null);
+        }
+
+        _store.TicketSetLane(made.Id, row.Id);
+        var moved = Path.Combine(made.Worktree, relForClaim.Replace('/', Path.DirectorySeparatorChar));
+
+        // THE MOVE ITSELF IS BEHIND THE ANSWER, not in front of it. `git worktree add` is already
+        // done (it has to be -- the message names the new path), but the RESPAWN kills this
+        // agent's process, and it is the process currently waiting on this reply. So the reply is
+        // written first by the caller and the respawn runs after it, fire-and-forget, the same
+        // shape `BrainReview` uses for work that must not be in front of the operator (D-14).
+        Action move = () => _ = Task.Run(async () =>
+        {
+            try
+            {
+                var cfg = ConfigForProject(Projects.Of(ProjectPaths(), made.Worktree) ?? repo.Path);
+                // THE SAME BINARY IT WAS ALREADY RUNNING, not whatever the config names now.
+                //
+                // This read `cfg.Agent`, and the bug it caused is worth the whole comment: a lane
+                // started with `--child <stand-in>` came back from promotion as `claude`. In m2 that
+                // meant a REAL model process spawned inside a model-free suite -- and it then held
+                // the new worktree as its working directory, so D-9's undo could not prune it and
+                // git reported "Permission denied". One wrong line produced a quota leak and a
+                // broken undo, and the undo failure is what surfaced it.
+                //
+                // Recovered from the lane's own `shim_spawned` record rather than from a column: a
+                // schema bump for one field costs a migration and every older-store fixture has to
+                // drop it (CLAUDE.md 0.2 carries that trap), which is more risk than this is worth.
+                // The fallback is the config, which is the right answer for every lane that never
+                // overrode its binary.
+                var child = ChildOfLane(row.Id) ?? cfg.Agent;
+                var args = new List<string>();
+                if (IsClaude(child))
+                {
+                    var sys = TicketSystemPrompt(made.Id, row.Title, $"path:{relForClaim}");
+                    args = ClaudeArgs(cfg, cfg.Model, cfg.Effort, sys, acceptEdits: true);
+                    // THE SESSION IS THE POINT. Promotion is only free because `--resume` rebuilds
+                    // the context the agent already has (spike 1: same id, no fork) -- without it
+                    // the operator's sentence and everything the agent worked out would be gone,
+                    // and a promotion that costs the conversation is worse than a refusal.
+                    args.AddRange(Projects.ResumeArgs(row.Session));
+                }
+                // ASK IT TO GO, THEN WAIT FOR IT TO BE GONE. The pipe name is deterministic per
+                // lane, so the new shim cannot own it until the old one has actually exited -- see
+                // `WaitLaneProcessesGone` for what racing this produced.
+                if (_lanes.TryGetValue(row.Id, out var old)) { old.Shutdown(); _lanes.Remove(row.Id); }
+                if (!WaitLaneProcessesGone(row.Id, 15000))
+                    _store.Event("lane_promotion_slow_exit", row.Id,
+                        "the previous shim did not exit in 15s; respawning anyway (the pipe name may still be held)");
+                var (rid, rmsg) = await RespawnLaneAsync(row.Id, row.Title, args, child, made.Worktree);
+                if (rid > 0)
+                {
+                    _store.LaneState(row.Id, "alive");
+                    _store.LanePresence(row.Id, "idle");
+                    _store.Event("lane_promoted", row.Id,
+                        $"ticket {made.Id} branch {made.Branch} worktree {made.Worktree} session={row.Session ?? "-"}");
+                    _store.PaneEvent(row.Id, "announcement",
+                        $"moved into its own checkout for ticket {made.Id} — {made.Branch}, session resumed. " +
+                        $"Undo: dodona lane-stop {row.Id} (abandons the ticket and prunes the worktree)",
+                        null, null, acked: true);
+                    Announce($"[dodona] {row.Title} tried to write in the shared checkout, so it now has ticket " +
+                             $"{made.Id} and a checkout of its own ({made.Worktree}). Undo: dodona lane-stop {row.Id}");
+                }
+                else
+                {
+                    // The ticket and worktree exist and the agent is still where it was. Say so:
+                    // the alternative is a lane that looks promoted and is not.
+                    _store.Event("lane_promotion_respawn_failed", row.Id, $"ticket {made.Id}: {rmsg}");
+                    Announce($"[dodona] {row.Title} has ticket {made.Id} and a worktree at {made.Worktree}, but could " +
+                             $"not be moved into it: {rmsg}. It is still in the shared checkout and still refused there.");
+                }
+            }
+            catch (Exception ex) { _store.Event("lane_promotion_failed", row.Id, $"{ex.GetType().Name}: {ex.Message}"); }
+        });
+
+        return ($"denied: {deniedPath} is in the SHARED CHECKOUT, which is nobody's workspace -- other lanes and " +
+                $"your operator are working in it, and its pre-commit hook refuses commits from it. You now have " +
+                $"ticket {made.Id} and a private checkout of your own, and your session is being resumed there. " +
+                $"Write this file at {moved} instead. Nothing was written to the shared tree.", move);
+    }
+
     /// <summary>Which OPEN ticket, if any, holds a path -- named so a layer-1 refusal can say
     /// who (D-13). The path is put back into workspace-relative claim terms with the same
     /// repository-then-project rungs `claim-check` uses, minus the worktree rung: the caller has
@@ -2887,19 +3092,149 @@ sealed class Daemon
     ///
     /// A store read and a string compare, so it costs nothing on the write path -- which matters,
     /// because this runs behind a PreToolUse hook.</summary>
+    /// <summary>Undo a ticket that should never have existed: prune the worktree, delete the
+    /// branch, mark it abandoned. Claims are released by the state change alone -- the conflict
+    /// query in `Store.FindConflicts` only looks at `state = 'open'`.
+    ///
+    /// Reached from `lane-stop` for a PROMOTED lane (D-9). The prune is retryable and never silent,
+    /// the same discipline `LandOp` uses: a worktree nobody removed is a checkout of an old commit
+    /// sitting in the repository forever.</summary>
+    List<string> AbandonTicket(Store.TicketRow t, string why)
+    {
+        var lines = new List<string>();
+        _store.TicketState(t.Id, "abandoned");
+        var repoPath = RepoOf(t)?.Path ?? (t.RepoPath.Length > 0 ? t.RepoPath : _primary);
+        if (t.Worktree.Length > 0 && Directory.Exists(t.Worktree))
+        {
+            // THE AGENT HAS TO LET GO OF THE DIRECTORY FIRST, and this is measured rather than
+            // guessed: `lane-stop` asks the shim to shut down and returns immediately, so the child
+            // is still alive with the worktree as its WORKING DIRECTORY -- and Windows refuses to
+            // delete a directory that is any process's cwd. git reported exactly that:
+            // "failed to delete '...wt/t2': Permission denied", so the ticket was abandoned while
+            // its worktree and branch survived. An undo that half-happens is the announcement
+            // lying, which is what D-9 exists to prevent.
+            //
+            // A CONDITION WITH A DEADLINE, never a sleep (CLAUDE.md 0.1): what un-sticks it is the
+            // shim's own exit, read off the OS from this lane's recorded pids. On timeout it falls
+            // through and prints the manual command rather than parking -- nothing waits on a person.
+            if (t.LaneId is long stopping) WaitLaneProcessesGone(stopping, 10000);
+            var (wc, wOut) = Git.Run(repoPath, "worktree", "remove", "--force", t.Worktree);
+            if (wc == 0)
+            {
+                if (t.Branch.Length > 0) Git.Run(repoPath, "branch", "-D", t.Branch);
+                _store.Event("worktree_pruned", null, $"ticket {t.Id} abandoned: {why}");
+                lines.Add($"abandoned ticket {t.Id}: worktree pruned, branch {t.Branch} deleted, claims released");
+            }
+            else
+            {
+                // WHAT HOLDS IT, not merely that it is held. Windows says "Permission denied" and
+                // nothing about which process, and CLAUDE.md 0.3 is explicit that a message naming
+                // the wrong cause sends the next reader hunting through their own code. The pids
+                // come from this lane's own shim-info record (section 4: never by process name).
+                var holders = t.LaneId is long hl
+                    ? string.Join(", ", LaneLiveness.Records(Paths.WorkspaceDir(_instanceId))
+                        .Where(r => r.Lane == hl)
+                        .Select(r => $"shim {r.Shim}={(LaneLiveness.PidAlive(r.Shim, "DodonaShim") ? "alive" : "gone")} " +
+                                     $"child {r.Child}={(LaneLiveness.PidAlive(r.Child, "") ? "alive" : "gone")}"))
+                    : "no lane";
+                _store.Event("worktree_prune_failed", null, $"ticket {t.Id}: {wOut} [{holders}]");
+                lines.Add($"abandoned ticket {t.Id} and released its claims, but its worktree could not be pruned: {wOut.Trim()}");
+                lines.Add($"       remove it by hand:  git -C \"{repoPath}\" worktree remove --force \"{t.Worktree}\"");
+            }
+        }
+        else
+        {
+            _store.Event("ticket_abandoned", null, $"ticket {t.Id}: {why} (no worktree on disk)");
+            lines.Add($"abandoned ticket {t.Id}: claims released");
+        }
+        Announce($"[dodona] ticket {t.Id} abandoned ({why}) — worktree and branch removed, claims released");
+        return lines;
+    }
+
+    /// <summary>Wait for the processes a lane is running RIGHT NOW to be gone. Returns false on
+    /// timeout, which is a normal return: the caller then says what it could not do rather than
+    /// parking (CLAUDE.md 0.1 -- a wait names the thing that un-sticks it, and this one names the
+    /// shim's own exit).
+    ///
+    /// THE PIDS ARE SNAPSHOTTED FIRST, and that is the whole trick. `shim-lane&lt;N&gt;.json` is
+    /// rewritten by the next spawn, so re-reading it inside the loop would start waiting on the
+    /// REPLACEMENT process and never finish.
+    ///
+    /// Written for two callers that each got this wrong:
+    ///  * promotion respawns a lane that is still CONNECTED, which nothing else in this codebase
+    ///    does -- `lane-respawn` refuses a connected lane outright. The pipe name is deterministic
+    ///    per lane and is only "free to reclaim" once the old shim is GONE, so respawning
+    ///    immediately after `##shutdown` raced its exit: the new shim could not own the name, the
+    ///    runtime came up disconnected, and the NEXT `##shutdown` then went nowhere -- leaving a
+    ///    shim and an agent alive with the worktree as their working directory.
+    ///  * abandoning a ticket then cannot prune that worktree, because Windows refuses to delete a
+    ///    directory that is any process's cwd. Measured: git said "Permission denied", and the
+    ///    holder diagnostic said `shim 18720=alive child 51408=alive` ten seconds later.</summary>
+    bool WaitLaneProcessesGone(long laneId, int timeoutMs)
+    {
+        var pids = LaneLiveness.Records(Paths.WorkspaceDir(_instanceId)).Where(r => r.Lane == laneId).ToList();
+        if (pids.Count == 0) return true;
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (!pids.Any(r => LaneLiveness.PidAlive(r.Shim, "DodonaShim") || LaneLiveness.PidAlive(r.Child, "")))
+                return true;
+            Thread.Sleep(50);
+        }
+        return false;
+    }
+
+    /// <summary>The agent binary a lane was last spawned with, read off its own `shim_spawned`
+    /// record. Null when there is none to read, and the caller falls back to the project's config.
+    ///
+    /// The detail is written by <see cref="AttachShimAsync"/> as `pipe=... child=... cwd=...`, so
+    /// the value is delimited by ` cwd=` rather than by whitespace -- an agent path with spaces in
+    /// it is ordinary on Windows, and splitting on the space would silently truncate it to
+    /// `C:\Program`.</summary>
+    string? ChildOfLane(long laneId)
+    {
+        var detail = _store.LastEventDetail("shim_spawned", laneId);
+        if (detail is null) return null;
+        var i = detail.IndexOf("child=", StringComparison.Ordinal);
+        if (i < 0) return null;
+        var rest = detail[(i + "child=".Length)..];
+        var j = rest.IndexOf(" cwd=", StringComparison.Ordinal);
+        var child = (j >= 0 ? rest[..j] : rest).Trim();
+        return child.Length > 0 ? child : null;
+    }
+
+    /// <summary>Which REPOSITORY of this workspace holds a path, and the path in the
+    /// workspace-relative claim terms that repository's claims are written in. Longest base first,
+    /// so a repo nested under another wins -- the same ordering `claim-check` needs for the same
+    /// reason. Null when the path is under no repository, which is where promotion stops: there is
+    /// nothing to branch.</summary>
+    (RepoRef Repo, string Rel)? RepoRelOf(string fullPath)
+    {
+        var full = Path.GetFullPath(fullPath).Replace(Path.DirectorySeparatorChar, '/');
+        foreach (var r in Repositories().OrderByDescending(r => r.Path.Length))
+        {
+            if (r.Path.Length == 0) continue;
+            var b = Path.GetFullPath(r.Path).Replace(Path.DirectorySeparatorChar, '/').TrimEnd('/') + "/";
+            if (full.StartsWith(b, StringComparison.OrdinalIgnoreCase))
+                return (r, Claims.Normalize(r.ClaimPrefix + full[b.Length..]));
+        }
+        return null;
+    }
+
     string? ClaimHolder(string fullPath)
     {
         var full = Path.GetFullPath(fullPath).Replace(Path.DirectorySeparatorChar, '/');
-        string? rel = null;
-        var bases = new List<(string Dir, string Prefix)>();
-        bases.AddRange(Repositories().OrderByDescending(r => r.Path.Length).Select(r => (r.Path, r.ClaimPrefix)));
-        bases.AddRange(ProjectPaths().OrderByDescending(pp => pp.Length).Select(pp => (pp, "")));
-        foreach (var (baseDir, basePrefix) in bases)
-        {
-            if (baseDir.Length == 0) continue;
-            var b = Path.GetFullPath(baseDir).Replace(Path.DirectorySeparatorChar, '/').TrimEnd('/') + "/";
-            if (full.StartsWith(b, StringComparison.OrdinalIgnoreCase)) { rel = basePrefix + full[b.Length..]; break; }
-        }
+        // The repository rung is `RepoRelOf`, shared with promotion so the two cannot disagree
+        // about which repo owns a path. The PROJECT rung below it is kept because it is exactly
+        // what the old `_primary` base was: a path inside a project but outside every repo.
+        string? rel = RepoRelOf(fullPath)?.Rel;
+        if (rel is null)
+            foreach (var pp in ProjectPaths().OrderByDescending(pp => pp.Length))
+            {
+                if (pp.Length == 0) continue;
+                var b = Path.GetFullPath(pp).Replace(Path.DirectorySeparatorChar, '/').TrimEnd('/') + "/";
+                if (full.StartsWith(b, StringComparison.OrdinalIgnoreCase)) { rel = full[b.Length..]; break; }
+            }
         if (rel is null) return null;
         rel = Claims.Normalize(rel);
         foreach (var t in _store.Tickets().Where(t => t.State == "open"))
