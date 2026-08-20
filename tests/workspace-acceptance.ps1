@@ -1164,9 +1164,25 @@ PRAGMA user_version = 8;
     $held4Ev = (P3Rows "SELECT detail FROM events WHERE kind='project_unknown' ORDER BY id DESC LIMIT 1").Trim()
     Check 'the_project_hold_offers_every_project_it_knows' `
         (($held4Ev -match [regex]::Escape($p3.ALeaf)) -and ($held4Ev -match [regex]::Escape($p3.BLeaf))) $held4Ev
-    Check 'the_project_hold_says_how_to_answer_it' `
-        ((P3Rows "SELECT body FROM pane_events WHERE body LIKE '%which project%' ORDER BY id DESC LIMIT 1") -match 'lane-start') `
-        (P3Rows "SELECT body FROM pane_events WHERE body LIKE '%which project%' ORDER BY id DESC LIMIT 1")
+    # THE ANNOUNCEMENT LAGS THE EVENT ABOVE, so this waits for it and then asserts on ONE
+    # CAPTURED VALUE. It used to run the same `ORDER BY id DESC LIMIT 1` twice -- once for the
+    # condition and once for the detail -- which is two reads of a table that is still moving:
+    # the condition saw the PREVIOUS rung's hold (still the newest row matching `%which
+    # project%`, and it does not mention `lane-start`), and the detail printed the row that had
+    # landed in the milliseconds between them.
+    #
+    # Seen once in a full `dev gate`, 2026-08-21, while the product was answering correctly --
+    # and it is the worst shape a red can have: a FAILURE WHOSE OWN DETAIL CONTAINS THE STRING
+    # IT SAYS IS MISSING. That sends the next reader hunting through the product for a bug that
+    # is in the check, which is CLAUDE.md 0.2's false-red trap arriving from a new direction and
+    # costs exactly as much as a false green. Never assert on a query and then print a second
+    # one: capture, then assert and report the same value.
+    $held4Say = ''
+    Wait-Until {
+        $script:held4Say = (P3Rows "SELECT body FROM pane_events WHERE body LIKE '%which project%' ORDER BY id DESC LIMIT 1")
+        $script:held4Say -match 'lane-start'
+    } 20000 'the project hold reaching the pane' | Out-Null
+    Check 'the_project_hold_says_how_to_answer_it' ($held4Say -match 'lane-start') ($held4Say -replace '\s+', ' ')
 
     # ---- P3.A: THE `ask` RUNG NOW ASKS SOMEBODY ------------------------------------------
     # THE GAP THIS CLOSES. Phase 3 built this rung and Phase 4 built the overlay that renders a
