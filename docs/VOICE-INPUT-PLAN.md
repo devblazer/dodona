@@ -1,7 +1,22 @@
-# Voice into the dispatcher box — a proposal
+# Voice into the dispatcher box
 
-Status: **proposal, nothing built.** Written 2026-08-20 on the operator's ask: *"add text to
-speech to the app. Toggle listening on and off. Send will still need an enter."*
+Written 2026-08-20 on the operator's ask: *"add text to speech to the app. Toggle listening on
+and off. Send will still need an enter."*
+
+**Status, 2026-08-20: PHASE A IS BUILT AND ON `main`.** The seam, the pure half, the verbs, the
+mic glyph, the persistence and twenty-five checks — `dev test unit` (250 checks) and
+`dev test voice` (18 checks), gate green twice at 13/13 suites. Read §8 for the verdict each
+check carries and §12 for the decisions taken while building it.
+
+**Two things are NOT done, and neither is a detail:**
+
+- **Spike 4 has not been run** (§6, D-V8). It needs a human speaking twenty sentences into a
+  microphone, so no word-error-rate number exists and **the engine is not chosen**.
+- **`SapiRecognizer` compiles and is wired, and has never been shown to hear anything.** It is
+  the seam being real rather than a stub. Nothing in any suite depends on it — every suite runs
+  with `DODONA_UI_MIC=off`, which refuses to construct it at all. **Do not describe dictation as
+  working end to end until someone has spoken to it.** The next step is §6's spike, and it is
+  sixty seconds of talking before it is anything else.
 
 **A note on the name, because it changes what gets built.** "Text to speech" is the machine
 talking; what the rest of the sentence describes — *listening*, a toggle, Enter still sending —
