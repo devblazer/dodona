@@ -248,9 +248,27 @@ Dodona started should be gated.
 The CLI already supports this, and `ClaudeArgs` already uses the neighbouring flag
 (`--setting-sources user` for utility roles):
 
-- **`--settings <file-or-json>`** — "load **additional** settings from". *Additional*, so a
-  project's own tracked settings and hooks keep working; this is not a replacement.
-- **`--setting-sources user,project,local`** — which sources load at all.
+- **`--settings <file-or-json>`** — a **precedence layer, not a replacement**. Confirmed against
+  the settings documentation rather than inferred from the word "additional" in `--help`: the
+  order is Managed → **command-line arguments (temporary session overrides)** → Local → Project
+  → User. So a project's own settings still load and still apply; command-line settings only win
+  where the *same key* collides.
+- **Hooks specifically MERGE, they do not replace.** From the hooks documentation: *"Hook entries
+  merge across settings levels rather than replacing each other"*, and *"All matching hooks run in
+  parallel. If you define the same handler in more than one settings file, it runs once."* So a
+  project's own `PreToolUse` hooks keep firing alongside the gate — which is also what
+  `DeployGate`'s existing comment had already observed for the local-over-project case.
+- **`--setting-sources user,project,local`** — restricts which sources load at all.
+
+Two constraints fall straight out of that, and both are easy to get wrong:
+
+- **Never pass `--setting-sources` for a work lane.** `ClaudeArgs` passes
+  `--setting-sources user` for *utility* roles today, deliberately cutting project context out of
+  a manager. Doing that to a work lane would cut the project's own settings and hooks out of the
+  agent doing the work — manufacturing exactly the problem this decision exists to avoid.
+- **The gate file must contain ONLY the hook.** Command-line settings outrank Local and Project on
+  a colliding key, so any other key in that file silently overrides whatever the project chose.
+  One hook, nothing else, and a comment saying why.
 
 So the gate becomes a per-lane settings file under `<DODONA_HOME>\workspaces\<id>\`, passed as one
 more argument in `ClaudeArgs`. A **file rather than inline JSON**: the command line stays short and
