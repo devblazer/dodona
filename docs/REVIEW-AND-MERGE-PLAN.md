@@ -1,6 +1,6 @@
 # Review and merge — the ordinary developer flow, with a manager as the reviewer
 
-Status: **R1 and R2 BUILT** (2026-08-20); R3-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
+Status: **R1, R2 and R3 BUILT** (2026-08-20); R4-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
 path in code and measuring what the manager is actually told today.
 
 The authority for how a ticket's work gets reviewed and lands on main. It **supersedes
@@ -114,6 +114,7 @@ after the fact (§9).
 | a write outside the ticket's claim | the `PreToolUse` gate (`claim-check`) | the write is inside the agent's **own private checkout** and harms nobody. Blocking it is blocking an agent from doing the work it was given. |
 | a second ticket over a claimed path | `ticket-create` | **two agents on one file is normal.** Files are not the unit of work: a feature spans files and features overlap. |
 | a branch touching outside its claim | the `token-request` backstop | it asks whether reality matched a prediction. §5 reads reality instead. |
+| a claim EXTENDED over another ticket's path | `Store.ClaimExtend` | **added in R3, 2026-08-20.** Not in the original three, and retiring it is forced rather than chosen: leaving it would mean a claim you may freely CREATE over another ticket's path is one you may not EXTEND onto, so the identical end state would be permitted or refused depending on which command you used. It also breaks in practice the moment `ticket-create` stops refusing, because overlapping tickets then exist and every wide extension hits one. A **bad spec** still refuses — that is unparseable input, not an overlap. |
 
 The operator's reasoning, recorded because it is the decision: *"You give the sheriff to agents about
 to work on the same file. That's often the case, very often the case. And if that is problematic in
@@ -207,7 +208,7 @@ more there, not less: it is what a human reviewer reads first.
 |---|---|---|
 | **R1 — BUILT** | §3's flow: `land` merges main into the branch, re-verifies **in the worktree**, then fast-forwards. Verify moves ahead of the merge (absorbs `WORK-ISOLATION` P4). | `m1`: a ticket whose main has moved lands without human intervention; a red verify leaves main's sha **unchanged**. `dev prove` first — the phase most likely to look green against the old order. |
 | **R2 — BUILT** | D-R4's silent-drop check. | `m1`: a branch that resolves by reverting a file main changed is refused, and the message names the file. Fixture: land one ticket, then have a second resolve by discarding it. |
-| **R3** | D-R5: retire the three refusals. Re-aim `m1`'s two gate checks and `m2`'s backstop check rather than deleting them. | `m1`: two tickets over one path both get created; an agent writes freely across its own worktree; the gate still refuses the **shared checkout** (layer 1 untouched). |
+| **R3 — BUILT** | D-R5: retire the three refusals (**four**, see below). Re-aim `m1`'s two gate checks and `m2`'s backstop check rather than deleting them. | `m1`: two tickets over one path both get created; an agent writes freely across its own worktree; the gate still refuses the **shared checkout** (layer 1 untouched). |
 | **R4** | D-R8's record, assembled at completion. Gated on the worktree having changed (D-R13). | `m1`: a finished ticket produces exactly one record carrying diffstat, verify result, drop-check and the agent's report; a chatty lane produces no second one. |
 | **R5** | D-R9/D-R10/D-R12: the manager reads it, may send back, bounded at three, and **cannot approve**. | `brain`: a send-back reaches the lane as input; the fourth round goes to the operator; a manager "approval" grants **nothing**. |
 | **R6** | D-R11: the write-up renders in the approval ask (absorbs `WORK-ISOLATION` P5). | `ui-use`: the ask carries the summary and answering it grants the token, at a live window. |

@@ -75,8 +75,10 @@
     "grants in auto mode. A lane cannot ask: headless -p has no prompt channel, so",
     "anything not pre-approved is denied outright and the agent strands mid-task (it",
     "edits fine, then cannot build what it edited). Measured: PreToolUse hooks STILL fire",
-    "under bypassPermissions, so the claim gate keeps bounding ticket lanes and the",
-    "merge-time backstop still refuses out-of-claim diffs. Set permissionMode to",
+    "under bypassPermissions, so the WRITE GATE keeps refusing any write into a project",
+    "outside a worktree -- every lane, not only ticket lanes. It no longer asks about",
+    "claims: that refusal and the merge-time backstop are both retired (REVIEW-AND-MERGE-",
+    "PLAN D-R5). Set permissionMode to",
     "'acceptEdits' plus an allowedTools list for a repo you would rather keep on a leash."
   ]
 }

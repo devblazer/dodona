@@ -1288,7 +1288,16 @@ sealed class Daemon
                     if (parsed is null) { w.WriteLine($"error: bad claim spec '{s}' (use path:|new:|subtree:|symbol:)"); return false; }
                     claims.Add(parsed.Value);
                 }
-                if (claims.Count == 0) { w.WriteLine("error: at least one --claim required"); break; }
+                // A TICKET WITH NO CLAIM IS LEGAL NOW (`REVIEW-AND-MERGE-PLAN.md` D-R5, R3).
+                // This used to refuse with "at least one --claim required", which made sense
+                // while a claim was a lock: a ticket holding nothing bounded nothing. It is not
+                // a lock any more, so requiring one is requiring ceremony — and it is ceremony a
+                // spoken sentence cannot supply, which is precisely why layer 2's promotion had
+                // to invent a seed claim from whichever path happened to be denied first. That
+                // seed is what stranded a promoted agent on its second file. Claims stay
+                // available as a deliberate annotation (`--claim`, `claim-extend`); what a
+                // branch actually touched is `git diff`, which needs nothing from anybody.
+                if (specs.Count > 0 && claims.Count == 0) { w.WriteLine("error: no usable claim in the given specs"); break; }
 
                 // Git is needed HERE — at the first branch and worktree — not at the door.
                 // A project can be opened, and lanes can run in it, long before it has a
@@ -1355,12 +1364,6 @@ sealed class Daemon
                 // to be inline here and nowhere else; two implementations of "make a ticket" would
                 // drift on exactly the checks that matter -- repo exclusivity and claim conflict.
                 var made = MakeTicket(repo, title, mode, claims, specs);
-                if (made.Conflicts.Count > 0)
-                {
-                    foreach (var cf in made.Conflicts) w.WriteLine($"conflict: {cf}");
-                    w.WriteLine("##exit 1");
-                    break;
-                }
                 if (made.Error is not null)
                 {
                     foreach (var line in made.Error.Split('\n')) w.WriteLine(line);
@@ -1370,6 +1373,16 @@ sealed class Daemon
                 // A single-repo project never sees the word "repo": there is only one, and
                 // naming it would be noise in the ordinary case.
                 w.WriteLine($"ticket {made.Id}{RepoTag(repo.Name)} branch {made.Branch} worktree {made.Worktree}");
+                // AN OVERLAP IS REPORTED AFTER THE TICKET, NOT INSTEAD OF IT (D-R5, R3). This
+                // block used to print `conflict:` lines and exit 1 without creating anything.
+                // The ticket is created now and the overlap is said out loud, in that order, so
+                // the line a script reads first is still the one that names the ticket.
+                if (made.Conflicts.Count > 0)
+                {
+                    w.WriteLine($"note: overlaps {made.Conflicts.Count} open claim(s) — two agents on one file is");
+                    w.WriteLine("      ordinary; duplicated effort is the manager's to raise (D-R5):");
+                    foreach (var cf in made.Conflicts) w.WriteLine($"      overlap: {cf}");
+                }
                 break;
             }
             // ---------------- layer 1: which TREE a write is in (WORK-ISOLATION-PLAN section 3) ----
@@ -1560,17 +1573,16 @@ sealed class Daemon
                     break;
                 }
 
+                // EXTENDED, THEN THE OVERLAP REPORTED -- in that order, and it used to be
+                // instead-of rather than after (D-R5, R3; see Store.ClaimExtend for why this
+                // fourth refusal had to go with the three D-R5 names).
                 var conflicts = _store.ClaimExtend(tid, claims);
+                _store.Event("claim_extended", null, $"ticket {tid} += [{string.Join(", ", specs)}]");
+                w.WriteLine($"extended ticket {tid}");
                 if (conflicts.Count > 0)
                 {
-                    _store.Event("claim_conflict", null, $"extend ticket {tid}: {string.Join(" | ", conflicts)}");
-                    foreach (var cf in conflicts) w.WriteLine($"conflict: {cf}");
-                    w.WriteLine("##exit 1");
-                }
-                else
-                {
-                    _store.Event("claim_extended", null, $"ticket {tid} += [{string.Join(", ", specs)}]");
-                    w.WriteLine($"extended ticket {tid}");
+                    _store.Event("claim_overlap", null, $"extend ticket {tid}: {string.Join(" | ", conflicts)}");
+                    foreach (var cf in conflicts) w.WriteLine($"      overlap: {cf}");
                 }
                 break;
             }
@@ -1685,22 +1697,37 @@ sealed class Daemon
                 var reqPath = reqRepo.Path;
                 var reqPrefix = reqRepo.ClaimPrefix;
                 var reqCfg = Config.For(_primary, reqPath);
+
+                // WHAT THE BRANCH TOUCHED IS RECORDED, NOT JUDGED (D-R5/D-R7, R3).
+                //
+                // This block used to REFUSE the token when the diff touched a path outside the
+                // ticket's declared claim. It was asking whether reality matched a prediction,
+                // and with the prediction retired the question has no content left: the paths
+                // came out of `git diff`, the claim came out of whatever the agent or the
+                // promotion happened to declare up front, and a mismatch means the declaration
+                // was incomplete rather than that anything is wrong.
+                //
+                // It also actively blocked R1's flow. The diff is taken from the merge base, so
+                // once an agent has merged main into its branch itself -- D-R3's path, and the
+                // only way a silent drop can exist -- the base IS main's tip and every file the
+                // branch touched relative to main reads as "outside the claim". R2's own fixture
+                // could not obtain a token while this refusal lived.
+                //
+                // The DIFF ITSELF IS KEPT, because it is the derived ownership signal D-R7 asks
+                // for: a fact, needing no ceremony from the agent, that cannot go stale. It is
+                // recorded for the manager to read (R4/R5) and it gates nothing.
                 var (dc, diff) = Git.Run(reqPath, "diff", "--name-only", $"{reqCfg.Main}...{t.Branch}");
                 if (dc == 0 && diff.Length > 0)
                 {
-                    var ticketClaims = _store.TicketClaims(tid);
-                    var outside = diff.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => Claims.Normalize(reqPrefix + f))   // git speaks repo-relative; claims are workspace-relative
-                        .Where(f => !ticketClaims.Any(cl => Claims.Covers(cl.Kind, cl.Value, f)))
+                    var touched = diff.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(f => Claims.Normalize(reqPrefix + f.Trim()))   // git speaks repo-relative; claims are workspace-relative
+                        .Where(f => f.Length > 0)
                         .ToList();
-                    if (outside.Count > 0)
-                    {
-                        _store.Event("claim_backstop_refused", null, $"ticket {tid} touched outside claim: {string.Join(", ", outside)}");
-                        w.WriteLine($"refused: branch touches paths outside ticket {tid}'s claim: {string.Join(", ", outside)}");
-                        w.WriteLine($"         extend the claim (dodona claim-extend) or revert those changes");
-                        w.WriteLine("##exit 1");
-                        break;
-                    }
+                    var ticketClaims = _store.TicketClaims(tid);
+                    var undeclared = touched.Where(f => !ticketClaims.Any(cl => Claims.Covers(cl.Kind, cl.Value, f))).ToList();
+                    _store.Event("branch_touched", null,
+                        $"ticket {tid} touched {touched.Count} path(s): {string.Join(", ", touched)}" +
+                        (undeclared.Count > 0 ? $" | undeclared: {string.Join(", ", undeclared)}" : ""));
                 }
 
                 var (status, gen, pos) = _store.TokenRequest(tid, TokenIdOf(t), lease, () => Git.Sha(reqPath, reqCfg.Main));
@@ -2895,13 +2922,19 @@ sealed class Daemon
     /// pretending to be evidence of an argv that was never built.
     /// </summary>
     /// <summary>The OUTCOME of trying to materialise a ticket: the row, its branch and its
-    /// worktree, or why not. `Conflicts` is separate from `Error` because a claim conflict is the
-    /// one refusal a caller may want to act on rather than print -- promotion (P2) degrades to a
-    /// refused write naming the holder, while `ticket-create` prints the conflicts.</summary>
+    /// worktree, or why not.
+    ///
+    /// **`Conflicts` is no longer a refusal (D-R5, R3) — it is an OVERLAP REPORT.** It used to
+    /// be separate from `Error` because a claim conflict was the one refusal a caller might act
+    /// on rather than print: promotion degraded to a refused write naming the holder, while
+    /// `ticket-create` printed the conflicts and stopped. Both of those are gone. The list is
+    /// kept, and is still the reason it is a separate field, because a ticket that overlaps
+    /// another open one is worth SAYING — it is the derived signal D-R7 wants in front of the
+    /// manager — but `Ok` no longer consults it, and no caller may refuse on it.</summary>
     sealed record TicketMade(long Id, string Branch, string Worktree,
                              string? Error, bool Exit1, List<string> Conflicts)
     {
-        public bool Ok => Id > 0 && Error is null && Conflicts.Count == 0;
+        public bool Ok => Id > 0 && Error is null;
         public static TicketMade Failed(string error, bool exit1 = true) =>
             new(-1, "", "", error, exit1, new List<string>());
     }
@@ -2949,11 +2982,12 @@ sealed class Daemon
         // Both: the display name the claims were written relative to, and the canonical
         // path that says WHICH repository this is whatever it gets called later (P0.1).
         var (id, conflicts) = _store.TicketCreate(null, title, mode, repo.Name, Repos.Key(repo.Path), claims);
-        if (id < 0)
-        {
-            _store.Event("claim_conflict", null, $"'{title}': {string.Join(" | ", conflicts)}");
-            return new TicketMade(-1, "", "", null, true, conflicts);
-        }
+        // AN OVERLAP IS NOW RECORDED AND CARRIED ON WITH (D-R5). The event stays -- it is the
+        // trail a reviewer reads, and two tickets over one file is a thing worth knowing even
+        // though it is not a thing worth blocking. `TicketCreate` no longer returns -1 for an
+        // overlap at all, so there is nothing to branch on here.
+        if (conflicts.Count > 0)
+            _store.Event("claim_overlap", null, $"'{title}' (ticket {id}) overlaps: {string.Join(" | ", conflicts)}");
 
         // Branch names are workspace-unique because ticket ids are. The worktree
         // lives beside the MEMBER holding this repository -- worktrees are the one
@@ -2981,7 +3015,13 @@ sealed class Daemon
         // what it does not do.
         _store.Event("ticket_created", null,
             $"ticket {id} '{title}' repo {repo.Name} branch {branch} claims [{string.Join(", ", specs)}]");
-        return new TicketMade(id, branch, wt, null, false, new List<string>());
+        // THE OVERLAPS TRAVEL WITH THE SUCCESS NOW. This returned `new List<string>()` while the
+        // overlap branch above returned the real list -- correct while an overlap was a refusal
+        // (the two were mutually exclusive), and silently wrong the moment an overlap became
+        // something a SUCCESSFUL create has to report. Caught by the re-aimed
+        // `the_overlap_is_reported_and_names_the_holder`, which is the whole argument for
+        // re-aiming a check rather than deleting it.
+        return new TicketMade(id, branch, wt, null, false, conflicts);
     }
 
     /// <summary>
@@ -3003,17 +3043,24 @@ sealed class Daemon
     /// </summary>
     (string Message, Action? Move) PromoteLane(Store.LaneRow row, RepoRef repo, string relForClaim, string deniedPath)
     {
+        // NO SEED CLAIM ANY MORE (D-R5, R3), and this is the edge that decision was largely
+        // about. Promotion used to open the ticket holding `path:<the file that was refused>` --
+        // the only path it could possibly know, because a promotion happens on the FIRST write
+        // and the agent has not said what else it intends to touch. The claim gate then bounded
+        // the agent to that one file, so the SECOND file it needed was refused by the very
+        // ticket that had just been created to unblock it. A promoted agent could write exactly
+        // one file. Nothing declared here is nothing to be wrongly bounded by, and what the
+        // branch actually touches is read from `git diff` when it matters (D-R7).
         var made = MakeTicket(repo, row.Title, "on-approval",
-                              new List<(string, string)> { ("path", relForClaim) },
-                              new[] { $"path:{relForClaim}" });
+                              new List<(string, string)>(),
+                              Array.Empty<string>());
         if (!made.Ok)
         {
             // THE PROMOTION CAN FAIL AT THE MOMENT IT IS NEEDED, and it must degrade to a refused
-            // write naming the holder -- never to a silent allow (section 9). A claim conflict is
-            // the expected case: another open ticket already holds this path.
-            var why = made.Conflicts.Count > 0
-                ? string.Join("; ", made.Conflicts)
-                : (made.Error ?? "unknown").Replace("\n", " ").Trim();
+            // write naming the reason -- never to a silent allow (section 9). What can still fail
+            // here is real: repo exclusivity, a repository with no commits, `git worktree add`.
+            // A claim conflict is no longer among them and cannot be: overlap does not refuse.
+            var why = (made.Error ?? "unknown").Replace("\n", " ").Trim();
             _store.Event("promotion_refused", row.Id, $"{deniedPath}: {why}");
             return ($"denied: {deniedPath} is in the SHARED CHECKOUT, not a worktree, and a private " +
                     $"checkout could not be opened for it: {why}. Nothing was written.", null);

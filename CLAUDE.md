@@ -308,8 +308,8 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 |---|---|
 | anything that is a pure function (claims, policy, repo resolution, paths, routing verdicts) | `dev test unit` — ~1 s, no daemon |
 | daemon lifetime, reconnect, drain | `dev test m0` |
-| claims, the gate, the merge token | `dev test m1` |
-| routing, presence, the backstop | `dev test m2` |
+| the write gate, the merge token, the land flow | `dev test m1` |
+| routing, presence, the recorded branch touch | `dev test m2` |
 | the UI as a view over the store | `dev test m3` |
 | publish, hot swap, provenance | `dev test m4 publish` |
 | workspaces, members, repo exclusivity | `dev test workspace` |
@@ -480,8 +480,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 |---|---|
 | `unit` | the pure logic: claim algebra, policy table, repo resolution, canonical paths, the code-only routing decisions |
 | `m0` | daemon death mid-turn, and Phase 3's whole invariant: a wrapper that outlives its agent, a lane with no shim record, the lease, reconcile asking the OS |
-| `m1` | claims, the gate, the merge token |
-| `m2` | routing, the backstop, presence |
+| `m1` | the write gate (layer 1), the merge token, and the land: merge main in, verify, fast-forward, dropped-nothing |
+| `m2` | routing, presence, and what a branch touched (recorded, not judged — the backstop is retired) |
 | `m3` | the UI as a view over the store |
 | `m4` | hot swap (runs a REAL build — the slow one) |
 | `workspace` | identity, repo-exclusivity, multi-repo |
@@ -928,10 +928,29 @@ edited. So lanes default to `bypassPermissions`, matching what the operator's ID
 in auto mode.
 
 **That does not loosen Dodona's guarantees**, and it is measured, not assumed: a PreToolUse
-hook still fires under `bypassPermissions`. The claim gate *is* a PreToolUse hook, so a
-ticket lane is still bounded to its claim, and the merge-time diff backstop still refuses
-anything that slips. The safety model never rested on Claude's permission prompt — it
-rests on the gate (§6 layer 1) and the fence (§6 layer 2).
+hook still fires under `bypassPermissions`. The write gate *is* a PreToolUse hook, so **no
+agent — ticket lane or plain lane — can write into a project outside a worktree**, and it
+fails CLOSED: an unreadable argument, unparseable stdin, a path it cannot find or a daemon
+that does not answer all deny. The safety model never rested on Claude's permission prompt.
+
+**What that gate no longer asks is whether the write is inside the ticket's CLAIM**
+(`docs/REVIEW-AND-MERGE-PLAN.md` D-R5, R3, 2026-08-20). Three refusals went with it — the
+claim question in the hook, `ticket-create` refusing a second ticket over a claimed path,
+and the `token-request` backstop refusing a branch that touched outside its claim — plus
+`claim-extend`'s, which was the same refusal from a fourth direction. **Do not describe a
+ticket lane as bounded to its claim, and do not reintroduce any of them.** The operator's
+decision: two agents about to work on the same file is *"often the case, very often the
+case, and if that is problematic it's the manager's job to say something about it."* Files
+are not the unit of work. Claims survive as an annotation and as a derived signal — what a
+branch actually touched is `git diff`, recorded at `token-request` for a reviewer to read —
+and the guarantee that remains is the tree, which is the one that was doing the work.
+
+One property to preserve if anyone adds a second question to that hook: **it must not
+reintroduce a fail-open.** The claim question failed open and was only tolerable because
+the tree question ran first and refused on doubt; with it gone there is no fail-open path
+left in `GateHook`, and R3 found and closed a live one while removing it — an unparseable
+`--lane` with no `--ticket` used to hit an early `return 0` and allow the write silently,
+before ever reaching the deny written for exactly that case.
 
 A project that wants a leash sets `"permissionMode": "acceptEdits"` in `dodona.json` plus
 an `allowedTools` list. Be aware that list is leakier than it looks: `PowerShell(dotnet

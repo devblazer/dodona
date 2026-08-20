@@ -950,9 +950,21 @@ sealed class Store : IDisposable, ILaneSink
     public record TicketRow(long Id, long? LaneId, string Title, string Branch, string Worktree,
                             string State, string MergeMode, bool Approved, string Repo, string RepoPath);
 
-    /// <summary>Check-and-insert in ONE transaction (§6, §12): claims are intersected
-    /// against every open ticket's claims; no overlap → ticket + claims inserted;
-    /// overlap → nothing inserted, conflicts returned.</summary>
+    /// <summary>Insert the ticket and its claims in ONE transaction (§6, §12), and REPORT any
+    /// overlap with other open tickets rather than refusing it.
+    ///
+    /// **The refusal is gone (`REVIEW-AND-MERGE-PLAN.md` D-R5, R3), and the returned list is
+    /// now information.** Two tickets over one path used to be rejected here — "no overlap →
+    /// inserted; overlap → nothing inserted". The operator's decision retired it: *two agents
+    /// about to work on the same file is often the case, very often the case*, and files are
+    /// not the unit of work — a feature spans files and features overlap. What genuinely
+    /// matters about an overlap is duplicated **effort**, which is a judgement for the manager
+    /// to raise, not a lock for the store to hold.
+    ///
+    /// The `Conflicts` list is still computed and still returned, because it is exactly the
+    /// derived signal D-R7 wants shown to a reviewer. Callers announce it; nobody gates on it.
+    /// `Id` is therefore always a real id now — a caller checking `Id &lt; 0` for "overlap" is
+    /// reading a condition that can no longer happen.</summary>
     public (long Id, List<string> Conflicts) TicketCreate(long? laneId, string title, string mode, string repo,
                                                           string repoPath, List<(string Kind, string Value)> claims)
     {
@@ -963,7 +975,6 @@ sealed class Store : IDisposable, ILaneSink
             // path is the identity a conflict is judged against, the display name is the
             // prefix the claim values carry (Phase 0b).
             var conflicts = FindConflicts(tx, new RepoId(repoPath, repo), claims, excludeTicket: null);
-            if (conflicts.Count > 0) { tx.Rollback(); return (-1, conflicts); }
 
             using var c = _db.CreateCommand();
             c.Transaction = tx;
@@ -994,7 +1005,20 @@ sealed class Store : IDisposable, ILaneSink
             // which means UNSCOPED, which refuses more rather than less.
             var repo = TxRepoId(tx, ticketId);
             var conflicts = FindConflicts(tx, repo, claims, excludeTicket: ticketId);
-            if (conflicts.Count > 0) { tx.Rollback(); return conflicts; }
+            // A FOURTH REFUSAL, NOT LISTED IN D-R5, RETIRED HERE BECAUSE THE OTHER THREE MAKE IT
+            // INCOHERENT (R3, announced rather than done quietly). D-R5's table names three: the
+            // write gate, `ticket-create`, and the `token-request` backstop. This is the same
+            // refusal reached from a fourth direction -- and leaving it would mean a claim you
+            // may freely CREATE over another ticket's path is one you may not EXTEND onto, so
+            // the identical end state would be permitted or refused depending on which command
+            // you happened to use. It also breaks in practice the moment `ticket-create` stops
+            // refusing: overlapping tickets now exist, so every wide extension hits one.
+            //
+            // The principle D-R5 actually settles is that declared claims are not locks
+            // (Appendix A: `claim-extend` exists "for anyone who wants to annotate a ticket by
+            // hand" -- annotation, not locking). So the overlap is returned and the claims are
+            // inserted; the caller reports rather than refuses. A BAD SPEC still refuses, in the
+            // daemon, and that is a different thing: it is unparseable input, not an overlap.
             InsertClaims(tx, ticketId, claims);
             tx.Commit();
             return conflicts;

@@ -880,38 +880,65 @@ int GateDeny(string reason)
 
 int GateHook()
 {
-    // WHAT THIS HOOK IS FOR, AND WHY IT NOW ASKS TWO QUESTIONS IN THIS ORDER
-    // (docs/WORK-ISOLATION-PLAN.md section 3, P1).
+    // WHAT THIS HOOK IS FOR, AND WHY IT NOW ASKS EXACTLY ONE QUESTION
+    // (docs/WORK-ISOLATION-PLAN.md section 3, P1; docs/REVIEW-AND-MERGE-PLAN.md D-R5, R3).
     //
     //   1. WHICH TREE is this write in? Layer 1: no agent writes into a project outside a
-    //      worktree. Unconditional, model-free, every work lane. Refusing is the DEFAULT for a
-    //      write in the shared checkout, so this one fails CLOSED -- see below.
-    //   2. Is it inside the ticket's CLAIM? The pre-existing question, ticket lanes only.
+    //      worktree. Unconditional, model-free, EVERY work lane -- not only ticket lanes.
+    //      Refusing is the DEFAULT, so this one fails CLOSED: an unreadable --lane, unparseable
+    //      stdin, a tool with no path, or a daemon that does not answer all DENY.
     //
-    // The order is the whole reason the fail-opens below are still tolerable. Before this phase
-    // a claim fail-open meant a ticket agent's write slipped past to the merge-time backstop;
-    // layer 1 without ordering would have meant a fail-open putting a write in the operator's
-    // live checkout. Because the tree question is asked FIRST and refuses on doubt, every
-    // remaining fail-open in the claim path can only ever let a write through INSIDE A
-    // WORKTREE -- which is exactly the case the backstop already covers. Do not reorder these.
+    // There used to be a second question -- is the write inside the ticket's CLAIM -- and it is
+    // gone by decision (D-R5), not by accident. See the note where it used to be, at the bottom
+    // of this function, which carries the reasoning and the one property a future second
+    // question must not break. In short: the claim question failed OPEN and was only tolerable
+    // because this one runs first and refuses on doubt; with it gone, this hook has no
+    // fail-open path left at all.
+    //
+    // THE THING TO PRESERVE: every `return 0` below must be a write this function has
+    // POSITIVELY placed inside a worktree, or a lane it was never deployed for. If you find
+    // yourself adding an allow for a case you could not determine, you are undoing layer 1, and
+    // layer 1 is what stands between an agent and the operator's live checkout.
     var ticketArg = One("ticket");
     var laneArg = One("lane");
     _ = long.TryParse(ticketArg ?? "", out var ticket);
     _ = long.TryParse(laneArg ?? "", out var lane);
 
-    // No lane and no ticket means no gate was ever deployed for this invocation, so there is
+    // NO ARGUMENTS AT ALL means no gate was ever deployed for this invocation, so there is
     // nothing to check and nothing to report. This is the one allow that is genuinely not a
-    // bypass -- and it is no longer reachable from a work lane, which is the point of the phase:
-    // `AttachShimAsync` writes `--lane` for every one of them.
-    if (lane <= 0 && ticket <= 0) return 0;
-    if (ticketArg is { Length: > 0 } && ticket <= 0)
-        return GateAllowedUnchecked($"--ticket '{ticketArg}' is not a number (gate misconfigured)", 0, null);
+    // bypass -- and it is not reachable from a work lane: `DeployGate` writes `--lane` for every
+    // one of them (`--ticket` is the optional half).
+    //
+    // ASKED OF THE ARGUMENTS, NOT OF THE PARSED NUMBERS, and that distinction was a live
+    // FAIL-OPEN until R3. This read `if (lane <= 0 && ticket <= 0) return 0;` -- and an
+    // unparseable `--lane` parses to 0, so `--lane not-a-number` with no `--ticket` took this
+    // early return and ALLOWED THE WRITE, silently, before ever reaching the deny two lines
+    // below that exists precisely for it. The deny was unreachable in the exact case it was
+    // written for. Found by the check re-aimed onto this property in R3
+    // (`the_gate_denies_a_lane_argument_it_cannot_read`), which is the argument for re-aiming a
+    // check rather than deleting it: the old assertion was retired, and the new one immediately
+    // caught something the old one could never have looked at.
+    if (laneArg is not { Length: > 0 } && ticketArg is not { Length: > 0 }) return 0;
+
     // A LANE ARGUMENT WE CANNOT READ IS NOT AN ALLOW. It means our own deployment wrote
     // something wrong, and under layer 1 guessing "allow" is a write into the live tree.
     if (laneArg is { Length: > 0 } && lane <= 0)
         return GateDeny($"dodona gate: --lane '{laneArg}' is not a number, so the gate cannot tell which tree " +
                         "this lane owns. This is a Dodona misconfiguration, not your mistake -- report it; " +
                         "the write is refused rather than allowed unchecked.");
+
+    // A gate deployed with a ticket but NO lane can no longer ask anything -- the claim question
+    // it used to answer is gone (D-R5) and the tree question needs the lane. Before R3 this
+    // combination still gated something; now it would be a hook that runs and permits
+    // everything, so it refuses and says why. `DeployGate` cannot produce it, which is exactly
+    // why reaching here means something is wrong rather than unusual.
+    if (lane <= 0)
+        return GateDeny($"dodona gate: deployed with --ticket but no readable --lane, so the gate cannot tell " +
+                        "which tree this write is in. This is a Dodona misconfiguration, not your mistake -- " +
+                        "report it; the write is refused rather than allowed unchecked.");
+
+    if (ticketArg is { Length: > 0 } && ticket <= 0)
+        return GateAllowedUnchecked($"--ticket '{ticketArg}' is not a number (gate misconfigured)", 0, null);
 
     string input;
     try { input = Console.In.ReadToEnd(); }
@@ -1004,21 +1031,44 @@ int GateHook()
         }
     }
 
-    // ---- question 2: the CLAIM. Ticket lanes only, and still fails open ON PURPOSE ----
-    // Bounded by question 1 to writes inside a worktree, which is what the backstop covers.
-    if (ticket <= 0) return 0;
-    var (ccode, creply) = GateAsk(new { cmd = "claim-check", ticket, path });
-    if (ccode == 0) return 0;                                        // covered by the claim
-    if (ccode == 1)
-    {
-        var ws = One("workspace") ?? "";
-        return GateDeny($"outside ticket {ticket}'s claim: {path}. Stay within claimed paths, or request " +
-                        $"an extension: dodona claim-extend {ticket} --claim <spec>" +
-                        (ws.Length > 0 ? $" --workspace '{ws}'" : ""));
-    }
-
-    // Anything else: no daemon, a pipe error, a reply we do not understand.
-    return GateAllowedUnchecked($"claim-check could not answer (exit {ccode}): {Flatten(creply)}", ticket, path);
+    // ---- there is no question 2 any more, and its absence is the decision ----
+    //
+    // This hook used to ask a second question: is the write inside the TICKET'S CLAIM? It is
+    // gone (`REVIEW-AND-MERGE-PLAN.md` D-R5, R3), and deleting it is not a relaxation of the
+    // safety model -- it is the removal of a refusal that was never protecting anything by the
+    // time layer 1 existed.
+    //
+    // The operator's reasoning, which is the decision: *"You give the sheriff to agents about to
+    // work on the same file. That's often the case, very often the case. And if that is
+    // problematic in some way, it's the manager's job to say something about it."* The write was
+    // always inside the agent's OWN PRIVATE CHECKOUT, where it harms nobody; refusing it was
+    // refusing an agent permission to do the work it had been given. It also stranded the
+    // promoted lane of layer 2 on its SECOND file, because promotion seeds a claim from the one
+    // path that happened to be denied first.
+    //
+    // And the claim never solved the problem it was standing in for: two agents with entirely
+    // disjoint claims still both failed `--ff-only` as soon as one landed, because main moved
+    // under the other. What makes concurrent work land is R1's merge flow, not prediction.
+    //
+    // WHAT REMAINS IS THE PART THAT WAS DOING THE WORK. Question 1 above -- the TREE -- is
+    // layer 1, it is unconditional, it covers EVERY work lane rather than only ticket lanes, and
+    // it FAILS CLOSED: unreadable arguments, unparseable stdin, a missing path, a daemon that
+    // does not answer all deny. That is the guarantee the old ordering comment here was
+    // protecting, and it is untouched.
+    //
+    // The ordering argument that comment made is now spent rather than deleted, and it is worth
+    // knowing why it existed: the claim question failed OPEN, so it was only tolerable because
+    // the tree question ran FIRST and refused on doubt -- bounding every claim fail-open to a
+    // write inside a worktree. With the claim question gone there is no fail-open left in this
+    // hook at all. Every path above either allows a write it has positively placed inside a
+    // worktree, or denies. That is strictly stronger than what this file did before, which is
+    // the opposite of what deleting a refusal usually means, and it is the property to preserve
+    // if anyone adds a second question here again: A NEW QUESTION MUST NOT REINTRODUCE A
+    // FAIL-OPEN, because there is no longer an ordering argument to excuse one.
+    //
+    // `claim-check` itself still exists as a daemon command -- it is a useful read, and
+    // `workspace`'s drift check uses it -- but nothing gates on it.
+    return 0;
 }
 
 /// <summary>

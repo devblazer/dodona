@@ -152,7 +152,14 @@ try {
     Check 'queue_advances_within_repo' ($g3 -match 'granted ticket 3') $g3
     Dodona @("token-release", "3") | Out-Null
 
-    # ---- the merge-time backstop compares in workspace terms ----
+    # ---- what the branch touched is RECORDED in workspace terms (D-R5/D-R7, R3) ----
+    #
+    # RE-AIMED from `backstop_uses_workspace_paths`. The property under test is unchanged and is
+    # the reason this check exists: git speaks REPO-relative and claims are WORKSPACE-relative, so
+    # a multi-repo workspace must prefix `other/sneaky.cs` up to `engine/other/sneaky.cs` before
+    # comparing. Getting that wrong compares two different namespaces and the answer is garbage in
+    # whichever direction. Only the observable moved: the token is granted now (the refusal is
+    # retired), and the prefixed path appears in the record a reviewer reads instead.
     $t4 = Dodona @("ticket-create", "--title", "SNEAK", "--claim", "path:engine/src/main.cs")
     $wt4 = "$root\.dodona\wt\t4"
     Set-Content "$wt4\src\main.cs" "// engine v3"
@@ -161,7 +168,10 @@ try {
     Commit $wt4 "claimed + sneaky"
     Dodona @("approve", "4") | Out-Null
     $back = Dodona @("token-request", "4")
-    Check 'backstop_uses_workspace_paths' ($DODONA_EXIT -eq 1 -and $back -match 'engine/other/sneaky.cs') $back
+    Check 'an_out_of_claim_branch_is_no_longer_refused_the_token' ($DODONA_EXIT -eq 0 -and $back -match 'granted ticket 4') $back
+    $touchedWs = ($(Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='branch_touched'") -replace '\s+', ' ')
+    Check 'the_touch_record_uses_workspace_paths' ($touchedWs -match 'engine/other/sneaky\.cs') $touchedWs
+    Dodona @("token-release", "4") | Out-Null
 
     # ---- CLAIMS ARE PER REPOSITORY: the same claim string, twice, in two repos (Phase 0b) ----
     #
@@ -178,10 +188,15 @@ try {
     # ...AND THE DETECTION SURVIVED, which is the half that makes the pair worth anything. A
     # "scoping" that simply stopped comparing symbols would turn the check above green while
     # letting two agents rename one identifier -- the worst outcome available to this phase, and
-    # indistinguishable from the fix unless something asserts the refusal is still reachable.
+    # indistinguishable from the fix unless something asserts the detection is still reachable.
+    #
+    # RE-AIMED from `the_same_claim_string_in_the_SAME_repo_is_still_refused` (R3): the overlap is
+    # REPORTED rather than refused now (D-R5), and it is the detection this check was always
+    # about. Asserting the refusal would assert a lock the operator retired; asserting the report
+    # still fails the instant the scoping stops comparing symbols in one repo.
     $symSame = Dodona @("ticket-create", "--title", "SYM-AGAIN", "--repo", "engine", "--claim", "symbol:Config")
-    Check 'the_same_claim_string_in_the_SAME_repo_is_still_refused' `
-        ($DODONA_EXIT -ne 0 -and $symSame -match 'conflict:' -and $symSame -match 'ticket 5') $symSame
+    Check 'the_same_claim_string_in_the_SAME_repo_is_still_detected' `
+        ($DODONA_EXIT -eq 0 -and $symSame -match 'overlap:' -and $symSame -match 'ticket 5') $symSame
     # (the PATH half of cross-repo independence needs a repository whose NAME has drifted, so it
     # lives in the repo-identity fixture below -- here `engine/...` and `tools/...` never
     # collided in the first place, and a check that cannot fail is worth nothing)
@@ -595,16 +610,23 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
     # repository off the ticket ROW (Store.TxRepoId) rather than being handed one, so it needs
     # its own check. Widening ticket 2 into the directory ticket 1 holds under the repository's
     # OLD name must be refused. Under HEAD this prints "extended ticket 2".
+    # RE-AIMED from `claim_extend_cannot_widen_across_a_rename` (R3): the extension is permitted
+    # now -- Store.ClaimExtend carries why that fourth refusal had to go with D-R5's three -- and
+    # what this check is for is that the conflict SEARCH still resolves the old name to the same
+    # repository. It would go red on a reduction that stopped seeing across the rename, which is
+    # the bug it was written for.
     $dt3d = DodonaBare @("claim-extend", "2", "--claim", "path:$leafA/src/one/a.cs", "--workspace", $drift)
-    Check 'claim_extend_cannot_widen_across_a_rename' `
-        ($DODONA_EXIT -ne 0 -and $dt3d -match 'conflict:' -and $dt3d -match 'ticket 1' -and
-         $dt3d -notmatch 'extended ticket') $dt3d
+    Check 'the_extend_conflict_search_still_sees_across_a_rename' `
+        ($DODONA_EXIT -eq 0 -and $dt3d -match 'overlap:' -and $dt3d -match 'ticket 1') $dt3d
     # ...and the same folder cannot be ticketed twice. A path INSIDE the subtree rather than an
     # identical spelling, deliberately: the reduction has to put a path and a subtree into ONE
     # namespace, not merely fold two equal strings together. Under HEAD this prints "ticket 3".
     $dt3 = DodonaBare @("ticket-create", "--title", "DRIFT3", "--claim", "path:$leafA/src/one/b.cs", "--workspace", $drift)
-    Check 'one_folder_under_two_names_is_one_claim' `
-        ($DODONA_EXIT -ne 0 -and $dt3 -match 'conflict:' -and $dt3 -match 'ticket 1') $dt3
+    # RE-AIMED from the refusal to the report (R3, D-R5). The reduction being tested is the same
+    # one: a path INSIDE the subtree, not an identical spelling, so the two spellings of the
+    # repository must land in ONE namespace before the algebra compares them.
+    Check 'one_folder_under_two_names_is_still_one_claim' `
+        ($DODONA_EXIT -eq 0 -and $dt3 -match 'overlap:' -and $dt3 -match 'ticket 1') $dt3
     # ...while a directory nobody holds is still free, so the scoping did not simply start
     # refusing everything in the repository. VACUOUS BY CONSTRUCTION -- HEAD permits this too --
     # and kept anyway for the same reason as `an_explicit_root_beats_the_inherited_env` above:

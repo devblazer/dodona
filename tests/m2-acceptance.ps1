@@ -45,21 +45,51 @@ try {
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Wait-Daemon $ws.CtlPipe | Out-Null
 
-    # ---- backstop: branch touching outside its claim cannot get the token ----
+    # ---- what the branch touched is RECORDED, not judged (REVIEW-AND-MERGE-PLAN D-R5/D-R7) ----
+    #
+    # RE-AIMED, NOT DELETED. This block used to assert `backstop_refuses_outside_claim`: a branch
+    # touching a path outside its declared claim could not get the merge token. That refusal is
+    # retired -- it asked whether reality matched a prediction, and with the prediction gone the
+    # question has no content. The operator's decision: two agents about to work on the same file
+    # is often the case, and duplicated effort is the manager's to raise, not the store's to lock.
+    #
+    # It also BLOCKED the merge flow R1 introduced. The diff is taken from the merge base, so once
+    # an agent has merged main into its own branch -- D-R3's path, and the only way a silent drop
+    # can exist -- the base is main's tip and every file the branch touched reads as out-of-claim.
+    #
+    # The diff itself is kept and is now the derived ownership signal, so the SAME FIXTURE (a
+    # deliberately out-of-claim edit) asserts the new fact: the token is granted, and the touch is
+    # on the record where a reviewer can read it, naming the undeclared path specifically.
     Dodona @("ticket-create", "--title", "WATER", "--claim", "subtree:src/water") | Out-Null
     $wt1 = "$root\.dodona\wt\t1"
     Set-Content "$wt1\src\water\sim.cs" "// water v2"
-    Set-Content "$wt1\src\sky\box.cs" "// SNEAKY out-of-claim edit"
+    Set-Content "$wt1\src\sky\box.cs" "// out-of-claim edit -- ordinary now, and recorded"
     git -C $wt1 add -A
-    git -C $wt1 -c user.email=t@t -c user.name=t commit -q -m "water + sneaky sky"
+    git -C $wt1 -c user.email=t@t -c user.name=t commit -q -m "water + sky"
     Dodona @("approve", "1") | Out-Null
     $req = Dodona @("token-request", "1")
-    Check 'backstop_refuses_outside_claim' ($DODONA_EXIT -eq 1 -and $req -match 'outside ticket 1' -and $req -match 'src/sky/box.cs') $req
+    Check 'an_out_of_claim_branch_is_granted_the_token' ($DODONA_EXIT -eq 0 -and $req -match 'granted ticket 1') $req
+    $touched = (Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='branch_touched'")
+    $touchedFlat = ($touched -replace '\s+', ' ')
+    Check 'the_branch_touch_is_recorded_for_the_reviewer' ($touchedFlat -match 'src/water/sim\.cs') $touchedFlat
+    Check 'the_record_singles_out_the_undeclared_path' `
+        ($touchedFlat -match 'undeclared:.*src/sky/box\.cs') $touchedFlat
+    Dodona @("token-release", "1") | Out-Null
 
-    # extend the claim -> backstop satisfied
+    # An extension still works and is still worth having -- it is an annotation now rather than a
+    # lock, so after it there is nothing left undeclared to single out.
     Dodona @("claim-extend", "1", "--claim", "path:src/sky/box.cs") | Out-Null
     $req = Dodona @("token-request", "1")
-    Check 'backstop_passes_after_extend' ($req -match 'granted ticket 1') $req
+    Check 'the_token_is_granted_after_an_extend_too' ($req -match 'granted ticket 1') $req
+    # THE LATEST record only, and it must EXIST. Written first as a bare `-notmatch` over every
+    # branch_touched row, `dev prove` called it VACUOUS and was right: against HEAD no such event
+    # is written at all, so "does not contain undeclared" passed on an empty string. A negative
+    # assertion that is satisfied by absent data is the check-that-cannot-fail trap (CLAUDE.md
+    # 0.3), and it is easy to write by accident precisely here, where the new evidence is a row
+    # that used not to exist. So: the row is present, names the path, and no longer flags it.
+    $touched2 = ($(Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='branch_touched' ORDER BY id DESC LIMIT 1") -replace '\s+', ' ')
+    Check 'an_extended_claim_leaves_nothing_undeclared' `
+        (($touched2 -match 'src/sky/box\.cs') -and ($touched2 -notmatch 'undeclared:')) $touched2
     Dodona @("token-release", "1") | Out-Null
 
     # ---- presence derived from tool events, in code ----

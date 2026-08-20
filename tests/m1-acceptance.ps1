@@ -82,9 +82,25 @@ try {
     Check 'tracked_settings_untouched' (-not (Test-Path "$root\.dodona\wt\t1\.claude\settings.json") -or
         ((git -C "$root\.dodona\wt\t1" status --porcelain ".claude/settings.json" | Out-String).Trim() -eq ''))
 
-    # ---- 2. overlapping claim refused at plan time (§6) ----
+    # ---- 2. an overlapping claim is REPORTED at plan time, not refused (D-R5, R3) ----
+    #
+    # RE-AIMED, NOT DELETED. This asserted `overlap_refused_at_plan_time`: a second ticket over a
+    # claimed path could not be created. The operator retired it in their own words -- *"You give
+    # the sheriff to agents about to work on the same file. That's often the case, very often the
+    # case. And if that is problematic in some way, it's the manager's job to say something about
+    # it."* Files are not the unit of work: a feature spans files and features overlap, so the
+    # refusal forbade ordinary development. What is worth knowing about an overlap is duplicated
+    # EFFORT, which is a judgement, so it is said rather than enforced.
+    #
+    # Same fixture, same moment. Two things are asserted where one was: the ticket exists, AND
+    # the overlap is named with the ticket holding it. A create that quietly succeeded without
+    # saying what it overlaps would be this phase's real regression -- the lock removed and the
+    # signal removed with it.
     $t2bad = Dodona @("ticket-create", "--title", "WATER2", "--claim", "path:src/water/sim.cs")
-    Check 'overlap_refused_at_plan_time' ($DODONA_EXIT -eq 1 -and $t2bad -match 'conflict: .*ticket 1') $t2bad
+    Check 'an_overlapping_ticket_is_created' ($DODONA_EXIT -eq 0 -and $t2bad -match 'ticket \d+ branch') $t2bad
+    Check 'the_overlap_is_reported_and_names_the_holder' `
+        ($t2bad -match 'overlap:' -and $t2bad -match 'ticket 1') $t2bad
+    if ($t2bad -match 'ticket (\d+) ') { $t2badId = $Matches[1] } else { $t2badId = 0 }
 
     # ---- 3. disjoint claim runs in parallel ----
     $t2 = Dodona @("ticket-create", "--title", "SKY", "--claim", "subtree:src/sky")
@@ -162,17 +178,30 @@ try {
     $ErrorActionPreference = 'Continue'
     $gerr = Join-Path $out 'gate.err'
     $allow = ($inJson | & cmd /c $hookCmd 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
-    Check 'gate_allows_inside_claim' ($allow.Trim() -eq '') "expected silence, got: $allow"
+    # RE-AIMED from `gate_allows_inside_claim`: the write is allowed because it is INSIDE THE
+    # WORKTREE, which is now the only question this hook asks (D-R5, R3). The claim it happens to
+    # sit inside is no longer consulted.
+    Check 'gate_allows_a_write_inside_the_worktree' ($allow.Trim() -eq '') "expected silence, got: $allow"
 
+    # RE-AIMED from `gate_denies_outside_claim`, and this is the inversion at the heart of R3:
+    # the SAME payload -- a write in the worktree but outside the ticket's declared claim -- was
+    # denied and is now allowed. The write is inside the agent's own private checkout, where it
+    # harms nobody, and refusing it was refusing an agent permission to do the work it was given.
+    # This is the one check in the suite that goes red in BOTH directions: against HEAD because
+    # HEAD denies, and against any future change that puts a claim question back into the gate.
     $deny = ''
     Wait-Until {
         $script:deny = ($outJson | & cmd /c $hookCmd 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
-        $script:deny -match '"permissionDecision":"deny"'
-    } 20000 'the claim gate denies a write outside the claim' | Out-Null
+        $script:deny.Trim() -eq ''
+    } 20000 'the gate allows a write outside the claim but inside the worktree' | Out-Null
     $bypass = Join-Path $wt1 '.dodona-bypass.log'
     $bypassed = if (Test-Path $bypass) { (Get-Content $bypass -Raw).Trim() } else { '' }
-    Check 'gate_denies_outside_claim' ($deny -match '"permissionDecision":"deny"') `
-        "hook=$hookCmd output=[$($deny.Trim())] bypass-log=[$bypassed]"
+    Check 'a_write_outside_the_claim_but_inside_the_worktree_is_allowed' ($deny.Trim() -eq '') `
+        "hook=$hookCmd expected silence, got=[$($deny.Trim())] bypass-log=[$bypassed]"
+    # ...and it is allowed DELIBERATELY, not by failing open. A gate that allowed it because it
+    # could not reach the daemon would look identical from here, so the bypass log must be empty:
+    # every fail-open in this hook writes one, and R3 removed the last path that could.
+    Check 'the_allow_is_a_decision_not_a_fail_open' ($bypassed -eq '') "bypass-log=[$bypassed]"
     # ---- LAYER 1: THE SHARED CHECKOUT IS NOBODY'S WORKSPACE (WORK-ISOLATION-PLAN P1) ----
     #
     # The operator's named failure: nothing in code stopped an agent doing real work in their live
@@ -199,9 +228,19 @@ try {
     Check 'gate_denies_a_plain_lane_writing_the_shared_checkout' `
         ($sharedOut -match '"permissionDecision":"deny"') "hook=$plainHook output=[$($sharedOut.Trim())]"
     # D-13: the refusal has to be ACTIONABLE. "Denied: outside your claim" sends the reader hunting
-    # (CLAUDE.md 0.3), so it names the tree and, when an open ticket holds the path, names it.
-    Check 'the_refusal_names_the_shared_checkout_and_the_holder' `
-        ($sharedOut -match 'SHARED CHECKOUT' -and $sharedOut -match 'ticket 1') "output=[$($sharedOut.Trim())]"
+    # (CLAUDE.md 0.3), so it names the tree it refused and WHERE TO WRITE INSTEAD.
+    #
+    # RE-AIMED from `the_refusal_names_the_shared_checkout_and_the_holder`. It used to require the
+    # holding ticket's number in the message, because a promotion that hit a claim conflict
+    # degraded to naming the holder. R3 removed that failure mode entirely -- overlap does not
+    # refuse, so promotion no longer has a conflict to degrade on -- and the message is now always
+    # the promotion: a ticket of the agent's own and the path inside it. Asserting the old wording
+    # would be asserting a refusal that can no longer happen.
+    Check 'the_refusal_names_the_shared_checkout_and_where_to_write_instead' `
+        ($sharedOut -match 'SHARED CHECKOUT' -and $sharedOut -match 'Write this file at' -and $sharedOut -match 'ticket \d+') `
+        "output=[$($sharedOut.Trim())]"
+    Check 'the_refusal_confirms_nothing_was_written_to_the_shared_tree' `
+        ($sharedOut -match 'Nothing was written') "output=[$($sharedOut.Trim())]"
 
     # AND IT IS NOT A BLANKET DENY -- asserted as a DISCRIMINATION rather than as a bare allow,
     # deliberately. `dev prove` called the bare version VACUOUS and was right to: HEAD allows every
@@ -275,18 +314,27 @@ try {
         ($gFlat -match 'permissionDecision.*deny') $gFlat
     Remove-Item $bypassLog -ErrorAction SilentlyContinue
 
-    # A fail-open is not by itself a gate failure -- layer 2, the merge-time diff backstop,
-    # exists for it. But it must never be SILENT, because then the only evidence is a file
-    # nobody reads (CLAUDE.md §3: a silent degrade is a bug).
+    # RE-AIMED from `gate_never_failed_open_silently`, and the re-aim is forced rather than
+    # chosen. That check read: denied, OR allowed-with-a-trace -- the two acceptable outcomes for
+    # a write outside the claim, where the unacceptable third was allowed-and-silent. It had
+    # already been backwards once and passed during the exact event it was written to catch, which
+    # is why the three outcomes are spelled out above it. R3 makes silence the CORRECT answer for
+    # that payload, so the old form cannot be kept without asserting the opposite of the design.
     #
-    # THIS CHECK WAS BACKWARDS ON ITS FIRST ATTEMPT and passed during the exact event it was
-    # written to catch: it read `$bypassed -eq ''` as "no fail-open happened", when an empty
-    # bypass log is precisely what a SILENT fail-open leaves behind. It printed PASS in the
-    # same run where the gate allowed a write outside the claim and said nothing at all.
-    # The three outcomes are: denied (good), allowed-and-logged (fail-open, but visible), and
-    # allowed-with-nothing-anywhere (the silent one, which is what this must catch).
-    Check 'gate_never_failed_open_silently' (($deny -match 'deny') -or ($bypassed -ne '')) `
-        "the gate allowed a write outside ticket 1's claim and left NO trace: output=[$($deny.Trim())] bypass-log=[$bypassed]"
+    # The property it was really protecting -- THIS GATE NEVER ALLOWS WHAT IT CANNOT DETERMINE --
+    # is what moves here, and R3 makes it stronger rather than weaker: with the claim question
+    # gone there is no fail-open path left in `GateHook` at all. Asserted at the one input that
+    # can still make the gate unable to answer: a `--lane` argument it cannot parse. That is our
+    # own misconfiguration, the case where guessing "allow" would put a write in the operator's
+    # live tree, and it must DENY.
+    $badLaneHook = "`"$dodona`" gate-hook --lane not-a-number --workspace `"$($ws.Id)`""
+    $badLaneOut = ($inJson | & cmd /c $badLaneHook 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
+    Check 'the_gate_denies_a_lane_argument_it_cannot_read' `
+        ($badLaneOut -match '"permissionDecision":"deny"') "output=[$($badLaneOut.Trim())]"
+    # ...and it says whose fault it is, because an agent cannot fix a Dodona misconfiguration and
+    # should not spend a turn trying (CLAUDE.md 0.3: name the real cause).
+    Check 'the_misconfiguration_refusal_says_it_is_not_the_agents_mistake' `
+        ($badLaneOut -match 'misconfiguration') "output=[$($badLaneOut.Trim())]"
 
     # ---- 5. agent work: commit in wt1 (the test IS the agent at the git layer) ----
     Set-Content "$wt1\src\water\sim.cs" "// water sim v2"
@@ -577,12 +625,18 @@ for k, d in db.execute('SELECT kind, detail FROM events ORDER BY id'):
     # straight through it -- enforcement that is switched off while looking armed, which is the
     # exact failure CLAUDE.md 0.3 is about -- and its own gate then denied it every write.
     #
-    # Ticket $t3id (WATER-NEXT) is the only one still open, holding subtree:src/water. Under
-    # HEAD this ticket-create SUCCEEDS and prints "ticket N branch ticket/N".
+    # Ticket $t3id (WATER-NEXT) holds subtree:src/water, so a whole-tree claim overlaps it.
+    #
+    # RE-AIMED from `the_whole_tree_claim_conflicts_with_an_open_claim`: the OVERLAP is what this
+    # check is really about -- the algebra answering "yes, these intersect" for a value that
+    # normalises to the empty string -- and that is still exactly what is asserted. What changed
+    # is only what the daemon DOES with the answer: report it (D-R5) instead of refusing. The
+    # algebra bug this section was written for would still be caught, because a `subtree:/` that
+    # matched nothing would produce no overlap line at all.
     if ($t3 -match 'ticket (\d+) ') { $t3id = $Matches[1] } else { $t3id = 0 }
     $whole = Dodona @("ticket-create", "--title", "WHOLE", "--claim", "subtree:/")
-    Check 'the_whole_tree_claim_conflicts_with_an_open_claim' `
-        ($DODONA_EXIT -ne 0 -and $whole -match 'conflict:' -and $whole -match "ticket $t3id") $whole
+    Check 'the_whole_tree_claim_is_created_and_its_overlap_reported' `
+        ($DODONA_EXIT -eq 0 -and $whole -match 'overlap:' -and $whole -match "ticket $t3id") $whole
     # An empty value is the whole tree for a SUBTREE and nonsense everywhere else: `path:/`
     # names no file. HEAD created a ticket holding a claim over nothing and reported success --
     # P0.5's silently-dropped spec reached from the other side. Refused by name now.
@@ -591,11 +645,17 @@ for k, d in db.execute('SELECT kind, detail FROM events ORDER BY id'):
         ($DODONA_EXIT -ne 0 -and $emptyPath -match 'bad claim spec') $emptyPath
     # The other half, and the one that makes a whole-tree claim usable rather than only
     # blocking: its holder must be allowed to write anywhere in the tree. Extended onto the open
-    # ticket rather than ticketed, because a whole-tree claim conflicts with every other open
-    # ticket by construction and claim-extend excludes the ticket's own claims.
+    # ticket rather than ticketed, because claim-extend excludes the ticket's own claims.
+    #
+    # RE-AIMED from `the_whole_tree_is_claimable_when_nothing_else_holds_anything`. That name
+    # encoded the precondition the old refusal imposed -- it only succeeded when nothing else held
+    # anything -- and R3 removes that condition from every direction, including this one
+    # (Store.ClaimExtend carries why the fourth refusal had to go with D-R5's three). So the
+    # extension now succeeds regardless, and what it overlaps is said rather than enforced.
     $wide = Dodona @("claim-extend", "$t3id", "--claim", "subtree:/")
-    Check 'the_whole_tree_is_claimable_when_nothing_else_holds_anything' `
+    Check 'a_wide_extension_succeeds_whatever_else_is_held' `
         ($DODONA_EXIT -eq 0 -and $wide -match "extended ticket $t3id") $wide
+    Check 'the_wide_extension_still_names_what_it_overlaps' ($wide -match 'overlap:') $wide
     $wideCovered = Dodona @("claim-check", "$t3id", "$root\.dodona\wt\t$t3id\src\sky\box.cs")
     Check 'the_whole_tree_covers_a_file_no_other_claim_names' `
         ($DODONA_EXIT -eq 0 -and $wideCovered -match 'covered:') $wideCovered
@@ -609,7 +669,7 @@ print('\n'.join(k for (k,) in db.execute('SELECT kind FROM events ORDER BY id'))
     # R1 added three: the daemon merging main in, a conflict it refused to guess at, and a
     # verify that went red BEFORE the ref moved (which under the old order was unreachable --
     # verify_red could only ever be written after main had already advanced).
-    foreach ($k in 'ticket_created','claim_conflict','token_refused_unapproved','token_granted','token_queued','landed','verify_green','token_expired_reclaimed','worktree_pruned','land_merged_main','land_conflict','verify_red') {
+    foreach ($k in 'ticket_created','claim_overlap','token_refused_unapproved','token_granted','token_queued','landed','verify_green','token_expired_reclaimed','worktree_pruned','land_merged_main','land_conflict','verify_red') {
         Check "event_$k" ([bool]($events -match $k))
     }
 
