@@ -4596,6 +4596,91 @@ sealed class Daemon
     }
 
 
+    /// <summary>
+    /// The merge that brought <paramref name="main"/> into <paramref name="branch"/>: returns
+    /// that merge commit and its FIRST parent — the branch's state immediately before main
+    /// arrived. Empty strings when no such merge exists.
+    ///
+    /// **This replaced a fork-point calculation that was measured wrong, and the way it was
+    /// wrong is worth keeping.** `REVIEW-AND-MERGE-PLAN` §10 says the drop check must diff
+    /// against the merge base rather than main's tip, and the reason is sound: once main has
+    /// been merged in, main IS an ancestor of the branch, so `merge-base main branch` returns
+    /// main's own tip and a branch that reverted main's change looks identical to one that
+    /// never saw it. The first implementation therefore recovered a fork point from the
+    /// branch's merge commits — and took the OLDEST one, reasoning that a wider window catches
+    /// more.
+    ///
+    /// It caught nothing. `git rev-list --first-parent --merges &lt;branch&gt;` walks the whole
+    /// ancestry, and a ticket branch's ancestry CONTAINS MAIN'S OWN MERGE HISTORY — every
+    /// previous ticket that landed. So "oldest merge" resolved to an ancient merge on main and
+    /// the fork point came out as the repository's **init commit**, identically for every
+    /// ticket (measured: `fork=adc8bfb` for tickets 1 through 7). Against init the dropped file
+    /// did not exist yet, so the pre-image comparison could never match and the check passed
+    /// everything. A check that is blind while looking armed — CLAUDE.md §0.3 exactly.
+    ///
+    /// So there is no fork point here at all. The reference is **M^1**, the branch tip just
+    /// before the merge, which is defined by the merge itself and cannot be confused with
+    /// anything in main's history. §10's intent is honoured — the comparison is emphatically
+    /// not against main's tip — while the quantity used is one git can hand over exactly.
+    /// The NEWEST qualifying merge is the right one: anything reverted before an earlier merge
+    /// was brought back in by the later one.
+    /// </summary>
+    static (string Merge, string PreMerge) MainMergeOnBranch(string workDir, string main, string branch)
+    {
+        var (lc, list) = Git.Run(workDir, "rev-list", "--first-parent", "--merges", branch);
+        if (lc != 0) return ("", "");
+        foreach (var raw in list.Split('\n', StringSplitOptions.RemoveEmptyEntries))   // newest first
+        {
+            var m = raw.Trim();
+            if (m.Length == 0) continue;
+            var (pc, parents) = Git.Run(workDir, "rev-list", "--parents", "-n", "1", m);
+            if (pc != 0) continue;
+            var parts = parents.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 3) continue;             // <self> <p1> <p2>...
+            var p1 = parts[1]; var p2 = parts[2];
+            // The second parent must be part of main — otherwise this is some other merge the
+            // branch carries (including one it inherited from main itself, which is what made
+            // the first version of this function useless).
+            if (Git.Run(workDir, "merge-base", "--is-ancestor", p2, main).Code != 0) continue;
+            // ...and the merge must be the branch's OWN, not one it inherited: an inherited
+            // merge is an ancestor of main, and the branch did not perform it.
+            if (Git.Run(workDir, "merge-base", "--is-ancestor", m, main).Code == 0) continue;
+            return (m, p1);
+        }
+        return ("", "");
+    }
+
+    /// <summary>
+    /// Files where main's change has gone missing from the branch (D-R4). A path counts as a
+    /// silent drop when all three hold: the merge changed it (so main contributed something
+    /// there), and the branch's final version is byte-identical to the PRE-MERGE version, and
+    /// therefore main's contribution is simply absent. That is a fact, not a judgement, and it
+    /// is the one failure an agent's own report will never mention — the tests still pass,
+    /// because nothing references the discarded code.
+    ///
+    /// A resolution that COMBINES both sides differs from the pre-merge version, so it is not
+    /// flagged. That is the common, legitimate case and it must stay quiet.
+    /// </summary>
+    static List<string> SilentDrops(string workDir, string preMerge, string mergeCommit, string branch)
+    {
+        var drops = new List<string>();
+        var (dc, changed) = Git.Run(workDir, "diff", "--name-only", preMerge, mergeCommit);
+        if (dc != 0) return drops;
+        foreach (var raw in changed.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var f = raw.Trim();
+            if (f.Length == 0) continue;
+            // A missing path is a real state, not an error: main may have DELETED the file, and
+            // a branch that put its copy back has dropped that deletion too. ShaOrEmpty makes
+            // absence a value rather than an exception, which is why it exists (see Git.cs).
+            var atPre = Git.ShaOrEmpty(workDir, $"{preMerge}:{f}");
+            var atMerge = Git.ShaOrEmpty(workDir, $"{mergeCommit}:{f}");
+            var atBranch = Git.ShaOrEmpty(workDir, $"{branch}:{f}");
+            if (atMerge != atPre && atBranch == atPre) drops.Add(f);
+        }
+        return drops;
+    }
+
     /// <summary>The land (§7, and `docs/REVIEW-AND-MERGE-PLAN.md` §3): the daemon executes
     /// the one atomic ref advance — but it now does the ordinary developer flow first
     /// (D-R1), in this order and under the merge token throughout:
@@ -4724,6 +4809,41 @@ sealed class Daemon
             // rather than letting the land look like it did the flow.
             mergeMsg = "no worktree: could not merge " + cfg.Main + " in";
             _store.Event("land_no_worktree", null, $"ticket {tid}: {t.Worktree}");
+        }
+
+        // ---- D-R4: the SILENT DROP, which is the failure a report will not mention ---------
+        //
+        // The dangerous resolution is not the messy one. It is the quiet one: the agent
+        // resolves by discarding what main brought in, and the tests still pass because
+        // nothing references the discarded code. Nobody's judgement is needed for that — it is
+        // mechanically detectable — and no report will mention it, which is why code asks.
+        {
+            var dropDir = t.Worktree.Length > 0 && Directory.Exists(t.Worktree) ? t.Worktree : repoPath;
+            var (mergeCommit, preMerge) = MainMergeOnBranch(dropDir, cfg.Main, t.Branch);
+            if (mergeCommit.Length == 0)
+            {
+                // No merge of main on this branch, so main contributed nothing here for the
+                // branch to have discarded — there is genuinely nothing to check, which is a
+                // different thing from a check that failed to run. Recorded either way, because
+                // a check that quietly does nothing is the fail-open this codebase has paid for
+                // twice (§3's dead routing ladder, GateHook's BOM).
+                _store.Event("land_drop_check_moot", null, $"ticket {tid}: no merge of {cfg.Main} on {t.Branch}, nothing to drop");
+            }
+            else
+            {
+                var drops = SilentDrops(dropDir, preMerge, mergeCommit, t.Branch);
+                _store.Event("land_drop_check", null,
+                    $"ticket {tid}: {drops.Count} drop(s) against pre-merge {preMerge[..Math.Min(8, preMerge.Length)]} (merge {mergeCommit[..Math.Min(8, mergeCommit.Length)]})");
+                if (drops.Count > 0)
+                {
+                    var names = string.Join(", ", drops);
+                    _store.Event("land_silent_drop", null, $"ticket {tid}: reverted {cfg.Main}'s change to {names} (pre-merge {preMerge[..Math.Min(8, preMerge.Length)]})");
+                    Announce(t, $"ticket {tid} did not land: it reverts {cfg.Main}'s change to {names}. If that resolution was deliberate, re-apply it as an edit on top of {cfg.Main}'s version rather than as the pre-merge file.");
+                    return $"refused: {t.Branch} reverts {cfg.Main}'s change to {names} — the branch carries the PRE-MERGE version of " +
+                           $"{(drops.Count == 1 ? "that file" : "those files")}, so merging {cfg.Main} in delivered the change and something put it back. " +
+                           $"Take {cfg.Main}'s version (or resolve on top of it) and land again.";
+                }
+            }
         }
 
         // ---- D-R1 step 2: verify the MERGED RESULT, in the worktree, BEFORE the ref moves --

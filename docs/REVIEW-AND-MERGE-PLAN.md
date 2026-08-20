@@ -1,6 +1,6 @@
 # Review and merge — the ordinary developer flow, with a manager as the reviewer
 
-Status: **R1 BUILT** (2026-08-20); R2-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
+Status: **R1 and R2 BUILT** (2026-08-20); R3-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
 path in code and measuring what the manager is actually told today.
 
 The authority for how a ticket's work gets reviewed and lands on main. It **supersedes
@@ -206,7 +206,7 @@ more there, not less: it is what a human reviewer reads first.
 | | what | proof |
 |---|---|---|
 | **R1 — BUILT** | §3's flow: `land` merges main into the branch, re-verifies **in the worktree**, then fast-forwards. Verify moves ahead of the merge (absorbs `WORK-ISOLATION` P4). | `m1`: a ticket whose main has moved lands without human intervention; a red verify leaves main's sha **unchanged**. `dev prove` first — the phase most likely to look green against the old order. |
-| **R2** | D-R4's silent-drop check. | `m1`: a branch that resolves by reverting a file main changed is refused, and the message names the file. Fixture: land one ticket, then have a second resolve by discarding it. |
+| **R2 — BUILT** | D-R4's silent-drop check. | `m1`: a branch that resolves by reverting a file main changed is refused, and the message names the file. Fixture: land one ticket, then have a second resolve by discarding it. |
 | **R3** | D-R5: retire the three refusals. Re-aim `m1`'s two gate checks and `m2`'s backstop check rather than deleting them. | `m1`: two tickets over one path both get created; an agent writes freely across its own worktree; the gate still refuses the **shared checkout** (layer 1 untouched). |
 | **R4** | D-R8's record, assembled at completion. Gated on the worktree having changed (D-R13). | `m1`: a finished ticket produces exactly one record carrying diffstat, verify result, drop-check and the agent's report; a chatty lane produces no second one. |
 | **R5** | D-R9/D-R10/D-R12: the manager reads it, may send back, bounded at three, and **cannot approve**. | `brain`: a send-back reaches the lane as input; the fourth round goes to the operator; a manager "approval" grants **nothing**. |
@@ -246,7 +246,24 @@ the review. R7 is the foreign-repo case and can wait.
   pointing here. (`WORK-ISOLATION-PLAN` Appendix A already carries this; it is now R4's problem.)
 - **The silent-drop check must diff against the MERGE BASE**, not against main's tip after the merge.
   Against the tip, a branch that reverted main's change and a branch that never saw it look
-  identical.
+  identical. **The first half of that is right and the prescription is wrong — CORRECTED IN R2,
+  2026-08-20, after it was built as written and measured blind.** "Not against main's tip" is
+  correct and load-bearing. But "the merge base" cannot be obtained once main has been merged in:
+  `merge-base main branch` *is* main's tip at that point, so the naive form is the very thing the
+  trap warns about. Recovering a fork point from the branch's merge commits does not rescue it
+  either, and this is the part that had to be measured: **a ticket branch's ancestry contains
+  main's own merge history**, so walking `rev-list --first-parent --merges <branch>` finds the
+  merges of every previously landed ticket, and the oldest resolved to the repository's **init
+  commit** — identically for tickets 1 through 7. Against init the dropped file did not exist yet,
+  the pre-image never matched, and the check passed everything while looking armed.
+
+  The reference point that works is **`M^1`**: the branch tip immediately before the merge that
+  brought main in (`MainMergeOnBranch` finds the newest such merge and returns it with its first
+  parent). A path is a drop when the merge changed it and the branch's final version is
+  byte-identical to `M^1`'s. That is defined by the merge itself, cannot be confused with anything
+  in main's history, and honours the trap's actual intent. Two guards keep it honest: the merge's
+  second parent must be an ancestor of main, and the merge itself must **not** be — otherwise an
+  inherited merge qualifies and the blindness returns.
 - **`land` needs `main` checked out in the shared checkout** and refuses otherwise. True while
   CLAUDE.md §0.0 keeps the operator there, but it must **announce** rather than fail quietly.
 - **A conflicted merge leaves the worktree dirty.** Anything that gives up must `git merge --abort`,

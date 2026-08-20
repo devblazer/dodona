@@ -457,6 +457,99 @@ try {
     $landClean = Dodona @("land", "$t7id")
     Check 'it_lands_once_the_work_is_committed' ($landClean -match "landed ticket $t7id") $landClean
 
+    # ---- 10e. R2/D-R4: the SILENT DROP -- resolving by discarding what main brought in ------
+    #
+    # The plan's own recipe: land one ticket, then have a second resolve by discarding it. This
+    # is the failure a report will not mention, because the tests still pass -- nothing
+    # references the discarded code -- and the agent's write-up says "merged main, resolved a
+    # conflict", which is true.
+    #
+    # THE FIXTURE ORDER IS THE WHOLE FIXTURE. The branch must be cut BEFORE main gets the
+    # change it is going to drop, or there is nothing to drop.
+    #
+    # AND MAIN MOVES BY A DIRECT COMMIT HERE, NOT BY LANDING A SECOND TICKET, which is a
+    # departure from the plan's suggested recipe with a measured reason. Written that way
+    # first, ticket B could not get the merge token at all: `token-request`'s claim backstop
+    # runs BEFORE the merge, and once the agent has merged main in itself (D-R3's path, and the
+    # only way a drop can exist) `git diff main...branch` is taken from main's tip, so every
+    # file the branch touched relative to main reads as outside its claim. Two tickets cannot
+    # both claim keep.cs either -- the plan-time overlap refusal forbids it -- so there is no
+    # legal shape for the two-ticket version while that backstop lives. R3 deletes it; R2 is
+    # not the phase to work around it, and the fixture asserts the same fact either way. The
+    # commit-to-main-directly move is one section 10c already uses.
+    New-Item -ItemType Directory -Force "$root\src\drop" | Out-Null
+    Set-Content "$root\src\drop\keep.cs" "// keep v1"
+    git -C $root add -A
+    git -C $root -c user.email=t@t -c user.name=t commit -q -m "keep v1"
+    $tB = Dodona @("ticket-create", "--title", "DROPPER", "--claim", "subtree:src/drop")
+    if ($tB -match 'ticket (\d+) ') { $tBid = $Matches[1] }
+    $wtB = "$root\.dodona\wt\t$tBid"
+    Check 'the_dropper_ticket_was_created' ([bool]$tBid) $tB
+    # main's other developer changes keep.cs, after B was cut.
+    Set-Content "$root\src\drop\keep.cs" "// keep v2 -- main's change"
+    git -C $root add -A
+    git -C $root -c user.email=t@t -c user.name=t commit -q -m "keep v2"
+    Check 'main_carries_the_change_that_is_about_to_be_dropped' `
+        ((Get-Content "$root\src\drop\keep.cs" -Raw) -match 'keep v2') 'main should hold v2'
+    # B does its own work, merges main in ITSELF (D-R3's agent-resolves path), and then quietly
+    # puts keep.cs back the way it was. No conflict is involved: keep.cs changed on ONE side, so
+    # git merges it cleanly and the revert is a separate, deliberate, invisible edit.
+    Set-Content "$wtB\src\drop\other.cs" "// other work"
+    git -C $wtB add -A
+    git -C $wtB -c user.email=t@t -c user.name=t commit -q -m "other work"
+    git -C $wtB -c user.email=t@t -c user.name=t merge main -m "merge main into B" | Out-Null
+    Check 'the_merge_brought_mains_change_into_the_branch' `
+        ((Get-Content "$wtB\src\drop\keep.cs" -Raw) -match 'keep v2') 'the merge should have delivered v2'
+    Set-Content "$wtB\src\drop\keep.cs" "// keep v1"        # the silent drop
+    git -C $wtB add -A
+    git -C $wtB -c user.email=t@t -c user.name=t commit -q -m "tidy up"
+    Dodona @("approve", "$tBid") | Out-Null
+    Dodona @("token-request", "$tBid") | Out-Null
+    $mainBeforeDrop = (git -C $root rev-parse main)
+    $landB = Dodona @("land", "$tBid")
+    Check 'a_silent_drop_is_refused' ($DODONA_EXIT -eq 1 -and $landB -match 'reverts') $landB
+    Check 'the_drop_refusal_names_the_file' ($landB -match 'src/drop/keep\.cs') $landB
+    Check 'a_silent_drop_leaves_main_unchanged' ($mainBeforeDrop -eq (git -C $root rev-parse main)) $mainBeforeDrop
+    # And it must be judged against the FORK POINT, not main's tip. Against the tip this branch
+    # is indistinguishable from one that never saw main's change -- which is why the check
+    # recovers the fork point from the branch's own merge commit (plan §10). If that recovery
+    # ever regresses, this event stops being written and the refusal above goes with it.
+    # NO ESCAPED DOUBLE QUOTES IN A python -c BLOCK. PowerShell does not treat \" as an escape
+    # inside a double-quoted string (its escape is the backtick), so python receives a literal
+    # backslash-quote and dies on a syntax error -- and `python -c` failing prints to stderr and
+    # yields an EMPTY string, which reads exactly like "the event was never written". Two checks
+    # here were red for that reason and not for any reason in the product. Single quotes only,
+    # and the filtering happens in PowerShell where quoting is not a hazard.
+    $allEvents = (python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+for k, d in db.execute('SELECT kind, detail FROM events ORDER BY id'):
+    print((k or '') + ' :: ' + (d or ''))
+") | Out-String
+    $dropEvents = (($allEvents -split "`n") | Where-Object { $_ -match '^land_silent_drop ::' }) -join "`n"
+    Check 'the_drop_check_recorded_the_pre_merge_it_compared_against' ($dropEvents -match 'pre-merge [0-9a-f]{8}') $dropEvents
+    Check 'the_drop_check_did_not_quietly_skip' ($dropEvents -match 'src/drop/keep\.cs') $dropEvents
+    # The reference point is NOT main's tip and NOT a merge-base. Both are wrong here and the
+    # second one was MEASURED wrong: recovering a "fork point" from the branch's merge history
+    # resolved to the repository's INIT COMMIT for every ticket, because a ticket branch's
+    # ancestry contains main's own merge history. Against init the dropped file did not exist,
+    # the pre-image never matched, and the check passed everything while looking armed. So the
+    # event names the pre-merge commit, and this check is what keeps it honest.
+    $mootEvents = (($allEvents -split "`n") | Where-Object { $_ -match '^land_drop_check ::' }) -join "`n"
+    Check 'the_drop_check_reports_what_it_examined_on_a_clean_land' ($mootEvents -match 'drop\(s\) against pre-merge') $mootEvents
+    # Re-applying main's version clears it -- the refusal is a correction, not a dead end.
+    Set-Content "$wtB\src\drop\keep.cs" "// keep v2 -- main's change"
+    git -C $wtB add -A
+    git -C $wtB -c user.email=t@t -c user.name=t commit -q -m "restore main's keep.cs"
+    $landB2 = Dodona @("land", "$tBid")
+    Check 'it_lands_once_mains_change_is_restored' ($landB2 -match "landed ticket $tBid") $landB2
+    # NO FALSE POSITIVE: a resolution that combines both sides differs from the fork point and
+    # from main, so it must stay quiet. Section 10c already lands exactly such a branch
+    # ("pane resolved by the agent"), and its checks would have gone red here if this check
+    # flagged ordinary resolutions -- asserted directly so the coupling is not accidental.
+    Check 'an_ordinary_resolution_is_not_flagged_as_a_drop' `
+        ($landResolved -match "landed ticket $t6id" -and $landResolved -notmatch 'reverts') $landResolved
+
     # ---- 11. lease expiry fences a dead holder (§7/§12) ----
     $t4 = Dodona @("ticket-create", "--title", "EXPIRY", "--claim", "path:README.md")
     if ($t4 -match 'ticket (\d+) ') { $t4id = $Matches[1] }
