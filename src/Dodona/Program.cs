@@ -220,6 +220,8 @@ async Task<int> Dispatch() => cmd switch
     "token-status" => Client(new { cmd = "token-status" }),
     "land" => LandCli(long.Parse(pos[0])),
     "land-status" => pos.Count > 0 ? Client(new { cmd = "land-status", ticket = long.Parse(pos[0]) }) : Fail("land-status <ticket>"),
+    // R4's completion record (D-R8). An observation, so it is on the no-summon list below.
+    "ticket-record" => pos.Count > 0 ? Client(new { cmd = "ticket-record", ticket = long.Parse(pos[0]) }) : Fail("ticket-record <ticket>"),
     "ack" => Client(new { cmd = "ack", id = long.Parse(pos[0]) }),
     "undo-route" => Client(new { cmd = "undo-route", id = long.Parse(pos[0]) }),
     "ui" => Ui(),
@@ -1528,7 +1530,10 @@ int Client(object request, string? pipeName = null, List<string>? capture = null
         // the command people reach for to ASK A QUESTION is changed.
         // `land-status` is on the list for the same reason, and `neverSummon` carries it for the
         // poll inside LandCli — where `cmd` is still "land", so the name test alone would miss it.
-        var neverSummons = neverSummon || cmd is "stop-daemon" or "status" or "land-status";
+        // `ticket-record` joins them for the same reason and one more: it is what a manager (R5)
+        // and a script will poll, so a version of it that summoned would turn "read the record"
+        // into four warm-up model processes on a machine nobody asked to wake.
+        var neverSummons = neverSummon || cmd is "stop-daemon" or "status" or "land-status" or "ticket-record";
         if (!isWorkspaceCtl || neverSummons || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
             return Fail(
                 // Say what IS known and what starts nothing, so the answer is useful rather than
@@ -1707,6 +1712,10 @@ static void Help() => Console.WriteLine("""
               the whole of it; this command polls the outcome and exits with it. --no-wait
               returns as soon as the land has started.
       dodona land-status <ticket>    state=running | state=done, and the outcome. Starts nothing.
+      dodona ticket-record <ticket>  the ticket's completion record as JSON (R4/D-R8): branch,
+              worktree, diffstat, the drop check, the verify result AS RECORDED (never run
+              here -- D-R15), and the agent's own end-of-turn report. Written when a turn ends
+              and the worktree has changed since the last one. Starts nothing.
     hot swap (§13/§14 — nothing interrupted, no session lost):
       dodona gate-hook --lane <n> [--ticket <n>] [--workspace <id>] [--worktree <dir>]
               the write gate, run BY CLAUDE CODE and not by hand: reads a PreToolUse

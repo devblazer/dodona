@@ -1,6 +1,6 @@
 # Review and merge — the ordinary developer flow, with a manager as the reviewer
 
-Status: **R1, R2, R3 and R3.5 BUILT** (2026-08-20); R4-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
+Status: **R1, R2, R3, R3.5 and R4 BUILT** (2026-08-20); R5-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
 path in code and measuring what the manager is actually told today.
 
 The authority for how a ticket's work gets reviewed and lands on main. It **supersedes
@@ -256,6 +256,50 @@ Four things worth knowing before touching it:
   read and wrote the same buckets. `_brainLo` already carried that reasoning for the same reason;
   `_lanes` only became unsafe when something long-running left the pipe.
 
+**D-R15. THE RECORD REPORTS THE VERIFY RESULT; IT NEVER RUNS ONE.** Decided while building R4,
+2026-08-20, because D-R8 and D-R13 name two different moments and the phase cannot be written
+without choosing between them. D-R8 wants the record to carry *the verify result from §3's
+re-verify* and *the silent-drop check* — both produced by `LandFlow`, which runs at **land** time.
+D-R13 fires the record at **completion**, the end of a turn. Those are not the same moment, and the
+two ways of reconciling them are not equally good:
+
+- **Assembling the record on the land path is not merely late, it is the wrong order.** The record
+  exists so the manager can read it and send the work back (D-R9) *before* the operator's yes. But
+  `land` needs the merge token, `token-request` needs `approve`, and this repo is
+  `"landing": "on-approval"` (§6). So a record assembled inside a land is a record produced *after*
+  the approval it was supposed to inform, and the manager's block — the load-bearing asymmetry of
+  D-R10 — has nothing left to act on. Completion is the only moment at which the record can still
+  change anything.
+- **Running a verify at completion buys a number nothing gates on, at the cost that matters most.**
+  Measured for R1 in a cold worktree on this machine: `dev gate` 273.1 s, the narrow subset this
+  repo settled on ~17 s plus a build — per completed turn-with-changes, per ticket. Quota and wall
+  clock are the scarce resource (CLAUDE.md §0.1/§2.6), and the operator's standing directive on the
+  heavy suites governs here as everywhere else.
+- **And it would be a different question wearing the same word.** D-R1's verify runs on the
+  **merged** result, in the worktree, under the token, immediately before the ref moves. A verify at
+  completion runs on a branch main has *not* been merged into, so its green says nothing about the
+  tree that would land — while reading exactly as though it did. That is CLAUDE.md §0.3's
+  *believing a green check*, manufactured on purpose.
+
+So the record is assembled **entirely at completion, from facts that are free**, and the verify slot
+carries the most recent verify **already recorded** for the ticket — `LandFlow`'s own `verify_green`
+/ `verify_red` — or the words `not-run` when there is none. Four of D-R8's five items cost nothing
+at completion: the ticket, branch and worktree are a store read; `git diff --stat <main>...<branch>`
+is one git call (and the three-dot form is *already* merge-base-relative, so §10's merge-base trap
+is about the drop check and not about this); the agent's report is the argument the trigger arrives
+with; and the drop check is pure git — `MainMergeOnBranch` plus `SilentDrops`, no build and no test
+— so it **does** run at completion, and says `moot` in as many words until main has been merged in.
+
+Two consequences, stated so they are not rediscovered:
+
+- **`not-run` must be said, never left blank.** A verify slot that was absent or empty would be
+  indistinguishable from a verify that had failed to run, which is `land_drop_check_moot`'s whole
+  reason for existing.
+- **R5 inherits a first read of diffstat + report + drop-check, knowing verify has not run** — which
+  is exactly the bound D-R12 already sets (*the diffstat plus the agent's report first, on the cheap
+  tier*). Nothing is lost, and the verify that **gates** is still the one in `LandFlow`, before the
+  ref moves, and stays the only one.
+
 ## 6. Where the human still is
 
 Unchanged, and deliberately: `approve` gates `token-request`, and this repo stays
@@ -285,7 +329,7 @@ more there, not less: it is what a human reviewer reads first.
 | **R2 — BUILT** | D-R4's silent-drop check. | `m1`: a branch that resolves by reverting a file main changed is refused, and the message names the file. Fixture: land one ticket, then have a second resolve by discarding it. |
 | **R3 — BUILT** | D-R5: retire the three refusals (**four**, see below). Re-aim `m1`'s two gate checks and `m2`'s backstop check rather than deleting them. | `m1`: two tickets over one path both get created; an agent writes freely across its own worktree; the gate still refuses the **shared checkout** (layer 1 untouched). |
 | **R3.5 — BUILT** | D-R14: the land comes OFF the serial control pipe. `land` returns *landing…* and the outcome arrives as an announcement; the token stays held across the whole flow and a failure still leaves main untouched. | `m1`: a land whose verify takes seconds does not block a concurrent `status`/`say` on the same daemon; the outcome still reaches the caller; the existing land checks pass unchanged against the new reply shape. **All three held, measured** — see D-R14. |
-| **R4** | D-R8's record, assembled at completion. Gated on the worktree having changed (D-R13). | `m1`: a finished ticket produces exactly one record carrying diffstat, verify result, drop-check and the agent's report; a chatty lane produces no second one. |
+| **R4 — BUILT** | D-R8's record, assembled at completion. Gated on the worktree having changed (D-R13). The verify result is **reported, never run** — see D-R15, which is the decision this phase could not be written without. | `m1`: a finished ticket produces exactly one record carrying diffstat, verify result, drop-check and the agent's report; a chatty lane produces no second one; and **an adopted lane still produces one after a daemon restart** — the wiring lives in one place called from both the spawn and reconcile, which is where §3's dead-routing-ladder failure would otherwise reappear. 13 new checks, all seen red; `m0` gains the no-summon assertion for the read verb. |
 | **R5** | D-R9/D-R10/D-R12: the manager reads it, may send back, bounded at three, and **cannot approve**. | `brain`: a send-back reaches the lane as input; the fourth round goes to the operator; a manager "approval" grants **nothing**. |
 | **R6** | D-R11: the write-up renders in the approval ask (absorbs `WORK-ISOLATION` P5). | `ui-use`: the ask carries the summary and answering it grants the token, at a live window. |
 | **R7** | §7: PR-mode assembles a PR description and review comments instead. | `publish`/`workspace`: a `"delivery": "pr"` repo performs no local merge. |
@@ -495,17 +539,55 @@ plan shipped without one and handing it off meant re-deriving everything (`a403f
 - **`Blockers(NewBuild nb)`** — unchanged, and it is what stops a swap cutting a land in half. It
   covers an in-flight land only because the token is held throughout.
 
-### R4 — the completion record
+### R4 — the completion record (BUILT; and it does NOT share R1's verify runner — D-R15)
 
-- **`rt.OnResult = CompressResult;`** (`Daemon.cs`, guarded by `if (role == "work")`) — **AN
-  ASSIGNMENT, NOT `+=`.** A second consumer written the obvious way silently kills selective
-  compression, which presents as "the panes went verbose" with nothing pointing here. Make it a
-  multicast or call both explicitly.
-- **`CompressResult(long laneId, long paneEventId, string body)`** — the existing consumer, and the
-  signature the record assembler gets: the turn's body IS the agent's report.
-- Gate on the worktree having changed since the last record (D-R13) — record a status digest or the
-  examined sha; a chatty lane must produce one record, not one per turn.
-- Runs in the ticket's own worktree, with its own `bin`/`obj`. Shares the verify runner with R1.
+- **`HookTurnEnd(LaneRuntime rt, string role)`** (`Daemon.cs`) — was `HookCompression`, renamed
+  because it now wires TWO consumers and a name that says "compression" is how the next person
+  overwrites one of them. `OnResult` is a single delegate field, so the trap §10 named is real:
+  the composition is one lambda in one method, both consumers are called by name, and **each is
+  in its own `try`** — `OnResult` is invoked from the wire pump *outside* its try/catch
+  (`LaneRuntime.OnLine`), so one consumer throwing would take the other and the pump with it.
+  **Called from BOTH construction sites**: `SpawnLaneAsync`, and reconcile's adoption loop. The
+  second is the one that goes quietly dead — a daemon restarts on every publish, so a record
+  wired only at spawn stops happening for every lane the operator already had, which is §3's
+  routing ladder exactly. `m1` restarts the daemon and demands a record from an adopted lane.
+- **`CompletionRecord(long laneId, long paneEventId, string body)`** — the trigger: finds the
+  lane's open ticket (silent when there is none — a plain lane's turn is the common case and has
+  no PR to shape) and hands off to a `Task.Run`, because this shells out to git several times and
+  the pump is what delivers the agent's output to the pane.
+- **`BuildRecord(...)`** — the assembly, and every giving-up path names itself:
+  `completion_record_impossible` (no repository, no worktree, or git could not read the tree),
+  `completion_record_unchanged` (D-R13's gate), `completion_record_failed` (it threw). An empty
+  record, or a silent return where one was expected, is the fail-open this codebase has paid for
+  twice.
+- **`Digest` / `DigestOf`** — D-R13's gate value: 16 hex of SHA256 over the branch tip plus
+  `git status --porcelain`, so committed *and* uncommitted work move it. Read back **out of the
+  previous record's own event**, never held in memory: an in-memory digest would emit a duplicate
+  record on the first turn after every publish and still look correct in a single-daemon test.
+  An unreadable digest compares UNEQUAL on purpose — one duplicate record is a cost, a gate that
+  silently swallows every completion is a phase that does nothing.
+- **`_recordLocks`** (`ConcurrentDictionary<long, object>`, one per ticket) — held across
+  read-decide-write. Concurrent for the same reason `_lanes` became concurrent in R3.5: written
+  from background threads while the control pipe reads the store beside it.
+- **`Store.LastTicketEvent(long ticket, params string[] kinds)`** — the newest event of those
+  kinds *about* this ticket. `LastEventDetail` could not serve: the land's events are all
+  lane-less (`Event(kind, null, …)`), and `LIKE 'ticket 7%'` also matches ticket 71 — a verify
+  result attributed to a neighbouring ticket is exactly the quiet wrongness this phase removes,
+  so the boundary is spelled out in SQL.
+- **`case "ticket-record"`** (`Daemon.cs`) + **`"ticket-record"`** (`Program.cs`) — a READ, on the
+  **no-summon list** beside `status` and `land-status`: it is what R5 and any script will poll, so
+  a summoning version turns "read the record" into four warm-up model processes, repeatedly
+  (CLAUDE.md §3.2). It assembles nothing — a command that built a record on demand would be a
+  second, differently-timed producer of one artifact, which is `MakeTicket`'s lesson. It exists
+  because R6 is the surface a person reads this through, and until then an affordance no verb can
+  reach is where the next defect lives.
+- **No pane row, deliberately.** A record needs nobody, and §4's rule is that attention is owed
+  when a person is *needed*. R6 is where it reaches people.
+- **`m1:main_advanced` had to be RE-AIMED**, not because R4 changed the land but because it
+  compared main's tip *subject* to the literal `'water v2'` and R4's fixture adds commits to the
+  same branch. It now compares main's sha to the branch tip captured before the land, which is
+  D-R2's actual property and strictly stronger than a commit message. `dev prove` calls that
+  VACUOUS by design (it is a stale-test repair, not a code claim).
 
 ### R5 — the manager review
 

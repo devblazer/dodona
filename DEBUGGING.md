@@ -451,6 +451,17 @@ are the authority and they must agree.)*
   now vanish silently; `land_interrupted` — a daemon stopped mid-land, which was impossible
   while the land held the pipe, and which loses nothing because the trunk moves only in the
   last step),
+  the R4 completion-record kinds (`completion_record` — **the whole record, as JSON, in the
+  detail after `ticket <id> `**: branch, worktree, `git diff --stat <main>...<branch>`, the
+  drop check, the verify result AS RECORDED and never run here (D-R15), and the agent's own
+  end-of-turn report. `dodona ticket-record <ticket>` prints the newest one and starts nothing.
+  `completion_record_unchanged` — D-R13's gate fired, so the worktree had not moved since the
+  last record and a chatty lane produced one record instead of one per turn; a record kind with
+  no skip kind anywhere beside it means the gate never fired. `completion_record_impossible` —
+  no worktree, no repository, or git could not read the tree, so there is deliberately no
+  record: the `land_drop_check_moot` distinction, one phase along.
+  `completion_record_failed` — it threw, which is the one shape that would otherwise be a
+  turn that quietly produced nothing),
   `worktree_prune_failed`, `ticket_git_failed`, `claim_extend_refused` (a `claim-extend`
   whose claims were outside the ticket's own repository), `token_refused_no_repo` (the
   ticket's repository has left the workspace — the token is refused rather than aimed at

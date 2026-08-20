@@ -673,6 +673,42 @@ sealed class Store : IDisposable, ILaneSink
         }
     }
 
+    /// <summary>The newest event of any of these kinds that is ABOUT this ticket, or null.
+    /// Returns the kind (so a caller asking for several can tell which it got), the timestamp
+    /// and the detail.
+    ///
+    /// This exists rather than reusing <see cref="LastEventDetail"/> for two reasons, both of
+    /// which would otherwise be silent wrong answers:
+    ///
+    ///  * **The land's events are lane-less by construction.** Every one of them is written as
+    ///    `Event(kind, null, $"ticket {tid}: …")`, because a land is about a ticket and a ticket
+    ///    may have no lane at all. `LastEventDetail` keys on `lane_id`, so it can see none of
+    ///    them -- it would return null for a verify that had definitely run.
+    ///  * **"about ticket 7" cannot be `LIKE 'ticket 7%'`**, which also matches ticket 71. A
+    ///    verify result attributed to a neighbouring ticket is exactly the quiet wrongness R4's
+    ///    record is meant to remove, so the boundary is spelled out instead of approximated: the
+    ///    three forms below are every shape the land actually writes (`ticket 7` bare,
+    ///    `ticket 7 step '…': …`, and `ticket 7: …`).
+    ///
+    /// `kinds` must be non-empty; the IN list is built from parameters, never from string
+    /// concatenation of caller input.</summary>
+    public (string Kind, string Ts, string Detail)? LastTicketEvent(long ticket, params string[] kinds)
+    {
+        if (kinds.Length == 0) return null;
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            var names = string.Join(", ", kinds.Select((_, i) => $"$k{i}"));
+            c.CommandText = $"SELECT kind, ts, detail FROM events WHERE kind IN ({names}) AND (" +
+                            "detail = 'ticket ' || $t OR detail LIKE 'ticket ' || $t || ' %' " +
+                            "OR detail LIKE 'ticket ' || $t || ':%') ORDER BY id DESC LIMIT 1;";
+            for (int i = 0; i < kinds.Length; i++) c.Parameters.AddWithValue($"$k{i}", kinds[i]);
+            c.Parameters.AddWithValue("$t", ticket);
+            using var r = c.ExecuteReader();
+            return r.Read() ? (r.GetString(0), r.GetString(1), r.IsDBNull(2) ? "" : r.GetString(2)) : null;
+        }
+    }
+
     public void Event(string kind, long? laneId, string? detail)
     {
         lock (_lock)

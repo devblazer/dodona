@@ -308,7 +308,7 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 |---|---|
 | anything that is a pure function (claims, policy, repo resolution, paths, routing verdicts) | `dev test unit` — ~1 s, no daemon |
 | daemon lifetime, reconnect, drain | `dev test m0` |
-| the write gate, the merge token, the land flow | `dev test m1` |
+| the write gate, the merge token, the land flow, the completion record | `dev test m1` |
 | routing, presence, the recorded branch touch | `dev test m2` |
 | the UI as a view over the store | `dev test m3` |
 | publish, hot swap, provenance | `dev test m4 publish` |
@@ -480,7 +480,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 |---|---|
 | `unit` | the pure logic: claim algebra, policy table, repo resolution, canonical paths, the code-only routing decisions |
 | `m0` | daemon death mid-turn, and Phase 3's whole invariant: a wrapper that outlives its agent, a lane with no shim record, the lease, reconcile asking the OS |
-| `m1` | the write gate (layer 1), the merge token, and the land: merge main in, verify, fast-forward, dropped-nothing, and that the whole of it runs **off the control pipe** |
+| `m1` | the write gate (layer 1), the merge token, and the land: merge main in, verify, fast-forward, dropped-nothing, and that the whole of it runs **off the control pipe**; plus R4's completion record — one per worktree change and not one per turn, and still produced by a lane the daemon ADOPTED rather than spawned |
 | `m2` | routing, presence, and what a branch touched (recorded, not judged — the backstop is retired) |
 | `m3` | the UI as a view over the store |
 | `m4` | hot swap (runs a REAL build — the slow one) |
@@ -758,6 +758,8 @@ dodona status                # now safe: reports ASLEEP rather than waking the w
 dodona where [--json]        # ids, paths, pipe names, and whether a daemon is LIVE
 dodona version [--json]      # what a binary is, including its commit
 dodona ps                    # what is actually running, machine-wide
+dodona land-status <ticket>  # a land in flight or its outcome (R3.5)
+dodona ticket-record <ticket># the ticket's completion record (R4) — a manager POLLS this
 ```
 
 **These still summon, deliberately** — bringing the daemon back is what the caller wants, and the

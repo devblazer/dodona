@@ -341,6 +341,131 @@ try {
     git -C $wt1 add -A
     git -C $wt1 -c user.email=t@t -c user.name=t commit -q -m "water v2"
 
+    # ---- 5b. R4 / D-R8: completion produces a PR-shaped record ---------------------------
+    #
+    # The manager has never once been shown a lane agent's output (plan §1: `BrainReview` fires
+    # at lane creation, is handed the operator's sentence and the names of live lanes, and never
+    # sees a turn). R4 assembles what it will read: the ticket, its branch and worktree, what the
+    # branch changed, the drop check, the verify result, and the agent's OWN end-of-turn report.
+    # Code only, no opinions, no model call -- so this section is free like the rest of the suite.
+    #
+    # D-R15 IS WHAT THESE CHECKS PIN MOST. The record is assembled at COMPLETION and the verify
+    # result is REPORTED, never run: a record built on the land path would arrive after the
+    # approval it exists to inform, and a verify run here would cost a build plus suites per
+    # completed turn to answer a different question from the land's (this branch has not had main
+    # merged into it). So `verify.state` must read `not-run` WITH a reason, and a blank or absent
+    # slot is the failure -- `land_drop_check_moot` is the pattern being copied.
+    #
+    # The lane is the ticket-1 agent from section 4 and the worktree is the one section 5 just
+    # committed into, so this costs one fake-agent turn and a handful of git calls.
+    $reportOne = "reworked the water sim mask to height times curvature; one file, and I have not run the tests"
+    Dodona @("say", "$tlaneId", "say $reportOne") | Out-Null
+    Wait-Until { [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='completion_record'").Trim()) -ge 1 } `
+        25000 "ticket 1's completion record" | Out-Null
+    # Read it through the VERB, not by hand-rolling SQL: an affordance no verb can reach is where
+    # the next defect lives (CLAUDE.md §3.1), and R5 will read it exactly this way.
+    $rec1Raw = Dodona @("ticket-record", "1")
+    $rec1 = try { $rec1Raw | ConvertFrom-Json } catch { $null }
+    Check 'a_finished_turn_produces_a_completion_record' `
+        ($DODONA_EXIT -eq 0 -and $null -ne $rec1 -and $rec1.ticket -eq 1) "exit=$DODONA_EXIT [$rec1Raw]"
+    Check 'the_record_names_the_ticket_its_branch_and_its_worktree' `
+        ($null -ne $rec1 -and $rec1.branch -eq 'ticket/1' -and $rec1.worktree -eq $wt1) `
+        "branch=$($rec1.branch) worktree=$($rec1.worktree) expected $wt1"
+    # `git diff --stat main...ticket/1`. The three-dot form is ALREADY merge-base-relative, which
+    # is why §10's merge-base trap is about the drop check and not about this.
+    Check 'the_record_carries_what_the_branch_changed' `
+        ($null -ne $rec1 -and $rec1.files -eq 1 -and (@($rec1.changed) -contains 'src/water/sim.cs') -and
+         $rec1.diffstat -match 'src/water/sim.cs') "files=$($rec1.files) changed=$(@($rec1.changed) -join ',') stat=$($rec1.diffstat)"
+    # THE FIELD THAT DID NOT EXIST ANYWHERE BEFORE R4: the agent's own words, verbatim.
+    Check 'the_record_carries_the_agents_own_report' `
+        ($null -ne $rec1 -and $rec1.report -eq $reportOne) "report=[$($rec1.report)]"
+    # D-R15, stated as an assertion: a verify has not run for this ticket, and the record SAYS SO
+    # rather than leaving the slot empty for a reader to interpret.
+    Check 'the_record_says_the_verify_has_not_run_rather_than_leaving_it_blank' `
+        ($null -ne $rec1 -and $rec1.verify.state -eq 'not-run' -and $rec1.verify.detail.Length -gt 20) `
+        "state=$($rec1.verify.state) detail=[$($rec1.verify.detail)]"
+    # The drop check DOES run at completion -- it is pure git -- and it is MOOT until a land has
+    # merged main in, which is a real state and not a check that failed to run.
+    Check 'the_drop_check_runs_at_completion_and_says_moot_before_main_is_merged_in' `
+        ($null -ne $rec1 -and $rec1.drop.state -eq 'moot') "drop=$($rec1.drop | ConvertTo-Json -Compress)"
+
+    # ---- D-R13: a chatty lane produces ONE record, not one per turn ----------------------
+    #
+    # A `result` is the end of A TURN, not of the conversation (LANE-LIFECYCLE.md §2 -- "the agent
+    # said it was done" is turn-completion and is wrong often enough that it must never on its own
+    # end anything). Re-reviewing every turn would burn the machine and the quota, so the gate is
+    # the worktree digest. The skip is RECORDED: a gate that quietly swallowed every completion
+    # and a trigger that was never wired look identical otherwise, and that is the failure mode
+    # this phase was warned about.
+    Dodona @("say", "$tlaneId", "say and one more thought about the shoreline, nothing changed on disk") | Out-Null
+    Wait-Until { [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='completion_record_unchanged'").Trim()) -ge 1 } `
+        25000 'the unchanged-worktree skip' | Out-Null
+    $recCount = [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='completion_record'").Trim())
+    Check 'a_chatty_turn_produces_no_second_record' ($recCount -eq 1) "completion_record rows: $recCount"
+    $skip = Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='completion_record_unchanged' ORDER BY id DESC LIMIT 1"
+    Check 'the_skipped_record_says_why_rather_than_being_silent' `
+        ($skip -match 'ticket 1' -and $skip -match 'unchanged') "[$skip]"
+
+    # ...and a turn that DID change the worktree gets its own record.
+    Set-Content "$wt1\src\water\foam.cs" "// foam"
+    git -C $wt1 add src/water/foam.cs
+    git -C $wt1 -c user.email=t@t -c user.name=t commit -q -m "foam"
+    Dodona @("say", "$tlaneId", "say added foam.cs") | Out-Null
+    Wait-Until { [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='completion_record'").Trim()) -ge 2 } `
+        25000 'a second record after a real change' | Out-Null
+    $rec2 = try { (Dodona @("ticket-record", "1")) | ConvertFrom-Json } catch { $null }
+    Check 'a_turn_that_changed_the_worktree_gets_its_own_record' `
+        ($null -ne $rec2 -and $rec2.files -eq 2 -and (@($rec2.changed) -contains 'src/water/foam.cs') -and
+         $rec2.digest -ne $rec1.digest) "files=$($rec2.files) digest=$($rec2.digest) vs $($rec1.digest)"
+
+    # ---- 5c. AND IT SURVIVES A DAEMON RESTART, because the trigger is wired at ADOPTION ----
+    #
+    # This is the check that exists because of §3's dead routing ladder. `LaneRuntime.OnResult` is
+    # wired in `HookTurnEnd`, which is called from TWO places: the spawn, and reconcile's adoption
+    # of every lane that was already alive. A daemon restarts on every publish and every hot swap,
+    # so a record wired only at spawn would be fully covered, fully green, and simply stop
+    # happening for every lane the operator already had -- which is exactly what routing did for
+    # two days. Nothing in the record's own code path can catch that; only a restart can.
+    #
+    # THE OPERATOR'S PATH, as far as this suite is allowed to go: a fresh daemon process that
+    # reconciles from the store, adopts the live shim, and wires the lane itself -- nothing about
+    # the trigger is pre-built by the test. Autostart stays OFF here and that is deliberate, not
+    # an omission: a summoned daemon runs its warm-up and spawns the router, brain and compressor
+    # pool as real `claude -p --model haiku` processes (CLAUDE.md §3.2), which is the one thing a
+    # model-free suite may never do. `m0` clears autostart for the checks where summoning IS the
+    # subject; here the subject is adoption.
+    Dodona @("stop-daemon") | Out-Null
+    Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 15000 'the first daemon to go down' | Out-Null
+    $daemon = Start-Process $dodona -ArgumentList "daemon", "--root", $root -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon2.out" -RedirectStandardError "$out\daemon2.err"
+    Wait-Daemon $ws.CtlPipe | Out-Null
+    Set-Content "$wt1\src\water\spray.cs" "// spray"
+    git -C $wt1 add src/water/spray.cs
+    git -C $wt1 -c user.email=t@t -c user.name=t commit -q -m "spray"
+    # The `say` is waited for rather than assumed, and its reply is carried into the detail of the
+    # check below rather than becoming a check of its own. Two reasons: a lane the successor failed
+    # to ADOPT refuses input outright, which is a different failure from a lane adopted without its
+    # trigger, and the detail is what tells them apart; and adoption already works at HEAD, so a
+    # separate assertion on it is VACUOUS by `dev prove`'s own verdict -- a check with no teeth
+    # sitting in the suite implying it has some.
+    $sayAfter = ''
+    Wait-Until { $script:sayAfter = Dodona @("say", "$tlaneId", "say added spray.cs after the restart"); $global:DODONA_EXIT -eq 0 } `
+        30000 'the adopted lane accepts input again' | Out-Null
+    Wait-Until { [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='completion_record'").Trim()) -ge 3 } `
+        30000 'a record from a lane the daemon ADOPTED rather than spawned' | Out-Null
+    $rec3 = try { (Dodona @("ticket-record", "1")) | ConvertFrom-Json } catch { $null }
+    Check 'an_adopted_lane_still_produces_a_record_after_a_daemon_restart' `
+        ($null -ne $rec3 -and $rec3.files -eq 3 -and $rec3.report -match 'after the restart') `
+        "files=$($rec3.files) report=[$($rec3.report)] (the say that should have produced it: [$sayAfter])"
+    # ...and the D-R13 gate survived the restart too, which it only can because the previous
+    # digest is read back out of the store rather than held in memory. An in-memory gate would
+    # produce a duplicate record on the first turn after every publish and look correct here.
+    Dodona @("say", "$tlaneId", "say still nothing changed on disk") | Out-Null
+    Wait-Until { [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='completion_record_unchanged'").Trim()) -ge 2 } `
+        25000 'the skip after a restart' | Out-Null
+    $recCount3 = [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='completion_record'").Trim())
+    Check 'the_record_gate_survives_a_restart_rather_than_resetting' ($recCount3 -eq 3) "completion_record rows: $recCount3"
+
     # ---- 6. on-approval gates the token (§7) ----
     $req = Dodona @("token-request", "1")
     Check 'unapproved_token_refused' ($DODONA_EXIT -eq 1 -and $req -match 'not approved') $req
@@ -355,11 +480,20 @@ try {
     Check 'second_ticket_queued' ($req2 -match 'queued') $req2
 
     # ---- 8. land ticket 1: daemon executes ff-only; claims released; verify runs ----
+    #
+    # RE-AIMED, NOT WEAKENED (R4). `main_advanced` compared main's tip SUBJECT to the literal
+    # 'water v2', which coupled it to whichever commit section 5 happened to make last -- and
+    # section 5b now makes three. The property it was really asserting is D-R2's: after the
+    # fast-forward, main's tip IS the branch tip that was verified, byte for byte. That is a sha
+    # comparison, which is strictly stronger than a commit message and cannot go stale when the
+    # fixture gains a commit. Captured BEFORE the land, because the land prunes the worktree and
+    # deletes the branch.
+    $t1Tip = (git -C $root rev-parse ticket/1)
     $land1 = Dodona @("land", "1")
     Check 'ticket1_landed' ($land1 -match 'landed ticket 1') $land1
     Check 'verify_ran_green' ($land1 -match 'verify green') $land1
-    $mainTip = git -C $root log -1 --format=%s
-    Check 'main_advanced' ($mainTip -eq 'water v2') $mainTip
+    $mainTip = (git -C $root rev-parse main)
+    Check 'main_advanced' ($mainTip -eq $t1Tip) "main=$mainTip ticket/1 was $t1Tip ($(git -C $root log -1 --format=%s))"
     Check 'worktree1_pruned' (-not (Test-Path $wt1))
 
     # ---- 9. released claim is claimable again ----
@@ -767,7 +901,9 @@ print('\n'.join(k for (k,) in db.execute('SELECT kind FROM events ORDER BY id'))
     # verify_red could only ever be written after main had already advanced).
     # R3.5 added two more: a land that STARTED (which is all the pipe now knows) and one that
     # finished off it. Their absence would mean the land never left the pipe.
-    foreach ($k in 'ticket_created','claim_overlap','token_refused_unapproved','token_granted','token_queued','landed','verify_green','token_expired_reclaimed','worktree_pruned','land_merged_main','land_conflict','verify_red','land_started','land_finished') {
+    # R4 adds the record and its D-R13 skip. The SKIP is in this list on purpose: a record kind
+    # with no skip kind beside it would mean the gate never fired, which is one record per turn.
+    foreach ($k in 'ticket_created','claim_overlap','token_refused_unapproved','token_granted','token_queued','landed','verify_green','token_expired_reclaimed','worktree_pruned','land_merged_main','land_conflict','verify_red','land_started','land_finished','completion_record','completion_record_unchanged') {
         Check "event_$k" ([bool]($events -match $k))
     }
 

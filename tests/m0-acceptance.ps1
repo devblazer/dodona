@@ -388,6 +388,15 @@ try {
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     & $dodona status --root $root 2> $statusErr | Out-Null
+    # R4's `ticket-record` is on the same no-summon list and for a sharper reason: it is what a
+    # manager (R5) and any script will POLL, so a version of it that summoned would turn "read the
+    # record" into four warm-up model processes, repeatedly, on a machine nobody asked to wake.
+    # It rides the SAME window as the status probe -- the one 4 s "no daemon appeared" wait below
+    # covers both -- because m1 is not the place for this (autostart is on for the block, and only
+    # here) and a second 4 s wait is 4 s of the I7 budget for nothing.
+    $recErr = "$out\ticket-record.err"
+    & $dodona ticket-record 1 --root $root 2> $recErr | Out-Null
+    $recOut = if (Test-Path $recErr) { ((Get-Content $recErr -Raw) -replace '\s+', ' ').Trim() } else { '' }
     $ErrorActionPreference = $prevEap
     $statusOut = if (Test-Path $statusErr) { ((Get-Content $statusErr -Raw) -replace '\s+', ' ').Trim() } else { '' }
     $daemonAppeared = Wait-Until { Test-DodonaPipe $ws.CtlPipe } 4000 '(expecting NO daemon to appear)'
@@ -395,7 +404,13 @@ try {
     else { $env:DODONA_NO_AUTOSTART = $savedAutostart }
 
     $results['status_does_not_summon_a_daemon'] =
-        if (-not $daemonAppeared) { 'PASS' } else { 'FAIL (a daemon appeared: status started one)' }
+        if (-not $daemonAppeared) { 'PASS' } else { 'FAIL (a daemon appeared: status started one or ticket-record did)' }
+    # Two assertions, because one of them alone would pass against a build that never had the
+    # guard: no daemon appeared (which is only meaningful with autostart CLEARED, above), and the
+    # command took the no-summon branch rather than dying some other way -- that branch is the one
+    # that names the sleeping workspace instead of starting it.
+    $results['ticket_record_does_not_summon_a_daemon'] =
+        if (-not $daemonAppeared -and $recOut -match 'daemon not running') { 'PASS' } else { "FAIL ($recOut)" }
     $results['status_says_the_workspace_is_asleep'] =
         if ($statusOut -match 'ASLEEP') { 'PASS' } else { "FAIL ($($statusOut.Trim()))" }
     # ...and it started no LANES either, which is the part that costs real money.

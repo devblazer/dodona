@@ -641,7 +641,7 @@ sealed class Daemon
             // is a real signal, not noise to wave through.
             var lanePipe = l.Pipe ?? "";
             var rt = new LaneRuntime(l.Id, lanePipe, _store);
-            HookCompression(rt, l.Role);
+            HookTurnEnd(rt, l.Role);
             // A WORK lane gets the patient retry: it may hold a real agent mid-turn, and a
             // successor is adopting shims the predecessor only just let go of. A UTILITY lane
             // gets one attempt — a brain, router or compressor whose pipe does not answer
@@ -1799,6 +1799,40 @@ sealed class Daemon
             // incident: a summoned daemon runs its warm-up and spawns four model-backed
             // processes). A poll that woke a daemon to be told "no land here" would be that
             // incident on a 250 ms timer.
+            // R4: read the ticket's completion record (D-R8). A READ ONLY -- it assembles
+            // nothing, because assembly is triggered by a turn ending and a command that built
+            // one on demand would be a second, differently-timed producer of the same artifact
+            // (the "two implementations of make-a-ticket drift on exactly the checks that
+            // matter" lesson, from `MakeTicket`).
+            //
+            // It exists because R6 is the surface a person will actually read this through, and
+            // until then an affordance no verb can reach is where the next defect lives
+            // (CLAUDE.md §3.1). It is also how `m1` reads a record without hand-rolling SQL.
+            // NEVER SUMMONS a daemon -- see the no-summon list in Program.cs, and §3.2.
+            case "ticket-record":
+            {
+                var rtid = e.GetProperty("ticket").GetInt64();
+                var rec = _store.LastTicketEvent(rtid, "completion_record");
+                if (rec is null)
+                {
+                    // Says WHICH nothing this is. A ticket that has never finished a turn, one
+                    // whose worktree could not be read, and one whose lane never had the trigger
+                    // wired all look identical from the outside, and the last of those is the
+                    // failure mode this phase was warned about -- so the reasons are named and
+                    // the events that carry them are named too.
+                    var why = _store.LastTicketEvent(rtid, "completion_record_impossible", "completion_record_failed");
+                    w.WriteLine($"no record for ticket {rtid}" +
+                                (why is not null ? $" -- last attempt: {why.Value.Kind} {why.Value.Detail}" : ""));
+                    if (why is null)
+                        w.WriteLine("       (a record is written when a turn ENDS on the ticket's lane and the worktree has " +
+                                    "changed since the last one; `dodona tickets` shows whether the ticket has a lane at all)");
+                    w.WriteLine("##exit 1");
+                    break;
+                }
+                var braceAt = rec.Value.Detail.IndexOf('{');
+                w.WriteLine(braceAt < 0 ? rec.Value.Detail : rec.Value.Detail[braceAt..]);
+                break;
+            }
             case "land-status":
             {
                 var tid = e.GetProperty("ticket").GetInt64();
@@ -3620,7 +3654,7 @@ sealed class Daemon
         _store.Event("shim_spawned", id, $"pipe={pipe} child={child} cwd={workDir}");
 
         var rt = new LaneRuntime(id, pipe, _store);
-        HookCompression(rt, role);
+        HookTurnEnd(rt, role);
         if (await rt.ConnectAndPumpAsync(attempts: 20))
         {
             _lanes[id] = rt;
@@ -3631,13 +3665,44 @@ sealed class Daemon
         return (-1, $"error: lane {id} shim pipe never answered");
     }
 
-    // ------------------------------------------------------------- selective compression (§5)
+    // -------------------------------------------- what a work lane's turn-final feeds (§5, R4)
 
-    /// <summary>Only WORK lanes get their turn-finals compressed. A compressor whose own
-    /// result was compressed would ask itself to summarise its summary, forever.</summary>
-    void HookCompression(LaneRuntime rt, string role)
+    /// <summary>Everything that consumes a work lane's turn-final, wired in ONE place — because
+    /// `LaneRuntime.OnResult` is a single delegate field and there are two consumers now.
+    ///
+    /// **IT IS AN ASSIGNMENT, NOT `+=`, AND THAT IS THE TRAP.**
+    /// `docs/REVIEW-AND-MERGE-PLAN.md` §10 named it before R4 existed, and it is the one this
+    /// phase was most likely to walk into: a second consumer added the obvious way — another
+    /// `rt.OnResult = …` at whichever call site happened to need it — silently REPLACES the
+    /// compressor, and the symptom is "the panes went verbose" with nothing anywhere pointing
+    /// here. So the composition is explicit, it lives in this one method, and both consumers are
+    /// named. Anything added later goes in the lambda below, next to them.
+    ///
+    /// **Only WORK lanes**, for two separate reasons rather than one: a compressor whose own
+    /// result was compressed would ask itself to summarise its summary, forever; and a utility
+    /// lane has no ticket, so there is nothing for it to produce a completion record about.
+    ///
+    /// **Each consumer is isolated.** `OnResult` is invoked from the wire pump and not inside its
+    /// try/catch (`LaneRuntime.OnLine`), so an exception from the first consumer would take the
+    /// second one with it and the pump besides — the same trap in a second costume, where the
+    /// compressor silently kills the record instead of the other way round.
+    ///
+    /// **BOTH construction sites call this, and the second is the one that goes quietly dead.**
+    /// `SpawnLaneAsync` wires a lane the daemon starts; reconcile wires every lane it ADOPTS at
+    /// startup. A daemon restarts on every publish and hot swap, so a record wired only at spawn
+    /// would simply stop happening for every lane the operator already had — fully covered and
+    /// dead in production, which is §3's routing ladder exactly. `m1` restarts the daemon and
+    /// demands a record from an adopted lane for that reason and no other.</summary>
+    void HookTurnEnd(LaneRuntime rt, string role)
     {
-        if (role == "work") rt.OnResult = CompressResult;
+        if (role != "work") return;
+        rt.OnResult = (laneId, paneEventId, body) =>
+        {
+            try { CompressResult(laneId, paneEventId, body); }
+            catch (Exception ex) { _store.Event("compressor_failed", laneId, $"hook threw: {ex.Message}"); }
+            try { CompletionRecord(laneId, paneEventId, body); }
+            catch (Exception ex) { _store.Event("completion_record_failed", laneId, $"hook threw: {ex.Message}"); }
+        };
     }
 
     /// <summary>
@@ -3751,6 +3816,220 @@ sealed class Daemon
             }
             catch (Exception ex) { _store.Event("compressor_failed", pick.Id, ex.Message); }
         });
+    }
+
+    // ------------------------------------------------- the completion record (R4, D-R8/D-R13)
+
+    /// <summary>One lock per TICKET, held across "read the last record, decide, write the next
+    /// one". `OnResult` fires on a lane's wire-pump thread, so two turns of one ticket can arrive
+    /// concurrently -- and without this both would read the same previous digest, both would
+    /// decide the worktree had changed, and D-R13's whole point (one record, not one per turn)
+    /// would fail exactly when a lane is busiest. Concurrent for the same reason `_lanes` had to
+    /// become concurrent in R3.5: it is written from background threads while the control pipe
+    /// reads the store beside it.</summary>
+    readonly ConcurrentDictionary<long, object> _recordLocks = new();
+
+    /// <summary>
+    /// A turn ended on a work lane holding an open ticket, so the ticket gets a PR-shaped record
+    /// (`docs/REVIEW-AND-MERGE-PLAN.md` D-R8). Assembled by CODE and carrying NO OPINIONS: the
+    /// ticket, its branch and worktree, what the branch changed, the verify result, the
+    /// silent-drop check, and **the agent's own end-of-turn report** -- which is the closest
+    /// thing this system has to a PR description and the one thing the manager has never once
+    /// been shown (§1: `BrainReview` fires at lane creation and never sees a lane agent's output).
+    ///
+    /// **It writes no judgement and it decides nothing.** The manager reading it is R5; the
+    /// operator's `approve` is still the only yes (§6, D-R10). R4 is the assembly.
+    ///
+    /// **THE VERIFY RESULT IS REPORTED, NEVER RUN (D-R15).** This is the phase's one real design
+    /// decision, so it is written out in the plan rather than left implicit here. In short: a
+    /// record assembled on the LAND path would be produced after the approval it exists to
+    /// inform, so completion is the only moment it can change anything; and a verify run *here*
+    /// would cost a build plus suites per completed turn (quota and wall clock, CLAUDE.md §0.1)
+    /// to answer a different question from D-R1's -- this branch has not had main merged into it,
+    /// so a green here says nothing about the tree that would land while reading as though it
+    /// did. So the slot carries the newest verify already recorded for the ticket, and says
+    /// `not-run` in as many words when there is none.
+    ///
+    /// **The drop check DOES run here**, because it is pure git -- `MainMergeOnBranch` plus
+    /// `SilentDrops`, no build and no test. Until a land has merged main in there is nothing for
+    /// the branch to have discarded, and that is `moot`: a real state, said out loud, and not the
+    /// same thing as a check that failed to run. `land_drop_check_moot` is the pattern.
+    ///
+    /// **Gated on the worktree having CHANGED since the last record (D-R13).** A `result` is the
+    /// end of a turn, not of the conversation (`LANE-LIFECYCLE.md` §2 -- "the agent said it was
+    /// done" is turn-completion), so a chatty lane must produce ONE record and not one per turn.
+    /// The digest is the branch tip plus a hash of `git status --porcelain`: committed *and*
+    /// uncommitted work, because a turn that edited without committing has changed the worktree
+    /// and a reviewer wants to know it (the land refuses a dirty worktree outright).
+    ///
+    /// **NO PANE ROW, DELIBERATELY.** A record is a machine-shaped artifact for a reviewer, and
+    /// an announcement per completed turn would put a JSON blob in the operator's pane and press
+    /// on the badge -- while §4's rule is that attention is owed when a person is NEEDED, and
+    /// nobody is needed by a record. It reaches people through R6's write-up in the approval ask;
+    /// until then `dodona ticket-record &lt;ticket&gt;` reads it, which is also what makes it
+    /// reachable from a check at all (CLAUDE.md §3.1: an affordance no verb can reach is where
+    /// the next defect lives).
+    ///
+    /// Every giving-up path below records WHY. An empty record, or a silent return where a record
+    /// was expected, is the fail-open this codebase has paid for twice (§3's dead routing ladder,
+    /// `GateHook`'s BOM) -- so "there is nothing to record" and "the record could not be built"
+    /// are different events with different names.
+    /// </summary>
+    void CompletionRecord(long laneId, long paneEventId, string body)
+    {
+        // A plain lane's turn is the overwhelmingly common case and there is no PR to shape, so
+        // it is silent rather than event-per-turn noise. Every case PAST this point is a ticket
+        // lane, where saying nothing would be indistinguishable from being broken.
+        var t = _store.Tickets().FirstOrDefault(x => x.State == "open" && x.LaneId == laneId);
+        if (t is null) return;
+
+        // Off the pump thread: this shells out to git several times, and the pump is what
+        // delivers the agent's output to the pane. Nothing here is ever awaited by anybody.
+        _ = Task.Run(() =>
+        {
+            try { BuildRecord(t, laneId, paneEventId, body); }
+            catch (Exception ex)
+            {
+                _store.Event("completion_record_failed", laneId, $"ticket {t.Id}: {ex.GetType().Name}: {ex.Message}");
+            }
+        });
+    }
+
+    void BuildRecord(Store.TicketRow t, long laneId, long paneEventId, string body)
+    {
+        var tid = t.Id;
+        // Resolved the same way the land resolves them, and for the same reason: a record that
+        // named a different repository from the one the land will fast-forward would be a report
+        // about a tree nobody is going to ship (P0.1's wrong-main incident, one step upstream).
+        var repo = RepoOf(t);
+        if (repo is null)
+        {
+            _store.Event("completion_record_impossible", laneId,
+                $"ticket {tid}: repo '{t.Repo}' ({t.RepoPath}) is not in this workspace");
+            return;
+        }
+        var cfg = Config.For(_primary, repo.Path);
+
+        // NO WORKTREE, NO RECORD -- and it says so. `git diff --stat main...branch` would still
+        // answer from the shared checkout, so this is a place where a plausible-looking record
+        // could be assembled about a tree the agent is not standing in. A ticket can legitimately
+        // outlive its checkout (the land carries the same case), so this is a state and not an
+        // error; what it is not is something to paper over.
+        if (t.Worktree.Length == 0 || !Directory.Exists(t.Worktree))
+        {
+            _store.Event("completion_record_impossible", laneId,
+                $"ticket {tid}: no worktree at '{t.Worktree}' -- nothing to diff or digest");
+            return;
+        }
+
+        var (headCode, head) = Git.Run(t.Worktree, "rev-parse", "HEAD");
+        var (statusCode, porcelain) = Git.Run(t.Worktree, "status", "--porcelain");
+        if (headCode != 0 || statusCode != 0)
+        {
+            // git itself could not answer, so there is no digest and therefore no way to honour
+            // D-R13 either. Refusing beats writing a record whose gate is a guess.
+            _store.Event("completion_record_impossible", laneId,
+                $"ticket {tid}: git could not read the worktree (rev-parse={headCode} status={statusCode}) at {t.Worktree}");
+            return;
+        }
+        var digest = Digest(head + "\n" + porcelain);
+
+        lock (_recordLocks.GetOrAdd(tid, _ => new object()))
+        {
+            // D-R13's gate. The previous record is read back out of its own event rather than
+            // held in memory: a daemon restarts on every publish, and an in-memory digest would
+            // make the first turn after every restart produce a duplicate record -- which is the
+            // "outlives its reason" failure in reverse, a gate that quietly stops gating.
+            var prev = _store.LastTicketEvent(tid, "completion_record");
+            if (prev is { Detail: string pd } && DigestOf(pd) == digest)
+            {
+                _store.Event("completion_record_unchanged", laneId,
+                    $"ticket {tid}: worktree unchanged since the last record ({digest}) -- one record per change, not per turn (D-R13)");
+                return;
+            }
+
+            // What the branch changed. THE THREE-DOT FORM IS ALREADY MERGE-BASE-RELATIVE:
+            // `git diff A...B` diffs from the merge base of A and B to B, which is precisely
+            // D-R8's `<merge-base>...<branch>`. §10's merge-base trap is about the DROP check --
+            // where the reference point has to survive main having been merged in -- and does not
+            // apply here: before that merge this is the fork-point diff, and after it, it is the
+            // branch's net contribution over main's tip. Both are what a PR shows.
+            var range = $"{cfg.Main}...{t.Branch}";
+            var (dsCode, diffstat) = Git.Run(t.Worktree, "diff", "--stat", range);
+            var (nmCode, names) = Git.Run(t.Worktree, "diff", "--name-only", range);
+            var changed = nmCode == 0
+                ? names.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).Where(x => x.Length > 0).ToList()
+                : new List<string>();
+
+            // The silent drop (D-R4), run here because it is free. `moot` until a land has
+            // merged main in; meaningful from the second land attempt onward, which is exactly
+            // the D-R3 flow -- the land refuses on a conflict, the agent resolves and commits,
+            // the turn ends, and this is the record the manager reads BEFORE the next land.
+            var (mergeCommit, preMerge) = MainMergeOnBranch(t.Worktree, cfg.Main, t.Branch);
+            var drops = mergeCommit.Length == 0 ? new List<string>() : SilentDrops(t.Worktree, preMerge, mergeCommit, t.Branch);
+            var dropState = mergeCommit.Length == 0 ? "moot" : drops.Count == 0 ? "clean" : "dropped";
+
+            // D-R15: reported, never run. `not-run` is a value here, not an omission.
+            var v = _store.LastTicketEvent(tid, "verify_green", "verify_red");
+            var verifyState = v?.Kind switch { "verify_green" => "green", "verify_red" => "red", _ => "not-run" };
+
+            var record = new
+            {
+                ticket = tid,
+                title = t.Title,
+                branch = t.Branch,
+                worktree = t.Worktree,
+                repo = t.Repo,
+                main = cfg.Main,
+                head,
+                digest,
+                row = paneEventId,          // the transcript row the report came from, for R6
+                range,
+                files = changed.Count,
+                changed = changed.Take(60).ToList(),
+                diffstat = dsCode == 0 ? diffstat : $"(git diff --stat failed: {diffstat})",
+                uncommitted = porcelain.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length,
+                verify = new
+                {
+                    state = verifyState,
+                    when = v?.Ts ?? "",
+                    // D-R15 in one sentence, IN the record, because the record is what a reviewer
+                    // reads and "verify: not-run" with no reason invites someone to add a verify
+                    // run here.
+                    detail = v?.Detail ?? "no verify has run for this ticket; the one that gates is the land's own, on the merged result (D-R15)",
+                },
+                drop = new { state = dropState, files = drops, merge = mergeCommit, preMerge },
+                // The agent's own words, whole unless they are enormous. This is the field that
+                // did not exist anywhere before R4.
+                report = Truncate(body, 4000),
+            };
+            var json = JsonSerializer.Serialize(record);
+            // `ticket <id> {json}` -- the house shape for a ticket event (`Store.LastTicketEvent`
+            // matches on it), with the JSON starting at the first brace.
+            _store.Event("completion_record", laneId, $"ticket {tid} {json}");
+        }
+    }
+
+    /// <summary>The D-R13 gate's value: 16 hex over the branch tip plus the porcelain status, so
+    /// committed and uncommitted work both move it. Short because it is read by people in event
+    /// details, and a full SHA256 in a log line is noise.</summary>
+    static string Digest(string s) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(s)))[..16].ToLowerInvariant();
+
+    /// <summary>The digest out of a stored record's detail, or "" when it cannot be read. A
+    /// record whose digest is unreadable must compare UNEQUAL, so the next turn writes a fresh
+    /// record rather than skipping on a value nobody could parse -- one duplicate record is a
+    /// cost, a gate that silently swallows every completion is a phase that does nothing.</summary>
+    static string DigestOf(string detail)
+    {
+        var brace = detail.IndexOf('{');
+        if (brace < 0) return "";
+        try
+        {
+            using var d = JsonDocument.Parse(detail[brace..]);
+            return d.RootElement.TryGetProperty("digest", out var g) ? g.GetString() ?? "" : "";
+        }
+        catch (JsonException) { return ""; }
     }
 
     // ------------------------------------------------------------- the input classifier (§4)
