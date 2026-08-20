@@ -330,3 +330,101 @@ are the responsiveness. P4 is a bug fix landable on its own.
   a cold worktree. Cheap in wall-clock terms because nobody waits on it — but it is real CPU, and
   whether a lighter examination (`dev test unit` plus the touched suites) is the better default
   needs measuring against how often it would say green when the full gate would not.
+
+## Appendix A — implementation touchpoints
+
+Named symbols, so a session picking this up does not have to re-derive the map. Line numbers
+rot; names do not. **One phase per commit**, each with its proof, in the order §7 gives.
+
+### P1 — the gate on every lane
+
+- **`Program.cs` `GateHook()`** — the early `if (string.IsNullOrEmpty(ticketArg)) return 0;` is
+  the exact line that makes a plain lane ungated. With no `--ticket` but a `--lane`, it must ask
+  the daemon instead of allowing.
+- **A new daemon command** (`tree-check`, lane + path) answering *is this path inside a project
+  but outside a worktree*. Use **the same stateless test both existing layers already use**:
+  `.git` is a **file** in a worktree and a **directory** in the shared checkout
+  (`.githooks/pre-commit`, and `dev.ps1`'s `--git-common-dir` handling). Resolve the path's
+  toplevel with `git rev-parse --show-toplevel`, then test `.git`. No registry, no state, nothing
+  that can go stale.
+- **Deployment funnel: `AttachShimAsync`.** Every lane spawn goes through it (`SpawnLaneAsync`
+  and `RespawnLaneAsync` both call it), so deploying there cannot be forgotten by a call site —
+  the same correction `DaemonClient.Send` needed for start-on-demand (§3.1). Deploy for
+  `role == "work"` only: management lanes run in the neutral directory and write nothing.
+- **`DeployGate(worktree, ticketId, repo)`** gains a lane-only form writing `--lane` instead of
+  `--ticket`. Keep one function with the ticket optional; two would drift.
+- **Consideration, not a blocker:** for a plain lane the cwd *is* the shared checkout, so this
+  writes `.claude/settings.local.json` into the operator's live tree. Already covered by the
+  `info/exclude` deployment `DeployGate` performs, so it can never be committed — but it is a
+  file appearing in their tree and the announcement should say so once.
+- **Measure before calling it done** (§9): time an `Edit` with and without the hook. The two
+  hooks deleted in D-7 cost 255 ms each, 136 ms of that merely starting PowerShell. This one is
+  `dodona.exe` directly rather than a script shelling out to it, so it should be far cheaper —
+  *should* is not a measurement.
+- **Re-read every fail-open path in `GateHook` first.** Under layer 1 a fail-open means a write
+  into the live tree, not a slip to the backstop.
+
+### P2 — promotion on the refused write
+
+- Factor the body of the **`ticket-create`** handler into a method the promotion can call —
+  it currently only exists inline in the command switch.
+- **`RespawnLaneAsync(laneId, title, childArgs, child, workDir)`** already takes a working
+  directory and resumes the session; this is the whole of the move.
+- **Trap:** the **`lane-respawn`** handler deliberately refuses to re-home a *ticket* lane. Layer
+  2 goes the other way (plain → ticket), which that refusal does not cover — so it needs its own
+  path and its own check, not a relaxation of that one.
+- The denial returned to the agent is a **rewrite, not a wall**: name the new worktree and the
+  same relative path inside it.
+
+### P3 — the end-of-turn examination
+
+- **`Daemon.cs`: `if (role == "work") rt.OnResult = CompressResult;`** — an **assignment, not
+  `+=`**. A second consumer that overwrites it silently kills selective compression, which would
+  present as "the panes went verbose" with nothing pointing here.
+- Gate the examination on **the worktree having changed since the last one** (record the examined
+  sha or a status digest), or a chatty lane re-runs the whole verify every turn (§9).
+- Runs in the ticket's own worktree, with its own `bin`/`obj`. Shares its runner with P4.
+
+### P4 — verify before the merge
+
+- **`LandOp`** — move the verify loop **above** `git merge --ff-only` and run it with
+  `WorkingDirectory = t.Worktree`. Equivalence is guaranteed by the fast-forward: main's
+  post-merge tree is byte-identical to the branch tip.
+- **`dodona.json`** `verify` becomes `dev gate` (D-6).
+- `dev prove` this one red before trusting it; it is the phase most likely to pass against the
+  old order.
+
+### P5 — the approval ask
+
+- The **`on-approval` refusal branch in `token-request`** raises a `questions` row instead of only
+  announcing. `Ask.cs`, the `answer` handler and `ui answer` already exist; the overlay already
+  renders an open row (D-L4). `dodona approve <id>` stays as the CLI form.
+
+### P6 — the manager's ownership picture
+
+- **`FactSheet`** — router side, and only what changes a *destination*.
+- **`BrainReview`** — manager side, full ownership: claims, worktrees, who holds the token, who is
+  mid-turn. It already runs `_ = Task.Run(…)` behind the decision, which is the property D-14
+  wants.
+
+### P7 — the `isolate` flag
+
+- **`ClassifyAsync`** (parse the field), the escalation prompt string in `RouteInput`, and
+  **`SpawnForAsync`** (the isolated spawn, with the plain-lane fallback when `ticket-create`
+  refuses).
+
+### P8–P10
+
+- **P8** elastic claims: `Claims.cs` for the algebra, the `claim-check` handler for the widen, the
+  `token-request` handler for the freeze.
+- **P9** the prompt tail: `TicketSystemPrompt`; the refusals: `Publish()` in `Program.cs` and
+  `Do-Worktree` in `tools/dev.ps1`.
+- **P10** `LandOp`'s dormant path, plus `LANE-LIFECYCLE.md` §3's preconditions.
+
+### How to work on it
+
+Per CLAUDE.md, and none of it optional: a worktree of your own; `dev check` before starting;
+`dev test unit` (~1 s) while iterating and the one or two suites the change touches; **`dev prove`
+every new check before believing it** — a check that has not been seen red is worth nothing;
+`dev gate` once before merging to main; `/ship` to deliver. A suite that prints no tally is a
+failure, not a shrug.
