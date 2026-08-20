@@ -389,6 +389,29 @@ try {
     Check 'the_drop_check_runs_at_completion_and_says_moot_before_main_is_merged_in' `
         ($null -ne $rec1 -and $rec1.drop.state -eq 'moot') "drop=$($rec1.drop | ConvertTo-Json -Compress)"
 
+    # ---- R5: THE MANAGER STARTS NO MODEL AGENT OF ITS OWN IN A MODEL-FREE SUITE ----------
+    #
+    # R5's manager reads the record above, and reading it needs a judgement agent -- which is the
+    # daemon starting a model process on ITS OWN initiative, not in answer to operator input. So
+    # it honours DODONA_NO_AUTOSTART, the same guard the startup warm-up, the drift watcher and
+    # `EnsureRouterAsync` use, and all four now agree on what "do not start things by yourself"
+    # means. Without it THIS SUITE would spawn a real `claude -p --model haiku` on every
+    # completion record: m1's dodona.json names no `agent`, so `Config.Agent` is the real CLI --
+    # CLAUDE.md 3.2's incident, where a "quick health check" left four model-backed processes on
+    # a machine the operator believed was idle. The review itself is proved in `brain`, which
+    # clears autostart the way the operator has it and points `agent` at the fake.
+    #
+    # Two things are asserted, and the second is what catches a future removal of the guard: the
+    # skip is RECORDED rather than silent (a review that cannot run must say so -- the same rule
+    # as `completion_record_impossible`), and no brain lane exists in this store at all.
+    Wait-Until { [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='manager_review_skipped'").Trim()) -ge 1 } `
+        20000 'the manager review declining to start a judgement agent' | Out-Null
+    $mgrSkip = Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='manager_review_skipped' ORDER BY id DESC LIMIT 1"
+    $brainLanes = (Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM lanes WHERE role LIKE 'brain%'").Trim()
+    Check 'the_manager_review_starts_no_model_agent_when_autostart_is_off' `
+        ($mgrSkip -match 'ticket 1' -and $mgrSkip -match 'DODONA_NO_AUTOSTART' -and $brainLanes -eq '0') `
+        "skip=[$mgrSkip] brain lanes=$brainLanes"
+
     # ---- D-R13: a chatty lane produces ONE record, not one per turn ----------------------
     #
     # A `result` is the end of A TURN, not of the conversation (LANE-LIFECYCLE.md §2 -- "the agent

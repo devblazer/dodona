@@ -282,7 +282,7 @@ Three changes did it, and all three are in `tools/dev.ps1` and `tests/_workspace
   `DODONA_TEST_CONCURRENCY` overrides; `dev suites --sequential` is the debugging escape hatch.
 - **`dev test unit`** runs the pure logic — the claim algebra, the policy table, repo
   resolution, path canonicalization, the two routing decisions made in code, the progress
-  tiers and their fold — with no daemon, no store and no window. **230 checks** in
+  tiers and their fold — with no daemon, no store and no window. **278 checks** in
   **1.9–2.3 s warm**, and ~5.6 s on the first run after a build. Corrected twice now: this
   row said "54 checks in about a second", then **88**, and the real number at
   `d43dffb` was **189** — nobody had re-counted, which is the same failure §1 has a whole
@@ -316,7 +316,7 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 | anything a person clicks or types | `dev test ui-use` |
 | dictation: the box, the mic toggle, spoken words | `dev test voice` — ~13 s, opens no microphone |
 | compression | `dev test compression` |
-| the dispatcher brain, the routing ladder | `dev test brain` |
+| the dispatcher brain, the routing ladder, the manager's review of finished work | `dev test brain` |
 | the concierge, the fence | `dev test concierge` |
 | `tools/dev.ps1` itself | `dev gate m0` — the gate's machinery over one suite, ~20 s |
 
@@ -487,7 +487,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 | `workspace` | identity, repo-exclusivity, multi-repo |
 | `ui-use` | the UI driven like a person |
 | `compression` | selective compression (§5) |
-| `brain` | the dispatcher brain, its routing ladder, and the no-second-brain-beside-a-live-one guard |
+| `brain` | the dispatcher brain, its routing ladder, the no-second-brain-beside-a-live-one guard, and the manager who reviews finished ticket work: it may send it back, it is bounded at three, and it can never approve |
 | `concierge` | the group-scope ladder, the fence, the review-behind |
 | `publish` | publish targeting: `--all` spares foreign instances |
 | `voice` | dictation: speech composes and can never send (docs/VOICE-INPUT-PLAN.md Phase A) |

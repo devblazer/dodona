@@ -3933,6 +3933,9 @@ sealed class Daemon
             return;
         }
         var digest = Digest(head + "\n" + porcelain);
+        // The record's own JSON, set inside the lock and read after it -- see the comment on
+        // the `ManagerReview` call below for why R5 fires from OUTSIDE the lock and not inside.
+        string? written = null;
 
         lock (_recordLocks.GetOrAdd(tid, _ => new object()))
         {
@@ -4007,7 +4010,22 @@ sealed class Daemon
             // `ticket <id> {json}` -- the house shape for a ticket event (`Store.LastTicketEvent`
             // matches on it), with the JSON starting at the first brace.
             _store.Event("completion_record", laneId, $"ticket {tid} {json}");
+            written = json;
         }
+
+        // R5 FIRES FROM HERE, AND BOTH HALVES OF THAT ARE DELIBERATE.
+        //
+        // OUTSIDE THE LOCK, and on a task of its own -- belt and braces, because either one
+        // alone is easy to lose in a later edit. `_recordLocks` is per TICKET and is held above
+        // across read-decide-write; the manager review is a model call with a 25 s timeout, so
+        // firing it inside would hold one ticket's lock across that call and serialise every
+        // later turn of the same ticket behind a manager thinking.
+        //
+        // TRIGGERED BY THE RECORD EXISTING, not by a third consumer of `rt.OnResult`.
+        // `HookTurnEnd` is an ASSIGNMENT with two consumers already (plan §10), and a review
+        // wired there would have to re-derive D-R13's gate to know whether anything was new to
+        // review. The record IS that answer: it exists exactly when the worktree moved.
+        if (written is not null) ManagerReview(t, laneId, repo.Path, written);
     }
 
     /// <summary>The D-R13 gate's value: 16 hex over the branch tip plus the porcelain status, so
@@ -4030,6 +4048,316 @@ sealed class Daemon
             return d.RootElement.TryGetProperty("digest", out var g) ? g.GetString() ?? "" : "";
         }
         catch (JsonException) { return ""; }
+    }
+
+    // ------------------------------------------ the manager's review (R5, D-R9/D-R10/D-R12)
+
+    /// <summary>How many times one ticket may be sent back before it goes to the operator
+    /// regardless (D-R12). An unbounded send-back loop is CLAUDE.md §0.1's *never stuck*
+    /// violated in a costume where everyone is being reasonable.</summary>
+    const int SendBackBound = 3;
+
+    /// <summary>
+    /// The manager reads R4's completion record and MAY SEND THE WORK BACK
+    /// (`docs/REVIEW-AND-MERGE-PLAN.md` D-R9). This is the chair R3 left empty: the file
+    /// reservations were retired on the operator's reasoning that *"if that is problematic in
+    /// some way, it's the manager's job to say something about it"*, and until this method
+    /// existed `claim_overlap` and `branch_touched` were recorded and nothing read either.
+    ///
+    /// **IT CAN BLOCK, BUT IT CANNOT BLESS (D-R10) — the load-bearing rule of the whole plan.**
+    /// There is deliberately no path from here to `Store.TicketApprove`, and `case "approve"`
+    /// stays reachable only from the operator's own `approve` / `dodona ui answer`. Rejection is
+    /// free and reversible — worst case it costs a round; approval advances a ref that has no
+    /// undo. A model as the sole gate on that step is *a prompt providing safety*, which
+    /// `WORK-ISOLATION-PLAN` §2 forbids and which this phase is not allowed to reintroduce just
+    /// because the model is called a manager. So the schema offers `ok | send-back` and nothing
+    /// else, **anything that is not literally `send-back` is read as no objection**, and `ok`
+    /// grants nothing — `brain:a_manager_approval_grants_nothing` asks for `approve` on purpose
+    /// and watches it change nothing at all.
+    ///
+    /// **BOTH ENDS ARE BOUNDED (D-R12).** Reading: the diffstat, the changed-file NAMES and the
+    /// agent's own report, on the cheap tier, escalating to the expensive one only when the
+    /// cheap tier says its own confidence is low — the pattern `BrainReview` already uses. Never
+    /// the diff CONTENT, which plan §9 rejects by name: a reviewer that reads every diff in full
+    /// is a reviewer that cannot be afforded (CLAUDE.md §0.1). Loop: three send-backs, then the
+    /// ticket goes to the operator with the history attached and no fourth model call.
+    ///
+    /// **THE BOUND IS COUNTED IN THE STORE, NEVER IN MEMORY** (`Store.CountTicketEvents`). A
+    /// daemon restarts on every publish, so a field or a counter would reset the bound at
+    /// exactly the moment three rounds have gone by — the same reason R4 reads its previous
+    /// digest back out of its own event, and §3's dead routing ladder wearing a third costume.
+    /// `brain` restarts the daemon between round two and round three for that reason and no
+    /// other.
+    ///
+    /// **A SEND-BACK CANNOT REVIEW ITSELF, and D-R13's gate is what guarantees it.** The
+    /// send-back is delivered with `Say`, which starts a turn, which ends, which arrives back at
+    /// `CompletionRecord`. That turn has not moved the worktree, so the digest matches, so there
+    /// is no record and therefore no second review. The loop terminates on a fact rather than on
+    /// a model choosing to stop — which is what "bounded" has to mean here.
+    /// </summary>
+    void ManagerReview(Store.TicketRow t, long laneId, string project, string recordJson)
+    {
+        var tid = t.Id;
+        // THE DAEMON ACTING ON ITS OWN INITIATIVE, not on operator input — so it honours the same
+        // guard as the startup warm-up, the drift watcher and `EnsureRouterAsync`, and all four
+        // now agree on what "do not start things by yourself" means. This is not a test hook:
+        // without it every model-free suite that finishes a ticket turn would spawn a real
+        // `claude -p --model haiku`, because a fixture with no `agent` in its dodona.json gets
+        // the real CLI by default (m1 is exactly that) — the one thing a model-free suite may
+        // never do (CLAUDE.md §3.2's incident). The operator never sets it; `brain-acceptance`
+        // clears it for this phase's checks, the way it already does for the classifier's.
+        if (Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
+        {
+            _store.Event("manager_review_skipped", laneId,
+                $"ticket {tid}: DODONA_NO_AUTOSTART=1, so this daemon starts no judgement agent of its own");
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // ALREADY AT THE BOUND: no model call, and the operator hears about it ONCE.
+                // D-R12's "then it goes to the operator regardless" is not "then it asks a
+                // fourth time", and an announcement on every later turn would be the never-stuck
+                // fix turning into never-quiet — so the announcement is gated on its own event,
+                // in the store, the same way the bound itself is counted.
+                var rounds = _store.CountTicketEvents(tid, "manager_sent_back");
+                if (rounds >= SendBackBound)
+                {
+                    if (_store.CountTicketEvents(tid, "manager_bound_reached") == 0)
+                    {
+                        var history = SendBackHistory(tid);
+                        _store.Event("manager_bound_reached", laneId,
+                            $"ticket {tid}: {rounds} send-backs is the bound (D-R12) — to the operator, history: {Truncate(history, 900)}");
+                        Announce(t, $"manager review: ticket {tid} '{t.Title}' has been sent back {rounds} times, which is the bound — " +
+                                    $"it is yours to judge now. What the manager asked for, in order: {Truncate(history, 600)}");
+                    }
+                    return;
+                }
+
+                // ENSURE AT THE POINT OF USE, NEVER LOOK UP (CLAUDE.md §3). A lookup that misses
+                // is indistinguishable from one that was never going to hit, which is how the
+                // routing ladder stayed fully green and dead in production for two days.
+                var loId = await EnsureBrainAsync(hi: false, project);
+                if (loId < 0)
+                {
+                    // A review that could not run SAYS SO. A check that quietly does nothing is
+                    // worse than no check, and "judgement is switched off for this project" must
+                    // not look identical to "the review is broken" from the store
+                    // (`completion_record_impossible` is the pattern being copied).
+                    _store.Event("manager_review_skipped", laneId,
+                        $"ticket {tid}: no judgement agent for {project} — brain off in dodona.json, failed to start, or the maxBrains cap");
+                    return;
+                }
+
+                var q = ManagerQuestion(t, recordJson, rounds);
+                var gate = BrainLock(loId);
+                await gate.WaitAsync();
+                string? reply;
+                try { reply = await _lanes[loId].AskAsync(q, 25000); }
+                finally { gate.Release(); }
+                if (reply is null)
+                {
+                    _store.Event("manager_review_failed", laneId, $"ticket {tid}: the cheap tier did not answer in 25s");
+                    return;
+                }
+                JsonElement v;
+                try { v = JsonDocument.Parse(reply[reply.IndexOf('{')..(reply.LastIndexOf('}') + 1)]).RootElement.Clone(); }
+                catch
+                {
+                    _store.Event("manager_review_failed", laneId, $"ticket {tid}: unparseable reply: {Truncate(reply, 160)}");
+                    return;
+                }
+
+                // Cheap tier unsure -> the SAME question, expensive tier (D-R12's bound on
+                // reading, and the operator's rule #1). Which tier answered is a FIELD of the
+                // one review row rather than an event of its own: one review, one row, and R6
+                // reads that row.
+                var conf = v.TryGetProperty("confidence", out var cf) ? cf.GetString() ?? "low" : "low";
+                var tier = "lo";
+                if (conf == "low")
+                {
+                    var hiV = await AskBrainHiAsync(q, project);
+                    if (hiV is not null)
+                    {
+                        v = hiV.Value;
+                        tier = "hi";
+                        conf = v.TryGetProperty("confidence", out var cf2) ? cf2.GetString() ?? "low" : "low";
+                    }
+                }
+
+                // D-R10 IN ONE LINE: `send-back` is the only verdict that does anything. There is
+                // no branch below this that grants, approves or advances anything, and a reply of
+                // `{"verdict":"approve"}` lands here as no objection.
+                var verdict = v.TryGetProperty("verdict", out var vd) ? vd.GetString() ?? "ok" : "ok";
+                var sendBack = verdict == "send-back";
+                var note = v.TryGetProperty("note", out var nt) ? Truncate(nt.GetString() ?? "", 240) : "";
+                var message = v.TryGetProperty("message", out var mg) ? Truncate(mg.GetString() ?? "", 1200) : "";
+
+                // THE WRITE-UP IS THE POINT, NOT THE VERDICT (D-R11): R6 renders `note` in the
+                // approval ask so the operator's yes is a two-second decision instead of a
+                // diff-reading session. So the row is written whatever the verdict, in the same
+                // `ticket <id> {json}` shape R4's record uses — `LastTicketEvent` finds it and R6
+                // parses it.
+                var row = JsonSerializer.Serialize(new
+                {
+                    ticket = tid,
+                    verdict = sendBack ? "send-back" : "ok",
+                    asked = verdict,        // what the model actually said, including `approve`
+                    confidence = conf,
+                    tier,
+                    round = rounds + 1,
+                    bound = SendBackBound,
+                    note,
+                    message,
+                });
+                _store.Event("manager_review", laneId, $"ticket {tid} {row}");
+                if (!sendBack) return;                 // silent on agreement (operator's rule #3)
+
+                var text = message.Length > 0 ? message : note;
+                if (text.Length == 0)
+                {
+                    // A send-back with nothing to say cannot be delivered, and quietly treating
+                    // it as agreement would be a block that evaporated.
+                    _store.Event("manager_review_failed", laneId,
+                        $"ticket {tid}: verdict send-back with no message and no note — nothing to send, so nothing was sent");
+                    return;
+                }
+                await SendBackAsync(t, laneId, rounds + 1, text, note);
+            }
+            catch (Exception ex) { _store.Event("manager_review_failed", laneId, $"ticket {tid}: {ex.GetType().Name}: {ex.Message}"); }
+        });
+    }
+
+    /// <summary>The question, and D-R12's bound on reading is IN it: the diffstat, the
+    /// changed-file NAMES and the agent's own report — never the diff content, which plan §9
+    /// rejects by name.
+    ///
+    /// **TWO OF THE RECORD'S FIELDS WOULD MAKE A NAIVE REVIEWER BLOCK EVERY TICKET, so the
+    /// prompt says what they mean out loud.** `verify.state = not-run` is the NORMAL value and it
+    /// is correct — D-R15: the verify that gates is the land's own, on the result of merging main
+    /// in, and one run here would answer a different question while reading as though it did not.
+    /// `drop.state = moot` means main has not been merged into the branch yet, not that a check
+    /// failed. A manager that read either as red would send every ticket back forever, which is
+    /// D-R12's infinite politeness arriving through the front door.
+    ///
+    /// The history goes in too, so round three does not repeat round one — the same rows the
+    /// operator gets at the bound.</summary>
+    string ManagerQuestion(Store.TicketRow t, string recordJson, int rounds)
+    {
+        static string S(JsonElement e, string name) =>
+            e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var x) ? x.ToString() : "";
+        using var d = JsonDocument.Parse(recordJson);
+        var r = d.RootElement;
+        var changed = r.TryGetProperty("changed", out var ch) && ch.ValueKind == JsonValueKind.Array
+            ? string.Join(", ", ch.EnumerateArray().Take(40).Select(x => x.GetString())) : "";
+        var verify = r.TryGetProperty("verify", out var vv) ? vv : default;
+        var drop = r.TryGetProperty("drop", out var dd) ? dd : default;
+        var hist = SendBackHistory(t.Id);
+        return "Review the completed work on a ticket and decide whether to SEND IT BACK.\n" +
+               $"Ticket {t.Id}: {t.Title}   branch {t.Branch}\n" +
+               $"Files changed ({S(r, "files")}): {changed}\n" +
+               $"Diffstat:\n{Truncate(S(r, "diffstat"), 1500)}\n" +
+               $"Uncommitted files in the worktree: {S(r, "uncommitted")}\n" +
+               $"Verify: {S(verify, "state")} — `not-run` is the NORMAL value and it is CORRECT: no verify has run " +
+               "yet, and the one that gates runs at land time on the result of merging main in. Never send work back " +
+               "for that, and never for missing tests.\n" +
+               $"Silent-drop check: {S(drop, "state")} — `moot` means main has not been merged into the branch yet, " +
+               "which is the ordinary state before a land. `dropped` means the branch discarded something main " +
+               $"changed, and THAT is worth raising: {S(drop, "files")}\n" +
+               $"The agent's own report of the turn it just finished:\n{Truncate(S(r, "report"), 2500)}\n" +
+               (hist.Length > 0
+                   ? $"You have already sent this ticket back {rounds} time(s): {Truncate(hist, 800)}\n" +
+                     "Do not repeat a point it has already dealt with.\n"
+                   : "") +
+               "You may BLOCK and you may NOT BLESS: you cannot approve anything, and `ok` grants nothing — the " +
+               "operator's approval is the only yes and it is not yours to give. Send work back only for something " +
+               "real: work that does not match the ticket, a change the report does not mention, a discarded file, " +
+               "a schema or interface change slipped in quietly. Not for style.\n" +
+               "Reply ONLY one line of JSON, no prose, no markdown, no code fence: " +
+               "{\"verdict\":\"ok|send-back\",\"confidence\":\"high|medium|low\"," +
+               "\"note\":\"<=200 chars, written for the operator deciding whether to merge\"," +
+               "\"message\":\"<what to tell the agent, only when send-back>\"}";
+    }
+
+    /// <summary>What the manager has already asked for on this ticket, oldest first — D-R12's
+    /// "with the history attached". Read out of the events because they are the only copy: no
+    /// field, no column, and it survives the publish that restarts the daemon.</summary>
+    string SendBackHistory(long tid)
+    {
+        var parts = new List<string>();
+        foreach (var (_, _, detail) in _store.TicketEvents(tid, SendBackBound + 1, "manager_sent_back"))
+        {
+            var brace = detail.IndexOf('{');
+            if (brace < 0) continue;
+            try
+            {
+                using var d = JsonDocument.Parse(detail[brace..]);
+                var round = d.RootElement.TryGetProperty("round", out var rd) ? rd.ToString() : "?";
+                var said = d.RootElement.TryGetProperty("message", out var mg) && mg.GetString() is { Length: > 0 } m
+                    ? m
+                    : d.RootElement.TryGetProperty("note", out var nt) ? nt.GetString() ?? "" : "";
+                parts.Add($"({round}) {said}");
+            }
+            catch (JsonException) { }      // a row we cannot read is worth less than the ones we can
+        }
+        return string.Join("  ", parts);
+    }
+
+    /// <summary>Deliver the manager's objection to the lane AS INPUT — `LaneRuntime.Say`, the
+    /// same path a typed sentence takes, so the agent keeps its warm context and simply carries
+    /// on (D-R9). That is what makes "request changes" cheap here: the lane is a thread, not a
+    /// pull request. `Say` also writes the pane's `user_input` row, so the operator sees the
+    /// send-back exactly where they see their own sentences, and the `[manager review …]` prefix
+    /// is what tells the two apart — no announcement, deliberately, because a machine handling
+    /// its own round is not a person being needed (§4).
+    ///
+    /// **IT MUST NOT VANISH.** `Say` throws when the lane is not connected, and a send-back that
+    /// disappeared would be the silent-failure class this codebase pays for most. So this waits
+    /// for the lane to come back — a shim reconnecting, or a reconcile adopting it — and if it
+    /// does not, records the whole message and puts it in front of the operator with the two
+    /// commands that deliver it by hand. It does NOT respawn from here: that is forty lines the
+    /// `lane-respawn` handler already owns (project ownership, the lane's own config, the ticket
+    /// system prompt, the resume args), and a second implementation of it would drift on exactly
+    /// the cases that matter — `MakeTicket`'s lesson. An undelivered send-back also counts as NO
+    /// ROUND against the bound, because nothing was said.</summary>
+    async Task SendBackAsync(Store.TicketRow t, long laneId, int round, string message, string note)
+    {
+        var text = $"[manager review, round {round} of {SendBackBound}] {message}" + "\n\n" +
+                   "This is a review of the turn you just finished, not a new task. Address it on this branch and " +
+                   "commit; nothing has been merged and nothing has been approved.";
+        // A CONDITION WITH A DEADLINE, never a sleep — CLAUDE.md §3's rule for waits, in code. The
+        // turn that produced this record came off this lane's own wire, so it is normally
+        // connected already and this loop runs exactly once; 20 s covers a shim reconnecting or a
+        // reconcile adopting it, and what un-sticks the wait is named in the refusal below.
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (_lanes.TryGetValue(laneId, out var rt) && rt.Connected)
+            {
+                try
+                {
+                    // The event is written AFTER the write to the wire, because what it records
+                    // is a send-back that was DELIVERED — a round burned on a message the lane
+                    // never received would be the bound eating the agent's chances silently.
+                    rt.Say(text);
+                    _store.Event("manager_sent_back", laneId, $"ticket {t.Id} " + JsonSerializer.Serialize(new
+                    {
+                        ticket = t.Id, lane = laneId, round, bound = SendBackBound, note, message,
+                    }));
+                    return;
+                }
+                catch (InvalidOperationException) { }   // it dropped between the check and the write: keep waiting
+            }
+            await Task.Delay(250);
+        }
+        _store.Event("manager_send_back_undelivered", laneId, $"ticket {t.Id} " + JsonSerializer.Serialize(new
+        {
+            ticket = t.Id, lane = laneId, round, note, message,
+        }));
+        Announce(t, $"manager review: ticket {t.Id} '{t.Title}' should go back to its agent, but lane {laneId} has not " +
+                    $"answered for 20s — `dodona lane-respawn {laneId}`, then `dodona say {laneId} \"{Truncate(message, 200)}\"`. " +
+                    "It was NOT delivered and it counts as no round against the bound.");
     }
 
     // ------------------------------------------------------------- the input classifier (§4)

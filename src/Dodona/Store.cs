@@ -699,14 +699,66 @@ sealed class Store : IDisposable, ILaneSink
         {
             using var c = _db.CreateCommand();
             var names = string.Join(", ", kinds.Select((_, i) => $"$k{i}"));
-            c.CommandText = $"SELECT kind, ts, detail FROM events WHERE kind IN ({names}) AND (" +
-                            "detail = 'ticket ' || $t OR detail LIKE 'ticket ' || $t || ' %' " +
-                            "OR detail LIKE 'ticket ' || $t || ':%') ORDER BY id DESC LIMIT 1;";
+            c.CommandText = $"SELECT kind, ts, detail FROM events WHERE kind IN ({names}) " +
+                            $"AND {AboutTicket} ORDER BY id DESC LIMIT 1;";
             for (int i = 0; i < kinds.Length; i++) c.Parameters.AddWithValue($"$k{i}", kinds[i]);
             c.Parameters.AddWithValue("$t", ticket);
             using var r = c.ExecuteReader();
             return r.Read() ? (r.GetString(0), r.GetString(1), r.IsDBNull(2) ? "" : r.GetString(2)) : null;
         }
+    }
+
+    /// <summary>The three `detail` shapes that mean "about ticket $t", in ONE place because
+    /// three readers now share them and a fourth will. Spelled out rather than approximated:
+    /// `LIKE 'ticket 7%'` also matches ticket 71, and a verify result -- or a send-back count --
+    /// attributed to a neighbouring ticket is exactly the quiet wrongness R4's record was
+    /// written to remove. See <see cref="LastTicketEvent"/> for the rest of the reasoning.</summary>
+    const string AboutTicket = "(detail = 'ticket ' || $t OR detail LIKE 'ticket ' || $t || ' %' " +
+                              "OR detail LIKE 'ticket ' || $t || ':%')";
+
+    /// <summary>How many events of those kinds are about this ticket. R5's send-back bound
+    /// (D-R12: three, then it goes to the operator) lives here rather than in a field or a
+    /// column, for the same reason R4 reads its previous digest back out of its own event: a
+    /// daemon restarts on every publish and every hot swap, so an in-memory counter would reset
+    /// the bound at exactly the moment three rounds have gone by -- a gate that quietly stops
+    /// gating, which is this project's most-repeated failure. And no schema bump for one
+    /// integer the events already carry (<see cref="HasEvent"/>'s reasoning, one ticket
+    /// wider).</summary>
+    public int CountTicketEvents(long ticket, params string[] kinds)
+    {
+        if (kinds.Length == 0) return 0;
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            var names = string.Join(", ", kinds.Select((_, i) => $"$k{i}"));
+            c.CommandText = $"SELECT COUNT(*) FROM events WHERE kind IN ({names}) AND {AboutTicket};";
+            for (int i = 0; i < kinds.Length; i++) c.Parameters.AddWithValue($"$k{i}", kinds[i]);
+            c.Parameters.AddWithValue("$t", ticket);
+            return Convert.ToInt32(c.ExecuteScalar() ?? 0);
+        }
+    }
+
+    /// <summary>Every event of those kinds about this ticket, OLDEST FIRST, capped. D-R12 says
+    /// the round after the bound goes to the operator *with the review history attached*, and
+    /// the rows are the only copy of that history -- there is no column holding it and nothing
+    /// in memory survives the publish that restarts the daemon.</summary>
+    public List<(string Kind, string Ts, string Detail)> TicketEvents(long ticket, int limit, params string[] kinds)
+    {
+        var found = new List<(string, string, string)>();
+        if (kinds.Length == 0 || limit <= 0) return found;
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            var names = string.Join(", ", kinds.Select((_, i) => $"$k{i}"));
+            c.CommandText = $"SELECT kind, ts, detail FROM events WHERE kind IN ({names}) " +
+                            $"AND {AboutTicket} ORDER BY id ASC LIMIT $n;";
+            for (int i = 0; i < kinds.Length; i++) c.Parameters.AddWithValue($"$k{i}", kinds[i]);
+            c.Parameters.AddWithValue("$t", ticket);
+            c.Parameters.AddWithValue("$n", limit);
+            using var r = c.ExecuteReader();
+            while (r.Read()) found.Add((r.GetString(0), r.GetString(1), r.IsDBNull(2) ? "" : r.GetString(2)));
+        }
+        return found;
     }
 
     public void Event(string kind, long? laneId, string? detail)

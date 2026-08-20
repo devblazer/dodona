@@ -259,6 +259,40 @@ while ((line = Console.ReadLine()) is not null)
             continue;
         }
 
+        // THE R5 WORK REVIEW (REVIEW-AND-MERGE-PLAN D-R9/D-R12) reaches EITHER tier with its own
+        // schema -- the cheap one first, the expensive one only on escalation -- so it is
+        // recognised by the question's own first line, the way brain-hi's granularity question
+        // and the concierge's review-behind are. A directive in the operator's text could not
+        // tell them apart: the completion record quotes the agent's report back verbatim, and
+        // that report is where these directives ride in.
+        //   mgrverdict:ok|send-back|approve -- the verdict. `approve` is deliberately reachable:
+        //       D-R10 says the manager may block and may not bless, so a check has to be able to
+        //       ASK for a blessing and watch it grant nothing.
+        //   mgrmsg:<TOKEN>  -- the send-back message. ONE token on purpose: a multi-word message
+        //       would run into the rest of the question's line and the check could not name what
+        //       it expects to find in the lane's pane.
+        //   mgrlow          -- confidence low on the cheap tier only, which forces the escalation
+        //       (the hi tier is always sure, like `brainlow` above).
+        if (text.Contains("Review the completed work on a ticket"))
+        {
+            var mv = Regex.Match(text, @"mgrverdict:([\w-]+)");
+            var mm = Regex.Match(text, @"mgrmsg:(\S+)");
+            Emit(new
+            {
+                type = "result",
+                subtype = "success",
+                session_id = sessionId,
+                result = JsonSerializer.Serialize(new
+                {
+                    verdict = mv.Success ? mv.Groups[1].Value : "ok",
+                    confidence = text.Contains("mgrlow") && !isHi ? "low" : "high",
+                    note = $"fake manager on the {(isHi ? "hi" : "lo")} tier",
+                    message = mm.Success ? mm.Groups[1].Value : "",
+                }),
+            });
+            continue;
+        }
+
         var name = Regex.Match(text, @"brainname:(\w+)");
         var tick = Regex.Match(text, @"brainticket:(\w+)");
         var low = text.Contains("brainlow") && !isHi;      // the hi tier is always sure

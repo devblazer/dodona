@@ -1,6 +1,6 @@
 # Review and merge — the ordinary developer flow, with a manager as the reviewer
 
-Status: **R1, R2, R3, R3.5 and R4 BUILT** (2026-08-20); R5-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
+Status: **R1, R2, R3, R3.5, R4 and R5 BUILT** (2026-08-20); R6-R7 planned. Written 2026-08-20 from the operator's brief, after tracing the land
 path in code and measuring what the manager is actually told today.
 
 The authority for how a ticket's work gets reviewed and lands on main. It **supersedes
@@ -300,6 +300,65 @@ Two consequences, stated so they are not rediscovered:
   tier*). Nothing is lost, and the verify that **gates** is still the one in `LandFlow`, before the
   ref moves, and stays the only one.
 
+### BUILT, 2026-08-20 — and the three decisions the phase could not be written without
+
+The manager exists. `ManagerReview` reads the record, `SendBackAsync` delivers the objection to the
+lane as input, and there is no path from either to `TicketApprove`. Seven new checks, all seen
+red: six in `brain` (69 checks, 61.8 s measured here) and one in `m1` (113 checks, 31.8 s). An
+eighth was written and deleted — `dev prove` called it VACUOUS, correctly, because it asserted
+that `ticket-create` makes a worktree, which already works. Its value went into the first real
+check's failure detail instead.
+
+Two properties are worth stating before the decisions, because both are load-bearing and neither
+is obvious from the code:
+
+- **A SEND-BACK CANNOT REVIEW ITSELF, and D-R13's gate is what guarantees it.** The send-back is
+  delivered with `Say`, which starts a turn, which ends, which arrives back at `CompletionRecord`.
+  That turn moved no files, so the digest matches, so there is no record and therefore no second
+  review. The loop terminates **on a fact**, not on a model deciding to stop — which is what
+  "bounded" has to mean when a model is in the loop. R4's gate turns out to be R5's terminator.
+- **The trigger is THE RECORD EXISTING, not a third consumer of `rt.OnResult`.** §10's trap says
+  that field is an assignment, and it already carries two consumers. A review wired there would
+  also have to re-derive D-R13's gate to know whether anything was new to review — and the record
+  *is* that answer, since it exists exactly when the worktree moved.
+
+**D-R16. THE SEND-BACK BOUND COUNTS ITS OWN EVENT KIND, not `brain_review`.** Appendix A said to
+count `brain_review` events for the ticket. The reasoning behind that — count in the store, not in
+a field, and no schema bump for one integer — is kept and is the whole of `Store.CountTicketEvents`.
+The *kind* is not: `brain_review` is the spawn-time review (§1), it is lane-scoped, and it fires for
+plain lanes that have no ticket at all, so counting it would count reviews rather than send-backs.
+D-R12 bounds **send-backs**, and a review that agreed must not spend one of an agent's three
+chances. So `manager_sent_back` is a distinct, ticket-scoped kind, written **only after the message
+reached the wire** — an undelivered send-back counts as no round, because nothing was said.
+
+**D-R17. THE REVIEW HONOURS `DODONA_NO_AUTOSTART`, because it is the daemon starting a model agent
+on its own initiative.** Not in answer to operator input — the same class as the startup warm-up,
+the drift watcher and `EnsureRouterAsync`, and all four now agree on what *do not start things by
+yourself* means. This is not a test hook and it is not optional: without it every model-free suite
+that finishes a ticket turn spawns a real `claude -p --model haiku`, because a fixture with no
+`agent` in its `dodona.json` gets the real CLI by default — which `m1` is exactly, and which is
+CLAUDE.md §3.2's incident (a "quick health check" that left four model-backed processes on a
+machine the operator believed was idle). The operator never sets the variable. `m1` asserts the
+guard from the outside (the skip is recorded, and no brain lane exists in that store);
+`brain-acceptance` clears it for the R5 section, as it already does for the classifier's, so the
+review is proved on the operator's own path.
+
+**D-R18. AT THE BOUND THERE IS NO FOURTH MODEL CALL, AND THE OPERATOR IS TOLD ONCE.** D-R12's *then
+it goes to the operator regardless* is not *then it asks a fourth time*: a fourth review would
+spend quota producing a note nothing can act on, since the only lever it has — the send-back — is
+spent. So at three the model is not asked at all; `manager_bound_reached` is written, and the
+ticket's pane carries one announcement naming the count and quoting what the manager asked for in
+order. **Once**, gated on that event rather than on a flag, for the same reason the bound itself is:
+a daemon restarts on every publish, and an announcement per subsequent turn would be the
+never-stuck fix turning into never-quiet.
+
+**What R6 inherits.** `manager_review` is written for **every** verdict, including `ok`, and carries
+the `note` — because D-R11 says the write-up is the point and the verdict is not. It is
+ticket-scoped in R4's `ticket <id> {json}` shape, so `Store.LastTicketEvent` finds it and R6 parses
+it. The pane is deliberately *not* where a review lands (§4: attention is owed when a person is
+needed, and a machine handling its own round is not that) — except at the bound, where a person is
+genuinely needed, and when a send-back could not be delivered.
+
 ## 6. Where the human still is
 
 Unchanged, and deliberately: `approve` gates `token-request`, and this repo stays
@@ -330,7 +389,7 @@ more there, not less: it is what a human reviewer reads first.
 | **R3 — BUILT** | D-R5: retire the three refusals (**four**, see below). Re-aim `m1`'s two gate checks and `m2`'s backstop check rather than deleting them. | `m1`: two tickets over one path both get created; an agent writes freely across its own worktree; the gate still refuses the **shared checkout** (layer 1 untouched). |
 | **R3.5 — BUILT** | D-R14: the land comes OFF the serial control pipe. `land` returns *landing…* and the outcome arrives as an announcement; the token stays held across the whole flow and a failure still leaves main untouched. | `m1`: a land whose verify takes seconds does not block a concurrent `status`/`say` on the same daemon; the outcome still reaches the caller; the existing land checks pass unchanged against the new reply shape. **All three held, measured** — see D-R14. |
 | **R4 — BUILT** | D-R8's record, assembled at completion. Gated on the worktree having changed (D-R13). The verify result is **reported, never run** — see D-R15, which is the decision this phase could not be written without. | `m1`: a finished ticket produces exactly one record carrying diffstat, verify result, drop-check and the agent's report; a chatty lane produces no second one; and **an adopted lane still produces one after a daemon restart** — the wiring lives in one place called from both the spawn and reconcile, which is where §3's dead-routing-ladder failure would otherwise reappear. 13 new checks, all seen red; `m0` gains the no-summon assertion for the read verb. |
-| **R5** | D-R9/D-R10/D-R12: the manager reads it, may send back, bounded at three, and **cannot approve**. | `brain`: a send-back reaches the lane as input; the fourth round goes to the operator; a manager "approval" grants **nothing**. |
+| **R5 — BUILT** | D-R9/D-R10/D-R12: the manager reads it, may send back, bounded at three, and **cannot approve**. Triggered by the record existing rather than by a third `OnResult` consumer, and fired after `_recordLocks` is released — see D-R16/D-R17/D-R18. | `brain`: a send-back reaches the lane as input; a manager "approval" grants **nothing** (unapproved, no `ticket_approved`, `token-request` still refuses); the cheap tier escalates when unsure; and **three send-backs is the bound with a daemon restart in the middle of them**, because the count lives in the store. `m1` asserts the other side of D-R17: with autostart off no judgement agent is started at all. 7 new checks, all seen red. |
 | **R6** | D-R11: the write-up renders in the approval ask (absorbs `WORK-ISOLATION` P5). | `ui-use`: the ask carries the summary and answering it grants the token, at a live window. |
 | **R7** | §7: PR-mode assembles a PR description and review comments instead. | `publish`/`workspace`: a `"delivery": "pr"` repo performs no local merge. |
 
@@ -340,13 +399,21 @@ comes next and before R4** (D-R14): R4 assembles its record on the land path, so
 means building it inside a call that freezes the daemon and then moving it. R4–R6 are the review.
 R7 is the foreign-repo case and can wait.
 
-**AND R3 LEFT A PROMISE R5 HAS TO KEEP.** R3 retired the file reservations on the operator's
-reasoning that *"if that is problematic in some way, it's the manager's job to say something about
-it"* — and that manager does not exist yet. Overlaps and branch touches are recorded now
-(`claim_overlap`, `branch_touched`) and **nothing reads either**. Nothing is unsafe, because the
+**AND R3 LEFT A PROMISE R5 HAS TO KEEP — KEPT, 2026-08-20.** R3 retired the file reservations on
+the operator's reasoning that *"if that is problematic in some way, it's the manager's job to say
+something about it"* — and that manager did not exist. Overlaps and branch touches were recorded
+(`claim_overlap`, `branch_touched`) and **nothing read either**. Nothing was unsafe, because the
 real gate never moved: every land still needs the operator's explicit `approve`, and this repo is
-`on-approval` by default (verified in code, 2026-08-20). But the second pair of eyes R3 assumed is
-an empty chair until R5, and that is the honest reason R4–R6 are not optional polish.
+`on-approval` by default (verified in code, 2026-08-20). But the second pair of eyes R3 assumed
+was an empty chair, which is the honest reason R4–R6 were not optional polish.
+
+**The chair is filled now, and one half of the promise is still outstanding.** R5's manager reads
+the completion record — the diff's shape and the agent's own words — and can send the work back.
+What it is not yet handed is `claim_overlap`: *another ticket is working the same paths* is a fact
+R3 records and the review does not read, because it is a statement about a SECOND ticket and the
+record is about one. That is duplicated effort — the overlap the operator actually cared about —
+and it belongs to whoever adds a cross-ticket view, not to a single ticket's review. Said here so
+it is not mistaken for done.
 
 ## 9. Rejected — do not re-propose
 
@@ -416,12 +483,23 @@ an empty chair until R5, and that is the honest reason R4–R6 are not optional 
 
 - Does the manager review need the diff **content** for a first pass, or is diffstat-plus-report
   enough to catch anything worth catching? Measure before deciding — this is the difference between
-  an affordable reviewer and an expensive one.
+  an affordable reviewer and an expensive one. **STILL OPEN after R5, and now measurable**: R5
+  ships diffstat-plus-report as the first pass with escalation on low confidence, so the question
+  is answerable from real `manager_review` rows rather than from argument. It cannot be answered by
+  a suite: the fake manager answers directives, so what a real one *misses* is not visible there.
 - Should a send-back count against the loop bound when the manager's objection was **mechanical**
   (tests red) rather than judgement? Code already caught that, so arguably it should never have
-  reached the manager.
+  reached the manager. **Narrowed by R5 rather than answered**: the prompt now says in as many
+  words that `verify: not-run` is normal and correct and that missing tests are never grounds, so
+  the mechanical objection should not arise. If `manager_review` rows show it arising anyway, the
+  fix is the prompt, not an exemption in the bound — an exemption the model itself classifies is a
+  bound the model can talk its way out of.
 - Where does the review write-up live so the operator can read it after the fact — a pane
   announcement, the question row, or both? The row is answerable; the pane is scrollable.
+  **HALF-ANSWERED BY R5**: the write-up is a `manager_review` row for every verdict, `ok`
+  included, in R4's ticket-scoped `{json}` shape so `LastTicketEvent` finds it. Which SURFACE
+  renders it is R6's to decide, and R5 deliberately puts nothing in the pane except at the bound
+  and on an undelivered send-back — the two moments a person is actually needed (§4).
 - ~~`dev gate` in a cold worktree is ~250 s. Re-verifying after merging main in doubles the verify
   cost on every land. Is the touched-suites subset the right default, with the full gate only at the
   land itself?~~ **ANSWERED BY MEASUREMENT, R1, 2026-08-20 — and the answer turned on something
@@ -589,22 +667,56 @@ plan shipped without one and handing it off meant re-deriving everything (`a403f
   D-R2's actual property and strictly stronger than a commit message. `dev prove` calls that
   VACUOUS by design (it is a stale-test repair, not a code claim).
 
-### R5 — the manager review
+### R5 — the manager review (BUILT; this is the map R6 builds on)
 
-- **`BrainReview(long laneId, string text, string chosenName, Choice choice)`** (`Daemon.cs`) — the
-  shape to copy, not to extend: it is spawn-time review. A sibling (`BrainReviewWork`?) does
-  completion review. Reuse its parts: **`EnsureBrainAsync(hi: false, project)`** (ensure at the point
-  of use — never look up, CLAUDE.md §3), **`BrainLock(loId)`**, `_lanes[loId].AskAsync(q, 25000)`,
-  the low-confidence escalation to **`AskBrainHiAsync(q, project)`**, and the
-  `_store.Event("brain_review", …)` trail.
-- **Send-back is `LaneRuntime.Say`**, reached by `case "say"` (`Daemon.cs`) — the same path a typed
-  sentence takes, so the agent keeps its context. It refuses when the lane is not connected; a
-  send-back to a disconnected lane must respawn or wait, not vanish.
-- **D-R10 in code:** the review may write a "blocked" state and it must have **no path to
-  `TicketApprove`**. Keep `case "approve"` reachable only from the operator's `approve` /
-  `ui answer`.
-- The loop bound (three) needs somewhere to live: count `brain_review` events for the ticket rather
-  than a field — same reasoning as `Store.HasEvent` in P2, no schema bump for one counter.
+- **`ManagerReview(Store.TicketRow t, long laneId, string project, string recordJson)`**
+  (`Daemon.cs`) — the whole phase. Called from **the tail of `BuildRecord`, after `_recordLocks`
+  has been released**, and it does its work on a task of its own: belt and braces, because either
+  one alone is easy to lose in a later edit, and firing inside the lock would hold one ticket's
+  lock across a 25 s model call. Its doc comment carries D-R10 and both bounds; read it before
+  adding anything.
+- **`ManagerQuestion(t, recordJson, rounds)`** — the prompt. D-R12's bound on *reading* is in it:
+  diffstat, changed-file names, uncommitted count, drop check and the agent's own report; never the
+  diff content (§9). **It spells out what `verify: not-run` and `drop: moot` mean**, because both
+  are the normal case and a reviewer that read either as red would send every ticket back forever.
+- **`SendBackAsync(t, laneId, round, message, note)`** — `LaneRuntime.Say`, the same path a typed
+  sentence takes, so the agent keeps its warm context. Waits for a disconnected lane with a
+  deadline (20 s) and then **announces the message plus the two commands that deliver it by hand**
+  rather than dropping it; it does not respawn, because that is forty lines `case "lane-respawn"`
+  already owns and a second copy would drift. `Say` writes the pane's `user_input` row itself, so
+  the `[manager review, round N of 3]` prefix is what distinguishes a send-back from the
+  operator's own sentence.
+- **`SendBackHistory(long tid)`** + **`Store.TicketEvents(ticket, limit, kinds)`** — D-R12's *with
+  the history attached*. The rows are the only copy.
+- **`Store.CountTicketEvents(ticket, kinds)`** and **`SendBackBound = 3`** — the loop bound. See
+  D-R16 for why the counted kind is `manager_sent_back` and not `brain_review`, and
+  `Store.AboutTicket` for the `LIKE 'ticket 7%'` boundary the two readers now share.
+- **Reused from `BrainReview` rather than extended:** `EnsureBrainAsync(hi: false, project)`
+  (ensure at the point of use, never look up — CLAUDE.md §3), `BrainLock(loId)`,
+  `_lanes[loId].AskAsync(q, 25000)`, and the low-confidence escalation to
+  `AskBrainHiAsync(q, project)`. Which tier answered is a **field of the one review row**
+  (`tier: lo|hi`) rather than an event of its own: one review, one row, and R6 reads that row.
+- **Event kinds, and every giving-up path has one** (`DEBUGGING.md` carries them):
+  `manager_review` (every verdict, with the note), `manager_sent_back` (a delivered send-back —
+  the countable one), `manager_bound_reached`, `manager_review_skipped` (autostart off, or no
+  judgement agent for the project), `manager_review_failed` (timed out, unparseable, threw, or a
+  send-back with nothing to say), `manager_send_back_undelivered`.
+- **D-R10 in code:** `send-back` is the only verdict that does anything, so a reply of
+  `{"verdict":"approve"}` lands as *no objection*. There is no call to `Store.TicketApprove`
+  anywhere in this path and `case "approve"` stays reachable only from the operator's `approve` /
+  `dodona ui answer`. `brain:a_manager_approval_grants_nothing` asks the fake manager for
+  `approve` on purpose and then checks three things: the ticket is unapproved, no `ticket_approved`
+  event exists, and `token-request` still refuses.
+- **The fake agent grew `mgrverdict:` / `mgrmsg:` / `mgrlow`**, recognised by the question's own
+  first line the way brain-hi's granularity question and the concierge's review-behind are. They
+  ride in on **the agent's own report**, which is the only channel that could carry them — and
+  that is D-R8's point restated: the report is the thing the manager had never once been shown.
+- **A fixture trap that cost one run:** a `say` used only to prove the lane was re-adopted ended
+  its turn while the round's file sat uncommitted, so the digest had genuinely moved and R4 wrote
+  a record for it. The product was right; the fixture had asked the wrong question. Commit before
+  asking the lane anything, and make the adoption wait be the round's own `say`. Related: **do not
+  assert a total count of reviews** — any turn that moves the worktree earns one. `round` is
+  derived from the store, so `no review at round 4` is the precise form of "no fourth objection".
 
 ### R6 — the write-up in the ask
 

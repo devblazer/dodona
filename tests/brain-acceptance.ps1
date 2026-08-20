@@ -337,6 +337,161 @@ try {
     Check 'restart_does_not_leak_a_second_classifier' `
         ((Rows "SELECT COUNT(*) FROM lanes WHERE role='router' AND state='alive'").Trim() -eq '1') `
         (Rows "SELECT id, title, role, state FROM lanes WHERE role='router'")
+
+    # =====================================================================================
+    # R5 -- THE MANAGER READS THE WORK, MAY SEND IT BACK, AND CANNOT APPROVE
+    # (docs/REVIEW-AND-MERGE-PLAN.md D-R9 / D-R10 / D-R12)
+    #
+    # This is the empty chair R3 left. R3 retired the file reservations on the operator's own
+    # reasoning -- "if that is problematic in some way, it's the manager's job to say something
+    # about it" -- and that manager did not exist: `claim_overlap` and `branch_touched` were
+    # recorded and NOTHING read either. R4 assembled the record; this reads it and can send the
+    # work back.
+    #
+    # AUTOSTART STAYS CLEARED FOR THIS WHOLE SECTION, and that is what makes it the operator's
+    # own path rather than a fixture: the review is the daemon starting a judgement agent on its
+    # own initiative, so it honours DODONA_NO_AUTOSTART exactly as the warm-up, the drift watcher
+    # and the classifier's on-demand ensure do (`m1` asserts the other side of that guard). It is
+    # still free -- $root's dodona.json points `agent` at the fake, so the MANAGER is the fake
+    # agent, answering `mgrverdict:` directives that ride in on the work agent's own report. That
+    # is the only channel that could carry them: the completion record quotes the report back
+    # verbatim, which is precisely the thing D-R8 says the manager had never once been shown.
+    $tk = Dodona @("ticket-create", "--title", "FOAMSHIP", "--claim", "subtree:src")
+    $mtid = if ($tk -match 'ticket (\d+) branch') { $Matches[1] } else { 0 }
+    $mwt = "$root\.dodona\wt\t$mtid"
+    $ml = Dodona @("ticket-agent", "$mtid", "--child", $fake)
+    $mlane = if ($ml -match 'lane (\d+)') { $Matches[1] } else { 0 }
+    Wait-Until { (Rows "SELECT state FROM lanes WHERE id=$mlane").Trim() -eq 'alive' } 25000 'the ticket agent is alive' | Out-Null
+
+    # ONE TURN OF THE LOOP. The worktree has to MOVE or D-R13's digest gate lets no record
+    # through and there is nothing for the manager to read -- which is also the property that
+    # stops a send-back from reviewing itself: `Say` starts a turn, that turn changes no files,
+    # so it produces no record and therefore no second review. The loop terminates on a fact
+    # rather than on a model choosing to stop. Two arguments, two parameters, called
+    # positionally: a plain PowerShell function SILENTLY SWALLOWS extras into $args (CLAUDE.md
+    # 0.2), so a third would vanish without an error anywhere.
+    function Turn([string]$directives, [string]$file) {
+        Set-Content "$mwt\src\$file" "// $file"
+        git -C $mwt add -A | Out-Null
+        git -C $mwt -c user.email=t@t -c user.name=t commit -q -m $file | Out-Null
+        Dodona @("say", "$mlane", "say $directives finished a pass on $file") | Out-Null
+    }
+
+    # ---- round 1: the record reaches the manager, and the send-back reaches the lane ----
+    Turn 'mgrverdict:send-back mgrmsg:SCHEMA-UNMENTIONED' 'b.cs'
+    Wait-Until { [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='manager_review'").Trim()) -ge 1 } 40000 'the first manager review' | Out-Null
+    $rev1 = Rows "SELECT detail FROM events WHERE kind='manager_review' ORDER BY id DESC LIMIT 1"
+    # The fixture's own state rides in this check's DETAIL rather than being a check of its
+    # own: `dev prove` called an assertion on it VACUOUS, correctly -- ticket-create and its
+    # worktree already work at HEAD, so a check there has no teeth and only implies it has
+    # some. R4 deleted one on the same verdict rather than keep it. What is left is the R5
+    # claim, with everything a red would need to diagnose it.
+    Check 'a_completed_ticket_turn_reaches_the_manager' `
+        ($rev1 -match "ticket $mtid " -and $rev1 -match '"verdict":"send-back"' -and
+         $rev1 -match '"tier":"lo"' -and $rev1 -match '"round":1') `
+        "review=[$rev1] ticket=[$tk] lane=[$ml] wt=$mwt"
+    # A send-back is INPUT, on the same path a typed sentence takes (D-R9), so the agent keeps
+    # its warm context and simply carries on. It therefore lands in the pane as `user_input`,
+    # where the operator sees their own sentences -- the `[manager review ...]` prefix is what
+    # tells the two apart, and there is deliberately no announcement, because a machine handling
+    # its own round is not a person being needed.
+    Wait-Until { [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim()) -ge 1 } 25000 'the first send-back' | Out-Null
+    $sb1 = Rows "SELECT body FROM pane_events WHERE lane_id=$mlane AND kind='user_input' AND body LIKE '%manager review%' ORDER BY id DESC LIMIT 1"
+    Check 'a_send_back_reaches_the_lane_as_input' `
+        ($sb1 -match 'manager review, round 1 of 3' -and $sb1 -match 'SCHEMA-UNMENTIONED' -and
+         (Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim() -eq '1') `
+        "pane=[$sb1] sent_back=$((Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim())"
+
+    # ---- D-R10: IT MAY BLOCK, IT MAY NOT BLESS -- the load-bearing rule of the whole plan ----
+    #
+    # The fake manager is asked for `approve` ON PURPOSE, a verdict the schema does not offer,
+    # because the failure being pinned is a future edit that wires a review to `TicketApprove`.
+    # Rejection is free and reversible -- worst case it costs a round. Approval advances a ref
+    # that has no undo, so a model as the sole gate on it is WORK-ISOLATION-PLAN 2's *a prompt
+    # providing safety*, whatever the model is called. Three things must all still hold: the
+    # ticket is unapproved, no `ticket_approved` event exists, and `token-request` still refuses.
+    # And it burns no round -- `approve` is not `send-back`, so it is read as no objection.
+    Turn 'mgrverdict:approve' 'c.cs'
+    Wait-Until { [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='manager_review'").Trim()) -ge 2 } 40000 'the review of the approve round' | Out-Null
+    $tokAfter = Dodona @("token-request", "$mtid")
+    Check 'a_manager_approval_grants_nothing' `
+        ((Rows "SELECT approved FROM tickets WHERE id=$mtid").Trim() -eq '0' -and
+         [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='ticket_approved'").Trim()) -eq 0 -and
+         $tokAfter -match 'not approved' -and
+         (Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim() -eq '1') `
+        "token-request=[$tokAfter] approved=$((Rows "SELECT approved FROM tickets WHERE id=$mtid").Trim()) sent_back=$((Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim())"
+
+    # ---- round 2: the cheap tier is unsure, so the SAME question goes to the expensive one ----
+    # D-R12 bounds the READING as well as the loop: the diffstat plus the agent's report on the
+    # cheap tier, and more only when that tier says it is unsure. `mgrlow` forces that path.
+    Turn 'mgrverdict:send-back mgrmsg:STILL-UNMENTIONED mgrlow' 'd.cs'
+    Wait-Until { [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim()) -ge 2 } 40000 'the second send-back' | Out-Null
+    $rev2 = Rows "SELECT detail FROM events WHERE kind='manager_review' ORDER BY id DESC LIMIT 1"
+    Check 'the_review_escalates_to_the_expensive_tier_when_the_cheap_one_is_unsure' `
+        ($rev2 -match '"tier":"hi"' -and $rev2 -match '"verdict":"send-back"') $rev2
+
+    # ---- THE BOUND IS COUNTED IN THE STORE, so a publish cannot reset it --------------------
+    #
+    # A daemon restarts on every publish and every hot swap. An in-memory counter would start
+    # again from zero right here, the next three rounds would all be sent back, and it would look
+    # perfectly green in a single-daemon test while being wrong on the operator's machine -- 3's
+    # dead routing ladder in a third costume, and the same reason R4 reads its previous digest
+    # back out of its own event. So the restart happens BETWEEN round two and round three.
+    Dodona @("stop-daemon") | Out-Null
+    Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down between rounds two and three' | Out-Null
+    $daemon = Start-Process $dodona -ArgumentList "daemon", "--workspace", $ws.Id -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$out\daemon5.out" -RedirectStandardError "$out\daemon5.err"
+    Wait-Daemon $ws.CtlPipe | Out-Null
+    # ROUND 3 IS SPELLED OUT RATHER THAN USING `Turn`, because the adoption wait has to be the
+    # round's OWN `say` and not a turn beside it. Two things this fixture got wrong on its first
+    # run, both worth keeping written down:
+    #
+    #  * Adoption is waited for by ASKING the lane, never by reading `state` -- the row still
+    #    says `alive` from before the restart, so a state check returns instantly and proves
+    #    nothing (m1 carries the same reasoning for the same fixture).
+    #  * The change is COMMITTED BEFORE the lane is asked anything. A separate `say` to test
+    #    adoption ended its turn while `e.cs` sat uncommitted in the worktree, so the digest had
+    #    genuinely moved and R4 wrote a record for it -- the product answering correctly while
+    #    the fixture had asked the wrong question. Commit first and every turn from here sees
+    #    one tree.
+    Set-Content "$mwt\src\e.cs" "// e.cs"
+    git -C $mwt add -A | Out-Null
+    git -C $mwt -c user.email=t@t -c user.name=t commit -q -m 'e.cs' | Out-Null
+    $adopted = ''
+    Wait-Until {
+        $script:adopted = Dodona @("say", "$mlane", "say mgrverdict:send-back mgrmsg:THIRD-TIME finished a pass on e.cs")
+        $script:adopted -match "lane $mlane"
+    } 30000 'the adopted ticket lane accepts input again' | Out-Null
+    Wait-Until { [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim()) -ge 3 } 40000 'the third send-back' | Out-Null
+
+    # ---- the fourth objection does not happen: it goes to the operator, with the history ----
+    # An infinitely polite loop is CLAUDE.md 0.1's "never stuck" in a costume where everyone is
+    # being reasonable (D-R12). At the bound there is NO model call either -- a fourth review
+    # would spend quota on a note nothing can act on -- and the operator is told ONCE, which is
+    # why the announcement is gated on its own event rather than on a flag.
+    Turn 'mgrverdict:send-back mgrmsg:FOURTH-TIME' 'f.cs'
+    Wait-Until { [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='manager_bound_reached'").Trim()) -ge 1 } 40000 'the send-back bound' | Out-Null
+    $bnd = Rows "SELECT detail FROM events WHERE kind='manager_bound_reached' ORDER BY id DESC LIMIT 1"
+    $sbCount = (Rows "SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'").Trim()
+    $revAll = Rows "SELECT detail FROM events WHERE kind='manager_review' ORDER BY id"
+    # NO FOURTH MODEL CALL, asserted on the ROUND rather than on a total count of reviews. A
+    # total is not a claim about the bound: any turn that moves the worktree earns a record and
+    # therefore a review, so the total is a fact about how chatty the fixture was, and pinning it
+    # makes the check fail for reasons that have nothing to do with D-R12. `round` is derived
+    # from the send-back count in the store, so a review at round 4 is exactly and only the
+    # fourth objection this check says does not happen. (A racing record cannot forge one
+    # either: its report is the agent's echo, which carries no `mgrverdict:`, so it reads `ok`.)
+    Check 'three_send_backs_is_the_bound_and_it_survives_a_daemon_restart' `
+        ($sbCount -eq '3' -and $revAll -notmatch '"round":4' -and $bnd -match "ticket $mtid") `
+        "sent_back=$sbCount bound=[$bnd] reviews=[$revAll]"
+    $ann = Rows "SELECT body FROM pane_events WHERE lane_id=$mlane AND kind='announcement' AND body LIKE '%the bound%' ORDER BY id DESC LIMIT 1"
+    Check 'the_bound_hands_the_operator_the_history_instead_of_a_fourth_round' `
+        ($ann -match 'sent back 3 times' -and $ann -match 'SCHEMA-UNMENTIONED' -and
+         $ann -match 'STILL-UNMENTIONED' -and $ann -match 'THIRD-TIME') $ann
+    # Hand the rest of the suite the machine it expects back: the ticket agent goes, and autostart
+    # goes back off so the sections below own their own lifetimes again.
+    Dodona @("lane-stop", "$mlane") | Out-Null
+    Wait-Until { (Rows "SELECT state FROM lanes WHERE id=$mlane").Trim() -ne 'alive' } 25000 'the ticket agent is stopped' | Out-Null
     $env:DODONA_NO_AUTOSTART = "1"
 
     # ---- P3.5: ADOPTION FAILURE IS NOT A SPAWN TRIGGER ----------------------------------

@@ -462,6 +462,22 @@ are the authority and they must agree.)*
   record: the `land_drop_check_moot` distinction, one phase along.
   `completion_record_failed` — it threw, which is the one shape that would otherwise be a
   turn that quietly produced nothing),
+  the R5 manager-review kinds, all carrying `ticket <id> ` first so `LastTicketEvent` and
+  `CountTicketEvents` can find them (`manager_review` — **the review itself, as JSON, written for
+  EVERY verdict including `ok`**, because D-R11 says the write-up is the point and the verdict is
+  not: `verdict` (`ok|send-back`), `asked` (what the model actually said, so a reply of `approve`
+  is visible as the no-op it is), `confidence`, `tier` (`lo|hi` — the escalation is a field of the
+  one row, not an event of its own), `round`, `bound`, `note` for the operator and `message` for
+  the agent. `manager_sent_back` — a send-back that REACHED THE WIRE, and the only kind the bound
+  counts: three of them and the ticket goes to the operator (D-R12/D-R16). `manager_bound_reached`
+  — that moment, written once and carrying the history; there is deliberately no fourth model
+  call. `manager_review_skipped` — it could not run and says which: `DODONA_NO_AUTOSTART=1` (the
+  review is the daemon starting a judgement agent on its own initiative, D-R17), or no brain for
+  that project. `manager_review_failed` — the tier did not answer in 25 s, the reply would not
+  parse, it threw, or the verdict was `send-back` with nothing to say.
+  `manager_send_back_undelivered` — the lane never came back, so the whole message is in the
+  event AND announced with the two commands that deliver it by hand; it counts as no round,
+  because nothing was said),
   `worktree_prune_failed`, `ticket_git_failed`, `claim_extend_refused` (a `claim-extend`
   whose claims were outside the ticket's own repository), `token_refused_no_repo` (the
   ticket's repository has left the workspace — the token is refused rather than aimed at
