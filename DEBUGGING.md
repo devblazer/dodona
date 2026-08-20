@@ -481,6 +481,19 @@ are the authority and they must agree.)*
   `manager_send_back_undelivered` — the lane never came back, so the whole message is in the
   event AND announced with the two commands that deliver it by hand; it counts as no round,
   because nothing was said),
+  the R8 kinds (`manager_sent_back_mechanical` — a DELIVERED send-back that spends NO round,
+  because R4's record said `verify: red` at the moment of the review (D-R24). Its own kind rather
+  than a flag, so the bound's counter and R6's ask both stay right without learning anything new
+  (D-R25); it carries `verifyWhen`, the verify event's timestamp, which is what limits the
+  exemption to ONE per red result (D-R26) — the record keeps saying `red` until another land
+  runs, so the word alone would be an unbounded loop. `not-run` is NOT red and earns nothing.
+  `manager_details_granted` — the review asked to read specific files (D-R23) and this is what it
+  got: `tier`, `granted`, `refused` with the reason for each, and `why` in the reviewer's own
+  words. Written even when everything was refused, because "does this hatch get used for
+  judgement or out of habit" has to be answerable by counting rows. The `manager_review` row
+  carries the same five facts as fields: `verify`, `exempt`, `details`, `detailsWhy`,
+  `detailsRefused` — and its `round` is the count AFTER the send-back, so an exempt one leaves it
+  unchanged),
   the R6 approval-ask kinds (`question_opened` with `kind=land subject=<ticket>` — the ask that
   puts the manager's write-up in front of the operator, raised by the RECORD existing and never
   by the review having answered, so `no review has run` is a normal thing for it to say

@@ -506,7 +506,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 | `workspace` | identity, repo-exclusivity, multi-repo |
 | `ui-use` | the UI driven like a person |
 | `compression` | selective compression (§5) |
-| `brain` | the dispatcher brain, its routing ladder, the no-second-brain-beside-a-live-one guard, and the manager who reviews finished ticket work: it may send it back, it is bounded at three, and it can never approve |
+| `brain` | the dispatcher brain, its routing ladder, the no-second-brain-beside-a-live-one guard, and the manager who reviews finished ticket work: it may send it back, it is bounded at three, and it can never approve. It may also ask to READ a named changed file — once per review, refused if it is not in the record's own list — and a send-back on a `verify: red` record spends no round, decided from the RECORD and never from what the reviewer says its reason was |
 | `concierge` | the group-scope ladder, the fence, the review-behind |
 | `publish` | publish targeting: `--all` spares foreign instances |
 | `voice` | dictation: speech composes and can never send (docs/VOICE-INPUT-PLAN.md Phase A) |

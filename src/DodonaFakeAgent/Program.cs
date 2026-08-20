@@ -273,10 +273,26 @@ while ((line = Console.ReadLine()) is not null)
         //       it expects to find in the lane's pane.
         //   mgrlow          -- confidence low on the cheap tier only, which forces the escalation
         //       (the hi tier is always sure, like `brainlow` above).
+        //   mgrneed:<path>  -- R8/D-R23: ask to READ that file. It rides in on the report like
+        //       the rest, so it is present on BOTH passes of a review -- which is the point:
+        //       the daemon must ignore the second one.
+        //   mgrneed2:<path> -- what to ask for ON the details pass, and it is what makes
+        //       "bounded and once" PROVABLE rather than merely untimed. A details round that
+        //       ran twice would put a second, different name in the review row's `details`; a
+        //       check that only waited for a hang could not tell a loop from a slow model.
         if (text.Contains("Review the completed work on a ticket"))
         {
             var mv = Regex.Match(text, @"mgrverdict:([\w-]+)");
             var mm = Regex.Match(text, @"mgrmsg:(\S+)");
+            // The DAEMON'S OWN header, which no directive riding in on the report can forge, so
+            // this is a true reading of which pass we are on.
+            var saw = text.Contains("You asked to see these files");
+            var mn = Regex.Match(text, saw ? @"mgrneed2:(\S+)" : @"mgrneed:(\S+)");
+            // Proof the CONTENT arrived and not merely the name: the test writes this token
+            // inside the file it expects to be granted, and it appears nowhere else in the
+            // question -- not in the diffstat, which is names and counts, not in the changed
+            // list, and not in the agent's report.
+            var tok = Regex.Match(text, @"detailtoken:(\S+)");
             Emit(new
             {
                 type = "result",
@@ -293,8 +309,11 @@ while ((line = Console.ReadLine()) is not null)
                     // nothing about WHICH review it came from. With the token in it,
                     // `brain:the_managers_write_up_reaches_the_operators_approval_ask` names
                     // exactly the round it expects to be reading.
-                    note = $"fake manager on the {(isHi ? "hi" : "lo")} tier" + (mm.Success ? $": {mm.Groups[1].Value}" : ""),
+                    note = $"fake manager on the {(isHi ? "hi" : "lo")} tier" + (mm.Success ? $": {mm.Groups[1].Value}" : "")
+                           + (saw && tok.Success ? $" read:{tok.Groups[1].Value}" : ""),
                     message = mm.Success ? mm.Groups[1].Value : "",
+                    need = mn.Success ? new[] { mn.Groups[1].Value } : Array.Empty<string>(),
+                    needWhy = mn.Success ? "the fake manager was told to ask for this one" : "",
                 }),
             });
             continue;

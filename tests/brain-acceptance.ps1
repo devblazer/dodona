@@ -539,8 +539,169 @@ try {
          $lqBound -match 'yours to judge' -and
          [int]((Rows "SELECT COUNT(*) FROM questions WHERE kind='land' AND subject='$mtid'").Trim()) -eq 1) `
         "text=[$($lqBound -replace '\s+', ' ')] rows=$((Rows "SELECT id, state, subject FROM questions WHERE kind='land'") -replace '\s+', ' ')"
-    # Hand the rest of the suite the machine it expects back: the ticket agent goes, and autostart
+    # =====================================================================================
+    # R8 -- THE REVIEWER MAY ASK FOR DETAILS, AND A MECHANICAL OBJECTION IS NOT A STRIKE
+    # (docs/REVIEW-AND-MERGE-PLAN.md D-R23 / D-R24, plus D-R25 / D-R26 / D-R27 decided there)
+    #
+    # Both amendments are the operator's, decided 2026-08-21, and they are one decision seen
+    # from two sides: the manager must not become a thing that HOLDS AGENTS UP. A FRESH TICKET,
+    # because the one above deliberately ends at the bound and no further review will ever run
+    # on it (D-R18: at three there is no fourth model call).
+    $tk8 = Dodona @("ticket-create", "--title", "FOAMSHIP-R8", "--claim", "subtree:src")
+    $t8 = if ($tk8 -match 'ticket (\d+) branch') { $Matches[1] } else { 0 }
+    $wt8 = "$root\.dodona\wt\t$t8"
+    $l8 = Dodona @("ticket-agent", "$t8", "--child", $fake)
+    $lane8 = if ($l8 -match 'lane (\d+)') { $Matches[1] } else { 0 }
+    Wait-Until { (Rows "SELECT state FROM lanes WHERE id=$lane8").Trim() -eq 'alive' } 25000 'the R8 ticket agent is alive' | Out-Null
+
+    # PER-TICKET COUNTS, NEVER THE GLOBAL ONES. The ticket above ends at three send-backs on
+    # purpose, so a bare `SELECT COUNT(*) FROM events WHERE kind='manager_sent_back'` down here
+    # would be counting THAT ticket's history and would pass or fail for reasons nothing below
+    # is about. This is `Store.AboutTicket`'s own boundary written in SQL: the trailing space is
+    # what stops ticket 1 from matching ticket 12. One parameter, called with one argument -- a
+    # plain PowerShell function SILENTLY SWALLOWS extras into $args (CLAUDE.md 0.2).
+    function T8([string]$kind) { [int]((Rows "SELECT COUNT(*) FROM events WHERE kind='$kind' AND detail LIKE 'ticket $t8 %'").Trim()) }
+    function Turn8([string]$directives, [string]$file) {
+        Set-Content "$wt8\src\$file" "// $file"
+        git -C $wt8 add -A | Out-Null
+        git -C $wt8 -c user.email=t@t -c user.name=t commit -q -m $file | Out-Null
+        Dodona @("say", "$lane8", "say $directives finished a pass on $file") | Out-Null
+    }
+
+    # ---- D-R24, AND THIS IS THE CHECK MOST WORTH WRITING FIRST --------------------------
+    #
+    # R5's objection to the whole exemption was never overturned -- *an exemption the model
+    # classifies is a bound the model can talk its way out of* -- it is what FIXES the
+    # implementation. Code decides, and it decides from R4's record. So the fake manager is made
+    # to say, in as many words, that its objection was mechanical, while the record says
+    # `verify: not-run`. It must earn exactly nothing by saying so.
+    #
+    # AND `not-run` IS NOT RED, which is the load-bearing half. `not-run` is the NORMAL value --
+    # no verify has run for most tickets, by design (D-R15) -- so an implementation that read it
+    # as red would exempt every send-back there has ever been and the bound would stop existing
+    # while looking perfectly present. This one check pins both, because the record here says
+    # exactly `not-run` and the objection claims exactly the opposite.
+    Turn8 'mgrverdict:send-back mgrmsg:THE-TESTS-ARE-RED-HONESTLY' 'r1.cs'
+    Wait-Until { (T8 'manager_sent_back') -ge 1 } 40000 'the R8 ticket first send-back' | Out-Null
+    $r8rev1 = Rows "SELECT detail FROM events WHERE kind='manager_review' AND detail LIKE 'ticket $t8 %' ORDER BY id DESC LIMIT 1"
+    Check 'a_manager_claiming_its_objection_was_mechanical_earns_no_exemption' `
+        ((T8 'manager_sent_back') -eq 1 -and (T8 'manager_sent_back_mechanical') -eq 0 -and
+         $r8rev1 -match '"verify":"not-run"' -and $r8rev1 -match '"exempt":false') `
+        "review=[$r8rev1] counted=$(T8 'manager_sent_back') exempt=$(T8 'manager_sent_back_mechanical') ticket=[$tk8]"
+
+    # ---- the code fact itself: a REAL red verify, written by the land ---------------------
+    #
+    # `LandFlow` is the only producer of `verify_red` in the tree and there must not be a second
+    # one here either: a fixture that inserted the event by hand would be proving this suite's
+    # idea of the record rather than the land's (D-R15 -- the record REPORTS the verify result
+    # and never runs one). `Config.For` re-reads dodona.json per call, which is what makes the
+    # swap below work, and it is restored immediately so no later section inherits it.
+    Dodona @("approve", "$t8") | Out-Null
+    Dodona @("token-request", "$t8") | Out-Null
+    Set-Content "$root\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0; verify = @('exit 3') } | ConvertTo-Json)
+    $r8land = Dodona @("land", "$t8")
+    Set-Content "$root\dodona.json" (@{ main = 'main'; agent = $fake; compressors = 0 } | ConvertTo-Json)
+    Wait-Until { (T8 'verify_red') -ge 1 } 30000 'the land writing a red verify for the R8 ticket' | Out-Null
+
+    # ---- D-R24 / D-R25: THE EXEMPTION KEYS ON THE RECORD, AND IT IS ITS OWN EVENT KIND ----
+    #
+    # A strike is a judgement the agent has to answer; red tests are a fact it can already see,
+    # so spending one of three chances on them means an agent gets fewer REAL rounds for having
+    # had a bad build at the wrong moment. The exempt send-back is `manager_sent_back_mechanical`
+    # rather than a flag inside the JSON (D-R25): the bound counts `manager_sent_back`, and R6's
+    # approval ask counts it AGAIN, independently, to word "you are at the bound". A separate
+    # kind keeps both readers right with no new logic in either, where a flag would have had to
+    # be learned by every counter in the tree and would have been wrong in whichever one was
+    # missed -- and a bound that quietly stops bounding is this project's most repeated failure.
+    Turn8 'mgrverdict:send-back mgrmsg:REALLY-MECHANICAL' 'r2.cs'
+    Wait-Until { (T8 'manager_sent_back_mechanical') -ge 1 } 40000 'the exempt send-back' | Out-Null
+    $r8rev2 = Rows "SELECT detail FROM events WHERE kind='manager_review' AND detail LIKE 'ticket $t8 %' ORDER BY id DESC LIMIT 1"
+    $r8pane = Rows "SELECT body FROM pane_events WHERE lane_id=$lane8 AND kind='user_input' AND body LIKE '%manager review%' ORDER BY id DESC LIMIT 1"
+    Check 'a_send_back_on_a_red_verify_spends_none_of_the_three_rounds' `
+        ((T8 'manager_sent_back') -eq 1 -and (T8 'manager_sent_back_mechanical') -eq 1 -and
+         $r8rev2 -match '"verify":"red"' -and $r8rev2 -match '"exempt":true' -and
+         $r8pane -match 'REALLY-MECHANICAL' -and $r8pane -match 'not one of your 3 rounds') `
+        "counted=$(T8 'manager_sent_back') exempt=$(T8 'manager_sent_back_mechanical') review=[$r8rev2] pane=[$r8pane] land=[$r8land]"
+
+    # ---- D-R26: ONE EXEMPTION PER VERIFY RESULT, NOT AN ENDLESS SUPPLY -------------------
+    #
+    # `verify_red` is written by the land and never re-run (D-R15), so the record goes on saying
+    # `red` for as long as no further land happens -- and an exemption keyed only on that word
+    # would be an unbounded send-back loop for free, which is D-R12's failure mode restored by
+    # the very fix written to honour it (CLAUDE.md 0.1: never stuck). The FIRST mechanical
+    # objection carries information the agent can act on. A second one about the SAME red
+    # carries none, so it counts, and three of those reach the bound and the operator like any
+    # other judgement. The identity of a red is the verify event's own timestamp, out of the
+    # record -- not the word `red`, which never changes.
+    Turn8 'mgrverdict:send-back mgrmsg:SAME-RED-AGAIN' 'r3.cs'
+    Wait-Until { (T8 'manager_sent_back') -ge 2 } 40000 'the repeated mechanical objection' | Out-Null
+    $r8rev3 = Rows "SELECT detail FROM events WHERE kind='manager_review' AND detail LIKE 'ticket $t8 %' ORDER BY id DESC LIMIT 1"
+    Check 'the_second_objection_on_the_same_red_verify_is_not_exempt' `
+        ((T8 'manager_sent_back') -eq 2 -and (T8 'manager_sent_back_mechanical') -eq 1 -and
+         $r8rev3 -match '"verify":"red"' -and $r8rev3 -match '"exempt":false') `
+        "counted=$(T8 'manager_sent_back') exempt=$(T8 'manager_sent_back_mechanical') review=[$r8rev3]"
+
+    # ---- D-R23: NAMED AND NARROW, BOUNDED AND ONCE, RECORDED -----------------------------
+    #
+    # The default does not change and is now PERMANENT: the diffstat, the changed-file names and
+    # the agent's own report, never the diff content. What is added is the reviewer being able
+    # to say "I need to see this one file before I can judge it". Each of the three properties
+    # below is a way that escape hatch could quietly become the expensive reviewer arriving
+    # through the door marked cheap -- which is the thing the operator said no to, at any price,
+    # because the cost is paid in agents held up.
+    #
+    # THE TOKEN LIVES INSIDE THE FILE AND NOWHERE ELSE IN THE QUESTION: the diffstat is names
+    # and counts, the changed list is names, and the report is the agent's echo of the `say`
+    # below. So a note carrying `read:GRANTED-D1` can only have come from the CONTENT being
+    # handed over. A check that asserted the file's NAME appeared would pass against a build
+    # that granted nothing at all -- the name is already in the question, every time.
+    # From here the verdicts are `ok`: two rounds are spent and a third would hit the bound,
+    # which would end the reviews this section still needs.
+    Set-Content "$wt8\src\d1.cs" "// detailtoken:GRANTED-D1"
+    Set-Content "$wt8\src\d2.cs" "// detailtoken:GRANTED-D2"
+    git -C $wt8 add -A | Out-Null
+    git -C $wt8 -c user.email=t@t -c user.name=t commit -q -m 'd1+d2' | Out-Null
+    Dodona @("say", "$lane8", "say mgrverdict:ok mgrneed:src/d1.cs mgrneed2:src/d2.cs finished a pass") | Out-Null
+    Wait-Until { (T8 'manager_details_granted') -ge 1 } 40000 'the details round' | Out-Null
+    Wait-Until {
+        (Rows "SELECT detail FROM events WHERE kind='manager_review' AND detail LIKE 'ticket $t8 %' ORDER BY id DESC LIMIT 1") -match 'read:GRANTED-D1'
+    } 25000 'the review that read the file it asked for' | Out-Null
+    $r8det = Rows "SELECT detail FROM events WHERE kind='manager_review' AND detail LIKE 'ticket $t8 %' ORDER BY id DESC LIMIT 1"
+    $r8gr = Rows "SELECT detail FROM events WHERE kind='manager_details_granted' AND detail LIKE 'ticket $t8 %' ORDER BY id DESC LIMIT 1"
+    Check 'a_review_that_asks_for_a_named_file_is_given_that_file_and_reads_it' `
+        ($r8det -match '"details":\["src/d1\.cs"\]' -and $r8det -match 'read:GRANTED-D1' -and
+         $r8det -match '"detailsWhy":"[^"]+"' -and $r8gr -match 'src/d1\.cs') `
+        "review=[$r8det] granted=[$r8gr]"
+    # ...AND ONLY ONCE. `mgrneed2:` is what the fake asks for ON the details pass, so a second
+    # round would put `src/d2.cs` in that same list and hand the reviewer a file it never
+    # earned. Ask, read, ask again is D-R12's send-back loop one level down, and it is the
+    # failure this bound exists for -- untimed, it would look exactly like a slow model.
+    Check 'the_details_round_happens_once_and_a_second_request_is_not_read' `
+        ($r8det -notmatch 'd2\.cs' -and $r8det -notmatch 'GRANTED-D2' -and (T8 'manager_details_granted') -eq 1) `
+        "review=[$r8det] granted_events=$(T8 'manager_details_granted')"
+
+    # ...AND NARROW. A request that can widen to everything IS the full diff read with extra
+    # steps, so what may be named is the record's own changed list -- enforced in `GrantDetails`
+    # in code, never by the prompt asking nicely (a prompt is not a boundary,
+    # WORK-ISOLATION-PLAN 2). `*` is refused for exactly the reason `../../secrets` and another
+    # repository's file would be: none of them is a file this change touched. And the round is
+    # still SPENT by the asking, or a reviewer could retry after every refusal and have its
+    # unbounded loop back for the price of one bad path.
+    Set-Content "$wt8\src\d4.cs" "// d4"
+    git -C $wt8 add -A | Out-Null
+    git -C $wt8 -c user.email=t@t -c user.name=t commit -q -m 'd4' | Out-Null
+    Dodona @("say", "$lane8", "say mgrverdict:ok mgrneed:* finished a pass on d4") | Out-Null
+    Wait-Until { (T8 'manager_details_granted') -ge 2 } 40000 'the refused details request' | Out-Null
+    $r8ref = Rows "SELECT detail FROM events WHERE kind='manager_review' AND detail LIKE 'ticket $t8 %' ORDER BY id DESC LIMIT 1"
+    Check 'a_details_request_that_is_not_a_named_changed_file_is_refused_and_recorded' `
+        ($r8ref -match '"details":\[\]' -and $r8ref -match 'not one of the files this change touched' -and
+         $r8ref -notmatch 'detailtoken') `
+        "review=[$r8ref] granted=[$(Rows "SELECT detail FROM events WHERE kind='manager_details_granted' AND detail LIKE 'ticket $t8 %' ORDER BY id DESC LIMIT 1")]"
+
+    # Hand the rest of the suite the machine it expects back: the ticket agents go, and autostart
     # goes back off so the sections below own their own lifetimes again.
+    Dodona @("lane-stop", "$lane8") | Out-Null
+    Wait-Until { (Rows "SELECT state FROM lanes WHERE id=$lane8").Trim() -ne 'alive' } 25000 'the R8 ticket agent is stopped' | Out-Null
     Dodona @("lane-stop", "$mlane") | Out-Null
     Wait-Until { (Rows "SELECT state FROM lanes WHERE id=$mlane").Trim() -ne 'alive' } 25000 'the ticket agent is stopped' | Out-Null
     $env:DODONA_NO_AUTOSTART = "1"

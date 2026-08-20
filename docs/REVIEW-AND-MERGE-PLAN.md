@@ -1,7 +1,8 @@
 # Review and merge — the ordinary developer flow, with a manager as the reviewer
 
-Status: **R1, R2, R3, R3.5, R4, R5 and R6 BUILT** (2026-08-20); **R7 and R8 planned** — R8 is
-D-R23/D-R24, decided by the operator 2026-08-21 and not started. Written 2026-08-20 from the operator's brief, after tracing the land
+Status: **R1, R2, R3, R3.5, R4, R5, R6 and R8 BUILT** (R8 on 2026-08-21); **R7 planned**. R8 is
+D-R23/D-R24, the operator's two amendments to D-R12, plus D-R25/D-R26/D-R27 decided while
+building them. Written 2026-08-20 from the operator's brief, after tracing the land
 path in code and measuring what the manager is actually told today.
 
 The authority for how a ticket's work gets reviewed and lands on main. It **supersedes
@@ -412,7 +413,7 @@ somebody who has a window — but the **primary moment is completion**, because 
 manager's write-up is and it means the operator is not waiting for an agent to bump into a wall
 first.
 
-### DECIDED 2026-08-21, NOT YET BUILT — R8, and both decisions amend D-R12
+### DECIDED 2026-08-21, BUILT THE SAME DAY — R8, and both decisions amend D-R12
 
 The operator answered §11's two remaining questions in one breath, and they are one decision seen
 from two sides: **the reviewer must not become a thing that holds agents up.** Recorded here
@@ -457,6 +458,61 @@ tests were red earns nothing by saying so. Note the interaction with `not-run`, 
 normal value: `not-run` is not red, so it grants no exemption — and R5's prompt already tells the
 reviewer that `not-run` is correct and never grounds for anything.
 
+### The three decisions R8 could not be written without
+
+**D-R25. AN EXEMPT SEND-BACK IS ITS OWN EVENT KIND** — `manager_sent_back_mechanical`, beside
+`manager_sent_back` — **and not a flag inside the JSON.** D-R24 says a mechanical objection does
+not spend a round; the implementation question it leaves open is where the exempt round is
+*recorded*, and the two answers are not equally safe. The bound counts `manager_sent_back`
+(D-R16), and **R6's approval ask counts the very same kind again, independently**, to decide
+whether to word itself *"you are at the bound"* — so there are already two counters, in two
+phases, written months apart. A flag inside the row would have had to be learned by both, and by
+every counter added after, and would have been silently wrong in whichever one was missed. A
+distinct kind keeps both readers correct **with no new logic in either**, which is the cheapest
+correct answer and the one this codebase's history argues for: a bound that quietly stops
+bounding is its most repeated failure (§3's dead routing ladder, R4's digest, the store-counted
+bound itself). `SendBackHistory` reads **both** kinds, because the exemption is about the count
+and not about what the agent was told — a history that dropped the mechanical rounds would let
+round three repeat what round one already said, which is the one thing that history exists to
+prevent.
+
+**D-R26. ONE EXEMPTION PER VERIFY RESULT, NOT PER SEND-BACK.** This is the terminator D-R24
+needs and does not itself supply. `verify_red` is written by `LandFlow` and **never re-run**
+(D-R15), so the record goes on saying `red` for as long as no further land happens — including
+after the agent has fixed the very thing. An exemption keyed only on that word would therefore be
+an **unbounded** send-back loop available for free: D-R12's failure mode restored by the fix
+written to honour it, and CLAUDE.md §0.1's *never stuck* violated in the newest costume yet. So
+the exemption is keyed on the verify event's own **timestamp**, carried in the record and written
+into the exempt event: the first mechanical objection about a given red is excused, and a second
+one about that same red counts like any other. The reasoning is D-R24's own — *red tests are a
+fact the agent can already see* — read one step further: the first telling carries information,
+and the second carries none. Three repeats reach the bound and the operator, which is where an
+argument the machine cannot settle is supposed to end up.
+
+Note what this deliberately does **not** do: it puts no cap on exemptions across *different* red
+verifies. Each of those costs a land, and a land needs the operator's approval, so a person is
+already in that loop.
+
+**D-R27. THE DETAILS ROUND IS SHARED BY BOTH TIERS, AND WHAT MAY BE NAMED IS THE RECORD'S OWN
+`changed` LIST.** Two implementation choices, both of which are D-R23's properties made
+enforceable rather than requested:
+
+- **Shared, not one round each.** The cheap tier may ask, or the expensive one may, and whichever
+  asks first spends it; the other reads what was bought. Worst case is therefore **three** model
+  calls for one review — a tier that asks, plus an escalation — against a floor of one, which is
+  still the ordinary case. Giving each tier its own round would have made four the ceiling for a
+  feature whose entire justification is that it fires rarely, and every one of these is per
+  finished turn, per ticket.
+- **The `changed` list is the namespace.** `GrantDetails` refuses anything that is not a file the
+  record already told the reviewer about, which is what makes *named and narrow* a property of
+  the code rather than of the prompt — `*`, `the diff`, a path in another repository and a
+  traversal out of the worktree are all simply not names it can use, by the same one refusal. A
+  prompt asking for restraint is not a boundary (`WORK-ISOLATION-PLAN` §2), and this is the exact
+  place where "the expensive reviewer arriving through the door marked cheap" would get in. Byte
+  caps sit beside the file cap because one generated file is a whole diff by itself.
+- **A refused request still spends the round.** Otherwise a reviewer could retry after every
+  refusal and have its unbounded loop back for the price of one bad path.
+
 ## 6. Where the human still is
 
 Unchanged, and deliberately: `approve` gates `token-request`, and this repo stays
@@ -490,7 +546,7 @@ more there, not less: it is what a human reviewer reads first.
 | **R5 — BUILT** | D-R9/D-R10/D-R12: the manager reads it, may send back, bounded at three, and **cannot approve**. Triggered by the record existing rather than by a third `OnResult` consumer, and fired after `_recordLocks` is released — see D-R16/D-R17/D-R18. | `brain`: a send-back reaches the lane as input; a manager "approval" grants **nothing** (unapproved, no `ticket_approved`, `token-request` still refuses); the cheap tier escalates when unsure; and **three send-backs is the bound with a daemon restart in the middle of them**, because the count lives in the store. `m1` asserts the other side of D-R17: with autostart off no judgement agent is started at all. 7 new checks, all seen red. |
 | **R6 — BUILT** | D-R11: the write-up renders in the approval ask (absorbs `WORK-ISOLATION` P5). Raised by the RECORD, never by the review — see D-R19, the decision the phase turns on. | `ui-use`: the ask renders at a live window with no review having run, carries what code knows, offers no path, and answering it takes the ticket from *token refused* to *token granted*. `brain`: the manager's note is in the row, the bound says so, and a verdict — `approve` included — never answers it. `m1`: the unapproved refusal names the question. 12 checks, all seen red. |
 | **R7** | §7: PR-mode assembles a PR description and review comments instead. | `publish`/`workspace`: a `"delivery": "pr"` repo performs no local merge. |
-| **R8** | D-R23/D-R24: the reviewer may REQUEST named files when something concerns it — narrow, once, and recorded — and a send-back on `verify: red` does not spend a round. Both amend D-R12; neither is started. | `brain`: a review that asks for a file gets that file and no more, asks only once, and its request is in the `manager_review` row; a send-back with `verify: red` in the record leaves the send-back count unchanged, and one with `not-run` still counts. **The exemption must be proved from the RECORD, never from the model's stated reason** — a fake manager claiming red must earn no exemption, and that is the check most worth writing first. |
+| **R8 — BUILT** | D-R23/D-R24: the reviewer may REQUEST named files when something concerns it — narrow, once, and recorded — and a send-back on `verify: red` does not spend a round. Both amend D-R12. Three decisions came out of building them: D-R25 (the exempt round is its own event kind), D-R26 (one exemption per verify RESULT, which is the terminator D-R24 lacks), D-R27 (the details round is shared by both tiers and bounded by the record's own `changed` list). | `brain`: a review that asks for a file gets that file and no more, asks only once, and its request is in the `manager_review` row; a send-back with `verify: red` in the record leaves the send-back count unchanged, and one with `not-run` still counts. **The exemption must be proved from the RECORD, never from the model's stated reason** — a fake manager claiming red must earn no exemption, and that is the check most worth writing first. |
 
 **R1–R3 are the correction and come first**: R1 makes concurrent landing work at all, R2 makes
 agent-resolved conflicts safe, and R3 removes the machinery that was standing in for R1. **R3.5
@@ -874,6 +930,42 @@ plan shipped without one and handing it off meant re-deriving everything (`a403f
 - **No new answer path, and no UI code at all beyond that ScrollViewer.** The overlay,
   `ui dump`'s `ask` key, `ui answer` and `Esc` are Phase 4's and render any kind — which is what
   D-L4's "one component" bought, and it is the reason this phase is mostly daemon.
+
+### R8 — the escape hatch and the exemption (BUILT; both amend D-R12, so read it first)
+
+- **`AskTier(bool hi)`** — a local function inside `ManagerReview`, and the whole of D-R23's
+  mechanism. It asks one tier, and **at most once per review** turns a `need` reply into files
+  and asks that same tier again. The "once" is a captured `detailsSpent` flag shared by both
+  tiers (D-R27), not a sentence in the prompt: a reviewer that can ask, read and ask again is
+  D-R12's send-back loop one level down and would look, untimed, exactly like a slow model.
+- **`GrantDetails(t, recordJson, want, granted, refused)`** — where the request meets the record.
+  Three refusals, each closing a different way of asking for everything: not in the record's own
+  `changed` list, past `DetailsFileCap`/the byte budget, or resolving outside the worktree. **A
+  refused request still spends the round.** Everything refused comes back for the row, because an
+  escape hatch nobody can see being used is one nobody can judge (D-R23's third property).
+- **`ManagerQuestion(..., string? details)`** — one parameter, two shapes. Without details it
+  offers the hatch and says the default is permanent; with them it says *this is your ONE look,
+  a second request will not be read*. Telling a reviewer it may ask, while holding what it asked
+  for, would make the refusal look like the system swallowing its question.
+- **`RecordVerify` / `VerifyWhenOf`** — D-R24's code fact and D-R26's identity for it. Both fail
+  toward **spending** a round on anything unreadable, which is the safe direction: the failure
+  being avoided is a bound that quietly stops bounding.
+- **The `manager_review` row gained five fields**: `verify` (the code fact the exemption keys
+  on), `exempt`, `details`, `detailsWhy`, `detailsRefused` — and `round` now means *the count
+  after this send-back*, so an exempt round leaves it where it was. R6's `ReviewLine` is the
+  other end and had to change with it: *"round 2 of 3"* for an objection that spent no round
+  would misreport how many chances are left, on the one screen where that number is being used
+  to decide something.
+- **The check most worth having is `brain:a_manager_claiming_its_objection_was_mechanical_earns_no_exemption`.**
+  `dev prove` can only show it red against HEAD, where the fields do not exist yet — so the
+  claim itself was proved the other way, by keying the exemption on the model's words on purpose
+  and reading the red: `"verify":"not-run","exempt":true` against a fake manager that had merely
+  *said* the tests were red. That is R5's objection reproduced as a failing check, and it is why
+  D-R24's implementation is code and not classification.
+- **The fixture writes no `verify_red` by hand.** It approves, requests the token, swaps
+  `dodona.json` to `verify: ["exit 3"]` and runs a REAL land, because `LandFlow` is the only
+  producer of that event and a hand-inserted one would prove the suite's idea of the record
+  rather than the land's. 6 new checks, all seen red.
 
 ### R7 — PR mode
 

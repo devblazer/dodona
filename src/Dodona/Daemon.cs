@@ -3281,10 +3281,23 @@ sealed class Daemon
                 var r = d.RootElement;
                 string S(string n) => r.TryGetProperty(n, out var x) ? x.ToString() : "";
                 var sentBack = S("verdict") == "send-back";
-                var where = sentBack ? $"sent this back, round {S("round")} of {S("bound")}" : "raised no objection";
+                // R8/D-R24 AT THE SURFACE THE OPERATOR READS. "Round 2 of 3" for an objection
+                // that spent no round would misreport how many chances are left, on the one
+                // screen where that number is being used to make a decision.
+                var exempt = r.TryGetProperty("exempt", out var ex) && ex.ValueKind == JsonValueKind.True;
+                var where = sentBack
+                    ? exempt ? $"sent this back because the verify on record is RED, which spends none of its {S("bound")} rounds"
+                             : $"sent this back, round {S("round")} of {S("bound")}"
+                    : "raised no objection";
+                // D-R23: an escape hatch nobody can see being used is one nobody can judge. It
+                // is a suffix rather than a fact on the first line because it is about how the
+                // review was reached, not about what the operator has to decide.
+                var read = r.TryGetProperty("details", out var dt) && dt.ValueKind == JsonValueKind.Array && dt.GetArrayLength() > 0
+                    ? $" (it asked to read {string.Join(", ", dt.EnumerateArray().Select(x => x.GetString()))})"
+                    : "";
                 var note = S("note");
-                return note.Length > 0 ? $"the manager {where}: {note}"
-                                       : $"the manager {where} and left no note";
+                return note.Length > 0 ? $"the manager {where}: {note}{read}"
+                                       : $"the manager {where} and left no note{read}";
             }
             catch (JsonException) { return "a review ran; its row could not be read"; }
         }
@@ -4375,6 +4388,16 @@ sealed class Daemon
     /// violated in a costume where everyone is being reasonable.</summary>
     const int SendBackBound = 3;
 
+    /// <summary>D-R23's caps, and they are the difference between an escape hatch and the
+    /// expensive reviewer arriving through the door marked cheap. Three files, because a
+    /// request that can widen to everything is a full diff read with extra steps; and a byte
+    /// budget as well as a file count, because one generated file is a whole diff by itself.
+    /// Both are enforced in <see cref="GrantDetails"/> against the record's own changed list —
+    /// in CODE, never by the prompt asking nicely.</summary>
+    const int DetailsFileCap = 3;
+    const int DetailsBytesPerFile = 6000;
+    const int DetailsBytesTotal = 12000;
+
     /// <summary>
     /// The manager reads R4's completion record and MAY SEND THE WORK BACK
     /// (`docs/REVIEW-AND-MERGE-PLAN.md` D-R9). This is the chair R3 left empty: the file
@@ -4468,24 +4491,77 @@ sealed class Daemon
                     return;
                 }
 
-                var q = ManagerQuestion(t, recordJson, rounds);
-                var gate = BrainLock(loId);
-                await gate.WaitAsync();
-                string? reply;
-                try { reply = await _lanes[loId].AskAsync(q, 25000); }
-                finally { gate.Release(); }
-                if (reply is null)
+                // D-R23'S ESCAPE HATCH, AND ITS "ONCE" IS A FLAG HERE RATHER THAN A SENTENCE
+                // IN THE PROMPT. The reviewer may say "I need to see Store.cs before I can judge
+                // this" and get that one file. What it may never do is ask, read and ask again,
+                // which is D-R12's send-back loop one level down wearing the same clothes.
+                //
+                // THE TWO TIERS SHARE THE ROUND. Whichever asks first spends it and buys the
+                // files; the other reads what was bought rather than shopping again. So the
+                // worst case is three model calls for one review (a tier that asks, plus an
+                // escalation) and the ordinary case is still exactly ONE — which is the whole
+                // point, because every one of these is per finished turn, per ticket, and that
+                // is the cost the operator's 2026-08-21 directive is about.
+                var granted = new List<string>();
+                var refused = new List<string>();
+                var detailsWhy = "";
+                var detailsSpent = false;
+                string? details = null;
+
+                async Task<JsonElement?> AskTier(bool hi)
                 {
-                    _store.Event("manager_review_failed", laneId, $"ticket {tid}: the cheap tier did not answer in 25s");
-                    return;
+                    for (var attempt = 0; attempt < 2; attempt++)
+                    {
+                        var q = ManagerQuestion(t, recordJson, rounds, details);
+                        JsonElement? asked;
+                        if (hi) asked = await AskBrainHiAsync(q, project);
+                        else
+                        {
+                            var gate = BrainLock(loId);
+                            await gate.WaitAsync();
+                            string? reply;
+                            try { reply = await _lanes[loId].AskAsync(q, 25000); }
+                            finally { gate.Release(); }
+                            if (reply is null)
+                            {
+                                _store.Event("manager_review_failed", laneId, $"ticket {tid}: the cheap tier did not answer in 25s");
+                                return null;
+                            }
+                            try { asked = JsonDocument.Parse(reply[reply.IndexOf('{')..(reply.LastIndexOf('}') + 1)]).RootElement.Clone(); }
+                            catch
+                            {
+                                _store.Event("manager_review_failed", laneId, $"ticket {tid}: unparseable reply: {Truncate(reply, 160)}");
+                                return null;
+                            }
+                        }
+                        if (asked is null) return null;
+                        // THE SECOND REPLY STANDS AS IT IS. A request arriving on the details
+                        // pass, or after the round has been spent by the other tier, is simply
+                        // not read — and since anything that is not `send-back` is no objection
+                        // (D-R10), a reviewer that asked instead of judging costs the agent
+                        // nothing. That is the failure mode this bound is chosen to have.
+                        if (attempt == 1 || detailsSpent) return asked.Value;
+                        var want = Requested(asked.Value);
+                        if (want.Count == 0) return asked.Value;
+                        detailsSpent = true;
+                        detailsWhy = asked.Value.TryGetProperty("needWhy", out var wy) ? Truncate(wy.GetString() ?? "", 200) : "";
+                        details = GrantDetails(t, recordJson, want, granted, refused);
+                        // RECORDED — D-R23's third property, and the refusals with it. The only
+                        // way anyone ever finds out whether this hatch is judgement or habit is
+                        // by counting rows, and a refusal that left no row would make "it never
+                        // asks for the whole diff" an argument instead of a query.
+                        _store.Event("manager_details_granted", laneId, $"ticket {tid} " + JsonSerializer.Serialize(new
+                        {
+                            ticket = tid, tier = hi ? "hi" : "lo", granted, refused, why = detailsWhy,
+                        }));
+                        if (details is null) return asked.Value;   // nothing survived the narrowing
+                    }
+                    return null;
                 }
-                JsonElement v;
-                try { v = JsonDocument.Parse(reply[reply.IndexOf('{')..(reply.LastIndexOf('}') + 1)]).RootElement.Clone(); }
-                catch
-                {
-                    _store.Event("manager_review_failed", laneId, $"ticket {tid}: unparseable reply: {Truncate(reply, 160)}");
-                    return;
-                }
+
+                var first = await AskTier(hi: false);
+                if (first is null) return;                 // the tier said so in its own event
+                var v = first.Value;
 
                 // Cheap tier unsure -> the SAME question, expensive tier (D-R12's bound on
                 // reading, and the operator's rule #1). Which tier answered is a FIELD of the
@@ -4495,7 +4571,7 @@ sealed class Daemon
                 var tier = "lo";
                 if (conf == "low")
                 {
-                    var hiV = await AskBrainHiAsync(q, project);
+                    var hiV = await AskTier(hi: true);
                     if (hiV is not null)
                     {
                         v = hiV.Value;
@@ -4512,6 +4588,31 @@ sealed class Daemon
                 var note = v.TryGetProperty("note", out var nt) ? Truncate(nt.GetString() ?? "", 240) : "";
                 var message = v.TryGetProperty("message", out var mg) ? Truncate(mg.GetString() ?? "", 1200) : "";
 
+                // D-R24: A MECHANICAL OBJECTION IS NOT A STRIKE — AND CODE DECIDES THAT IT WAS
+                // ONE. R5's objection to this decision was never overturned; it is what fixes
+                // the implementation. *An exemption the model classifies is a bound the model
+                // can talk its way out of*, so the model classifies nothing: the verify state is
+                // already a code fact in R4's record (`verify_green` / `verify_red`, written by
+                // `LandFlow`, reported and never re-run — D-R15), and the exemption keys on what
+                // the RECORD says at the moment of this review. A reviewer claiming it only
+                // objected because the tests were red earns exactly nothing by saying so.
+                //
+                // `not-run` IS NOT RED, and that is the whole load-bearing half of this. It is
+                // the NORMAL value — no verify has run for most tickets, by design — so treating
+                // it as red would exempt every send-back there has ever been and the bound would
+                // simply stop existing.
+                //
+                // ONE EXEMPTION PER VERIFY RESULT (D-R26), keyed on the verify event's own
+                // timestamp. The first mechanical objection carries information the agent can
+                // act on; the second one about the SAME red carries none, and an exemption with
+                // no terminator is CLAUDE.md §0.1's *never stuck* violated by the very fix that
+                // was written to honour it. A repeat therefore counts, and three of them reach
+                // the bound and the operator like any other judgement.
+                var (verifyState, verifyWhen) = RecordVerify(recordJson);
+                var lastMech = _store.LastTicketEvent(tid, "manager_sent_back_mechanical");
+                var repeat = lastMech is { Detail: string md } && VerifyWhenOf(md) == verifyWhen;
+                var exempt = sendBack && verifyState == "red" && !repeat;
+
                 // THE WRITE-UP IS THE POINT, NOT THE VERDICT (D-R11): R6 renders `note` in the
                 // approval ask so the operator's yes is a two-second decision instead of a
                 // diff-reading session. So the row is written whatever the verdict, in the same
@@ -4524,8 +4625,20 @@ sealed class Daemon
                     asked = verdict,        // what the model actually said, including `approve`
                     confidence = conf,
                     tier,
-                    round = rounds + 1,
+                    // The count AFTER this send-back, which is what makes `exempt` legible: an
+                    // exempt round leaves the count where it was (D-R24), so `round == rounds`
+                    // and `exempt: true` say the same thing twice on purpose — R6's ask reads
+                    // one of them and a person reading the row reads the other.
+                    round = exempt ? rounds : rounds + 1,
                     bound = SendBackBound,
+                    // THE CODE FACT THE EXEMPTION KEYS ON, in the row, so "was this exemption
+                    // earned" is answerable by reading rather than by re-deriving it later.
+                    verify = verifyState,
+                    exempt,
+                    // D-R23's record: which files it asked for and why, and what it was refused.
+                    details = granted,
+                    detailsWhy,
+                    detailsRefused = refused,
                     note,
                     message,
                 });
@@ -4541,7 +4654,7 @@ sealed class Daemon
                         $"ticket {tid}: verdict send-back with no message and no note — nothing to send, so nothing was sent");
                     return;
                 }
-                await SendBackAsync(t, laneId, rounds + 1, text, note);
+                await SendBackAsync(t, laneId, exempt ? rounds : rounds + 1, text, note, exempt, verifyWhen);
             }
             catch (Exception ex) { _store.Event("manager_review_failed", laneId, $"ticket {tid}: {ex.GetType().Name}: {ex.Message}"); }
             // R6 (D-R11): the note is written FOR THE OPERATOR, so every way out of this method
@@ -4559,6 +4672,108 @@ sealed class Daemon
         });
     }
 
+    /// <summary>What the review asked to READ, narrowed to strings and capped before anything
+    /// touches a disk — D-R23's *named and narrow*, at the first point it can be enforced. The
+    /// cap here is not the grant cap: it only stops a reply listing five hundred paths from
+    /// costing a five-hundred-iteration loop. <see cref="GrantDetails"/> is where the request
+    /// meets the record and most of it is refused.</summary>
+    static List<string> Requested(JsonElement v) =>
+        v.TryGetProperty("need", out var n) && n.ValueKind == JsonValueKind.Array
+            ? n.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String)
+               .Select(x => (x.GetString() ?? "").Trim()).Where(x => x.Length > 0).Take(8).ToList()
+            : new List<string>();
+
+    /// <summary>The verify state and the verify event's timestamp, out of R4's record. The
+    /// TIMESTAMP is the part that is not obvious: D-R26 exempts one mechanical send-back per
+    /// verify RESULT, so the exemption needs an identity for the red it is excusing, and the
+    /// record already carries one. A record that will not parse yields `("", "")`, which is not
+    /// `red`, so an unreadable record grants no exemption — the safe direction, because the
+    /// failure mode being avoided is a bound that quietly stops bounding.</summary>
+    static (string State, string When) RecordVerify(string recordJson)
+    {
+        try
+        {
+            using var d = JsonDocument.Parse(recordJson);
+            if (!d.RootElement.TryGetProperty("verify", out var vv) || vv.ValueKind != JsonValueKind.Object) return ("", "");
+            return (vv.TryGetProperty("state", out var st) ? st.GetString() ?? "" : "",
+                    vv.TryGetProperty("when", out var wn) ? wn.GetString() ?? "" : "");
+        }
+        catch (JsonException) { return ("", ""); }
+    }
+
+    /// <summary>The `verifyWhen` a previous mechanical send-back was excused for. Unreadable
+    /// compares unequal, which spends a round rather than granting a free one.</summary>
+    static string VerifyWhenOf(string detail)
+    {
+        var brace = detail.IndexOf('{');
+        if (brace < 0) return "";
+        try
+        {
+            using var d = JsonDocument.Parse(detail[brace..]);
+            return d.RootElement.TryGetProperty("verifyWhen", out var w) ? w.GetString() ?? "" : "";
+        }
+        catch (JsonException) { return ""; }
+    }
+
+    /// <summary>D-R23's *named and narrow*, and every word of it is enforced HERE rather than
+    /// asked for in the prompt — a reviewer that could widen its own request is the expensive
+    /// reviewer arriving through the door marked cheap, and a prompt is not a boundary
+    /// (`WORK-ISOLATION-PLAN` §2).
+    ///
+    /// Three refusals, and each closes a different way of asking for everything:
+    ///
+    ///  * **Not in the record's own `changed` list** — so `*`, `.`, `the diff`, a path in
+    ///    another repository and a file this branch never touched are all simply not files it
+    ///    can name. The list is the record's, which is the same list the question showed it.
+    ///  * **More than <see cref="DetailsFileCap"/> files, or more than the byte budget** — one
+    ///    generated file is a whole diff by itself, so a file count alone would not bound this.
+    ///  * **Anything that resolves outside the worktree** — `changed` membership already makes
+    ///    this unreachable, and it is checked anyway because the cost of being wrong is reading
+    ///    an arbitrary file off the operator's disk into a model prompt.
+    ///
+    /// Returns the block to attach to the question, or null when nothing survived — in which
+    /// case the round is still SPENT (the caller sets that before calling), because a reviewer
+    /// that could retry after a refusal would have an unbounded loop for the price of one bad
+    /// path. Everything refused is handed back in <paramref name="refused"/> for the row.</summary>
+    string? GrantDetails(Store.TicketRow t, string recordJson, List<string> want,
+                         List<string> granted, List<string> refused)
+    {
+        var changed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var d = JsonDocument.Parse(recordJson);
+            if (d.RootElement.TryGetProperty("changed", out var ch) && ch.ValueKind == JsonValueKind.Array)
+                foreach (var x in ch.EnumerateArray())
+                    if (x.GetString() is { Length: > 0 } c) changed.Add(c.Replace('\\', '/'));
+        }
+        catch (JsonException) { }
+
+        var root = Path.GetFullPath(t.Worktree);
+        var sb = new StringBuilder();
+        var budget = DetailsBytesTotal;
+        foreach (var raw in want)
+        {
+            var name = raw.Replace('\\', '/').TrimStart('/');
+            if (granted.Count >= DetailsFileCap) { refused.Add($"{raw} (the cap is {DetailsFileCap} files for one review)"); continue; }
+            if (!changed.Contains(name)) { refused.Add($"{raw} (not one of the files this change touched)"); continue; }
+            var full = Path.GetFullPath(Path.Combine(root, name));
+            if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
+            { refused.Add($"{raw} (not a readable file inside the worktree)"); continue; }
+            string body;
+            try { body = File.ReadAllText(full); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            { refused.Add($"{raw} ({e.GetType().Name})"); continue; }
+            var take = Math.Min(Math.Min(body.Length, DetailsBytesPerFile), budget);
+            if (take <= 0) { refused.Add($"{raw} (the review's byte budget was already spent)"); continue; }
+            budget -= take;
+            granted.Add(name);
+            sb.Append($"--- {name} ---\n").Append(body[..take]);
+            if (take < body.Length) sb.Append($"\n--- truncated at {take} of {body.Length} chars ---");
+            sb.Append('\n');
+        }
+        return granted.Count == 0 ? null : sb.ToString();
+    }
+
     /// <summary>The question, and D-R12's bound on reading is IN it: the diffstat, the
     /// changed-file NAMES and the agent's own report — never the diff content, which plan §9
     /// rejects by name.
@@ -4573,7 +4788,7 @@ sealed class Daemon
     ///
     /// The history goes in too, so round three does not repeat round one — the same rows the
     /// operator gets at the bound.</summary>
-    string ManagerQuestion(Store.TicketRow t, string recordJson, int rounds)
+    string ManagerQuestion(Store.TicketRow t, string recordJson, int rounds, string? details)
     {
         static string S(JsonElement e, string name) =>
             e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var x) ? x.ToString() : "";
@@ -4604,10 +4819,24 @@ sealed class Daemon
                "operator's approval is the only yes and it is not yours to give. Send work back only for something " +
                "real: work that does not match the ticket, a change the report does not mention, a discarded file, " +
                "a schema or interface change slipped in quietly. Not for style.\n" +
+               // D-R23'S ESCAPE HATCH IS OFFERED ONLY WHILE IT IS STILL AVAILABLE, and the
+               // details pass says so out loud. A reviewer told it may ask, holding the files it
+               // asked for, would ask again — and the refusal to read a second request would
+               // then look to it like the system swallowing its question.
+               (details is null
+                   ? "You have NOT been shown the contents of any file, and that is deliberate and permanent: this " +
+                     "review is cheap on purpose, and a review genuinely worth a full read is a PERSON'S job. If one " +
+                     "specific thing concerns you and the summary above truly cannot settle it, you may name up to " +
+                     $"{DetailsFileCap} files FROM THE CHANGED LIST ABOVE in `need` and you will be asked once more with " +
+                     "their contents. You get ONE such round, it is spent whether or not what comes back helps, and " +
+                     "anything not in that list is refused. Judge without it whenever you can.\n"
+                   : "You asked to see these files and this is your ONE look at them — decide now, because a second " +
+                     $"request will not be read:\n{details}\n") +
                "Reply ONLY one line of JSON, no prose, no markdown, no code fence: " +
                "{\"verdict\":\"ok|send-back\",\"confidence\":\"high|medium|low\"," +
                "\"note\":\"<=200 chars, written for the operator deciding whether to merge\"," +
-               "\"message\":\"<what to tell the agent, only when send-back>\"}";
+               "\"message\":\"<what to tell the agent, only when send-back>\"" +
+               (details is null ? ",\"need\":[\"<a changed file, ONLY if you cannot judge without it>\"],\"needWhy\":\"<why>\"}" : "}");
     }
 
     /// <summary>What the manager has already asked for on this ticket, oldest first — D-R12's
@@ -4616,7 +4845,12 @@ sealed class Daemon
     string SendBackHistory(long tid)
     {
         var parts = new List<string>();
-        foreach (var (_, _, detail) in _store.TicketEvents(tid, SendBackBound + 1, "manager_sent_back"))
+        // BOTH KINDS (D-R25). An exempt send-back is a different EVENT so that the bound's two
+        // counters stay right with no new logic — but it is the same objection to the agent, and
+        // a history that omitted it would let round three repeat what round one already said,
+        // which is the one thing this history exists to prevent. The read is generous because
+        // exempt rounds are not bounded by `SendBackBound`; both callers Truncate.
+        foreach (var (kind, _, detail) in _store.TicketEvents(tid, SendBackBound * 3, "manager_sent_back", "manager_sent_back_mechanical"))
         {
             var brace = detail.IndexOf('{');
             if (brace < 0) continue;
@@ -4627,7 +4861,7 @@ sealed class Daemon
                 var said = d.RootElement.TryGetProperty("message", out var mg) && mg.GetString() is { Length: > 0 } m
                     ? m
                     : d.RootElement.TryGetProperty("note", out var nt) ? nt.GetString() ?? "" : "";
-                parts.Add($"({round}) {said}");
+                parts.Add($"({round}{(kind == "manager_sent_back_mechanical" ? ", on a red verify — no round spent" : "")}) {said}");
             }
             catch (JsonException) { }      // a row we cannot read is worth less than the ones we can
         }
@@ -4651,9 +4885,18 @@ sealed class Daemon
     /// system prompt, the resume args), and a second implementation of it would drift on exactly
     /// the cases that matter — `MakeTicket`'s lesson. An undelivered send-back also counts as NO
     /// ROUND against the bound, because nothing was said.</summary>
-    async Task SendBackAsync(Store.TicketRow t, long laneId, int round, string message, string note)
+    async Task SendBackAsync(Store.TicketRow t, long laneId, int round, string message, string note,
+                             bool exempt, string verifyWhen)
     {
-        var text = $"[manager review, round {round} of {SendBackBound}] {message}" + "\n\n" +
+        // THE AGENT IS TOLD WHICH KIND OF OBJECTION THIS IS, because the two mean different
+        // things to it: a strike is a judgement it has to answer, and a red verify is a fact it
+        // can already see (D-R24). Telling it "round 2 of 3" for something that spent no round
+        // would be the record and the message disagreeing in front of the one reader who cannot
+        // check.
+        var head = exempt
+            ? $"[manager review — the verify on record is RED, so this is not one of your {SendBackBound} rounds]"
+            : $"[manager review, round {round} of {SendBackBound}]";
+        var text = $"{head} {message}" + "\n\n" +
                    "This is a review of the turn you just finished, not a new task. Address it on this branch and " +
                    "commit; nothing has been merged and nothing has been approved.";
         // A CONDITION WITH A DEADLINE, never a sleep — CLAUDE.md §3's rule for waits, in code. The
@@ -4671,9 +4914,16 @@ sealed class Daemon
                     // is a send-back that was DELIVERED — a round burned on a message the lane
                     // never received would be the bound eating the agent's chances silently.
                     rt.Say(text);
-                    _store.Event("manager_sent_back", laneId, $"ticket {t.Id} " + JsonSerializer.Serialize(new
+                    // D-R25: AN EXEMPT SEND-BACK IS ITS OWN EVENT KIND. The bound counts
+                    // `manager_sent_back` and R6's ask counts it again, independently, to word
+                    // "you are at the bound" — so a separate kind keeps BOTH readers correct
+                    // with no new logic in either, where a flag inside the JSON would have
+                    // needed every counter in the tree to learn to read it and would have been
+                    // wrong in whichever one was missed.
+                    _store.Event(exempt ? "manager_sent_back_mechanical" : "manager_sent_back", laneId,
+                        $"ticket {t.Id} " + JsonSerializer.Serialize(new
                     {
-                        ticket = t.Id, lane = laneId, round, bound = SendBackBound, note, message,
+                        ticket = t.Id, lane = laneId, round, bound = SendBackBound, exempt, verifyWhen, note, message,
                     }));
                     return;
                 }
