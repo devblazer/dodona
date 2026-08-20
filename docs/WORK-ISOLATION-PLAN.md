@@ -289,7 +289,8 @@ What this deletes outright:
 - **Scope creep onto the human.** The operator's own session in the same folder is untouched,
   which is the whole point of the change.
 
-**Measure two things before P1 relies on it**, because "the flag exists" is not "the hook fires":
+**Both of these were MEASURED on 2026-08-20, before P1 relied on either, and the second answer
+inverted an assumption** — see below the questions for what came back.
 
 1. **Does a `PreToolUse` hook supplied via `--settings` actually fire under `-p` with
    `bypassPermissions`?** The existing measurement (hooks fire under `bypassPermissions`) was
@@ -303,6 +304,36 @@ What this deletes outright:
    are re-read, the per-lane file must be rewritten on swap the same way the worktree copy is
    today. **Do not delete the redeployment machinery until this is answered** — it is the one part
    of `DeployGate` this decision may not subsume.
+
+**ANSWER 1 — YES, IT FIRES, AND THE DENY IS ENFORCED.** A `PreToolUse` hook supplied via
+`--settings <file>` fired under `claude -p --permission-mode bypassPermissions`, the write never
+happened, and the agent was told why ("blocked by a settings hook"). Run with a CONTROL — the same
+prompt in the same shape without the flag wrote the file — so the absence is the refusal and not the
+model declining. That control is the whole value of the measurement: without it, "no file appeared"
+proves nothing.
+
+**ANSWER 2 — HOOKS ARE FIXED AT SESSION START. NEVER RE-READ.** A two-turn
+`--input-format stream-json` session kept firing its hook on turn 2 after the hook had been
+**removed from the settings file between turns**. Three consequences, and the third was not
+predicted here:
+
+- The per-lane file is written once, at launch, and rewriting it under a live agent reaches
+  nothing. So **the gate names only the LANE** and the daemon resolves the ticket, the claims and
+  the worktree from current state on every write. A lane's ticket changes during its life (P2
+  promotes a plain lane into one); its lane id does not. `--ticket` on a launch line is
+  structurally unable to stay correct, so it is not what the decision rests on.
+- **Redeployment never fixed the incident it was written for.** `gate_redeploy_failed` carries a
+  live 2026-08-18 failure — a hook pointing at an exe `GcOldBuilds` had collected — and rewriting
+  the file could not reach the live agents that had lost enforcement. The lanes it appeared to fix
+  were the ones that respawned afterwards, which `AttachShimAsync` now writes a fresh file for
+  anyway. It is deleted.
+- **Deleting it was not enough: it had become actively harmful, and the real fix is in the GC.** A
+  live agent holds its launch-time exe path for its whole life, so refreshing the file with the new
+  path is precisely what lets `GcOldBuilds` delete the directory that agent's gate still needs. So
+  **`GcOldBuilds` now refuses to collect a build directory named by any live lane's gate file**, and
+  dead lanes' gate files are removed in reconcile so nothing pins a directory forever. A gate whose
+  command cannot even start is a fail-open that never reaches Dodona's code to be logged — under
+  layer 1, a write into the operator's live checkout.
 
 ## 7. Phases
 
@@ -361,10 +392,56 @@ are the responsiveness. P4 is a bug fix landable on its own.
   in D-7 cost 255 ms per edit, 136 ms of it merely starting PowerShell (§0.0). This one is
   `dodona.exe gate-hook` — one process, not a script shelling out to a binary — but it must be
   **measured** before P1 is called done, not assumed.
+
+  **MEASURED, 2026-08-20, warm, 20 invocations per case on this machine:**
+
+  | case | per edit |
+  |---|---|
+  | `dodona.exe` process start alone (`version`) | 47.8 ms |
+  | plain lane, ALLOW — tree-check, write in a worktree | 99.3 ms |
+  | plain lane, DENY — tree-check, write in the shared checkout | 105.4 ms |
+  | ticket lane, ALLOW — tree-check **and** claim-check | 99.9 ms |
+  | ticket lane, DENY — tree-check refuses first | 100.1 ms |
+
+  So **~99 ms per write**, of which **48 ms is starting the process at all** — under half of the
+  255 ms that got the last two hooks deleted, and the second daemon round trip a ticket lane pays is
+  essentially free (99.9 vs 99.3 ms). It is not nothing, and it is stated rather than waved at: the
+  cost falls on every `Edit`/`Write` of every work lane, and the floor cannot be improved without
+  making the gate something other than a process.
 - **`GateHook` fails open, and layer 1 makes that load-bearing.** Today a fail-open gate means a
   ticket lane's write slips to the backstop; under layer 1 it means a write into the live tree.
   Every fail-open path needs re-reading against that — fail-open has already cost this project
   one silently dead gate (the BOM incident, §3).
+
+  **Re-read and RESOLVED BY ORDERING, in P1.** The two questions now fail in opposite directions:
+  the **tree** question is asked first and **fails CLOSED**, the **claim** question is asked second
+  and still fails open exactly as before. That ordering is what keeps the second one safe — because
+  the tree answer has already been obtained, every remaining claim fail-open can only let a write
+  through *inside a worktree*, which is the case the merge-time backstop covers and the case the
+  original rationale was actually about.
+
+  This **reverses a rationale recorded beside `m1`'s own check** — *"layer 1 failing closed would
+  strand a lane that has no way to ask a human for permission (CLAUDE.md §7). The backstop is layer
+  2."* True for a gate that lived only inside worktrees; false once the gate covers the shared
+  checkout, where there is nothing behind the fail-open: an allowed write is already in the
+  operator's live tree, next to their uncommitted work, and no backstop ever sees it because it was
+  never going to be merged. A refused write is announced, recorded and retryable; and the daemon it
+  needs an answer from is the same one already pumping that lane's output, so a refusal there costs
+  a message rather than work. `m1`'s check now asserts the refusal, and says all of this in place.
+
+- **A TICKET lane was never bounded to its worktree either — found in P1 by reading the rungs.**
+  `claim-check` resolves an absolute path through its repository and project rungs, so a ticket
+  agent writing the ABSOLUTE path of a file *its own claim covers* — in the operator's live checkout
+  instead of its worktree — resolved to the same claim-relative string and was **allowed**.
+  Reachable since multi-repo landed. Layer 1 therefore applies to ticket lanes too; that is not
+  belt-and-braces, it closes a hole the claim algebra cannot see.
+
+- **The retention scan must unescape the file it reads.** The gate file is JSON, so every backslash
+  in the command is doubled; a raw `Contains()` against a Windows path with single backslashes can
+  never match, and the retention silently retains **nothing** while looking installed. `m4` already
+  carried this exact trap from the reading side and the new code walked straight into it anyway.
+  Caught only because the check was tightened to demand that a retention actually FIRED rather than
+  that few directories survived — the permissive version passed while the mechanism did nothing.
 - **`ticket-create` refuses on claim conflict**, so promotion can fail at the moment it is
   needed. It must degrade to a refused write with a named holder, never to a silent allow.
 - **`lane-respawn` refuses to re-home a ticket lane** — deliberately. Layer 2 goes the other way

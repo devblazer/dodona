@@ -114,6 +114,31 @@ try {
     Set-Content "$out\status-after-swap.txt" $status
     $newPid = if ($status -match 'daemon pid=(\d+)') { [int]$Matches[1] } else { -1 }
     Check 'new_daemon_serves' ($newPid -gt 0 -and $newPid -ne $d1.Id) $status
+
+    # A LANE BORN FROM A PUBLISHED BUILD, so the gate-retention path has something to retain.
+    # SKY cannot exercise it: the first daemon runs out of DODONA_HOME\bin, which GcOldBuilds never
+    # collects, so SKY's gate names a directory that was never a candidate. This lane is spawned by
+    # the daemon that just swapped IN, so its gate names a published build directory -- exactly the
+    # operator's shape, where a daemon in bin\<stamp1> spawns a lane and a later publish tries to
+    # collect stamp1 underneath it. Written after the first version of the retention check passed
+    # vacuously for this reason (dirs=1, kept=0).
+    $lsk = Dodona @("lane-start", "--title", "GATEKEEP", "--child", $fake)
+    if ($lsk -notmatch 'lane (\d+)') { throw "lane-start GATEKEEP failed: $lsk" }
+    $keepLane = $Matches[1]
+    $keepGate = Join-Path $wsDir "gate-lane$keepLane.json"
+    # PARSED, never string-matched: the file is JSON, so the path inside has DOUBLED backslashes and
+    # its quotes written as ". The first version of this check regexed the raw text and got
+    # `u0022C:UsersdevblAppData...` back -- the same trap the comment further down already warned
+    # about for the same file, and the same one the retention code itself walked into.
+    $keepExe = ''
+    if (Test-Path $keepGate) {
+        try {
+            $kc = ((Get-Content $keepGate -Raw | ConvertFrom-Json).hooks.PreToolUse[0].hooks[0].command)
+            if ($kc -match '^"([^"]+)"') { $keepExe = $Matches[1] }
+        } catch { $keepExe = '' }
+    }
+    Check 'a_lane_from_a_published_build_names_it_in_its_gate' `
+        ($keepExe -ne '' -and $keepExe -like "$binRoot*") "exe=$keepExe binRoot=$binRoot"
     Check 'new_daemon_is_published_build' ($status -match [regex]::Escape($binRoot)) $status
 
     # ---- provenance is a COMMIT (RECOVERY-PHASES P2.6) --------------------------------------
@@ -216,42 +241,62 @@ try {
     Check 'armed_swap_recorded' ((Sql "SELECT state FROM swaps ORDER BY id DESC LIMIT 1") -match 'swapped') ''
     Check 'agent_survived_second_swap' ([bool](Get-Process -Id $shimInfo.childPid -ErrorAction SilentlyContinue)) ''
 
-    # ====== the gate in an adopted worktree points at the RUNNING build (never-stuck) ======
-    # Gate scripts hard-code the exe that wrote them and old build dirs are GC'd, so
-    # without re-deploy-on-adoption every swap left old worktrees' gates calling a binary
-    # scheduled for deletion — silently failing OPEN.
-    # trailing space matters: the query is inlined into a python '''…''' literal, and a
-    # query ENDING in a quote would make four quotes in a row (SyntaxError).
-    Check 'gate_redeployed_on_adoption' ([int](Sql "SELECT COUNT(*) FROM events WHERE kind='gate_redeployed' ").Trim() -ge 1) ''
-    $wt = (Sql "SELECT worktree FROM tickets WHERE id=1").Trim()
-    $runningExe = ''
-    if (((Dodona @("swaps")) -join ' ') -match 'exe (\S+)') { $runningExe = $Matches[1] }
-    # THE HOOK COMMAND OUT OF settings.local.json, not a generated dodona-gate.ps1. This check
-    # asserted on that script for months after it stopped existing: the gate became a compiled
-    # subcommand (`dodona gate-hook`) and DeployGate now DELETES any dodona-gate.ps1 it finds as
-    # stale, so Test-Path was always false, $gateBody was always '', and ''.Contains(<exe>) is
-    # always false. It could not pass, and what it exists to prove -- that after a hot swap the
-    # deployed gate points at the build that is actually RUNNING, rather than at an old build
-    # directory scheduled for deletion -- was silently unverified the whole time. m1 was updated
-    # for the same change and this was missed.
-    # PARSED, not string-matched, and the first attempt at this fix got it wrong in a way worth
-    # keeping: settings.local.json is JSON, so the command inside it has its backslashes doubled
-    # and its quotes written as \u0022. A raw Contains() against a Windows path with single
-    # backslashes can therefore NEVER match, and the check fails while the gate is perfectly
-    # well configured -- a false red, which is as damaging as a false green. `dev prove` caught
-    # it. Read the command the way m1 does, out of the object, where it is unescaped.
-    $gateSettings = Join-Path $wt '.claude\settings.local.json'
+    # ====== THE GATE OF A LIVE LANE STILL WORKS AFTER A HOT SWAP ======
+    #
+    # THE REQUIREMENT HERE IS THE OPPOSITE OF WHAT IT WAS, and the reversal is a measurement
+    # (2026-08-20, WORK-ISOLATION-PLAN D-17). These checks used to demand that after a swap the
+    # deployed gate pointed at the NEWLY RUNNING build, maintained by re-deploy-on-adoption --
+    # which existed because a gate hard-codes the exe that wrote it and GcOldBuilds deletes old
+    # build directories, so a stale gate called a binary scheduled for deletion and silently failed
+    # OPEN (found live 2026-08-18).
+    #
+    # Measured: HOOKS ARE READ ONCE, AT SESSION START, AND NEVER RE-READ. A two-turn stream-json
+    # session kept firing its hook on turn 2 after the hook had been REMOVED from the settings file
+    # between turns. So rewriting the file never reached the live agent it was meant to protect,
+    # and the lanes redeployment appeared to fix were the ones that respawned afterwards.
+    #
+    # The correct invariant is therefore about the EXE, not the file: an agent launched by an older
+    # build holds that build's path for its whole life, so THAT DIRECTORY MUST SURVIVE. The gate
+    # file is per-lane and lives in workspace state (never in anybody's repository, D-17), and
+    # GcOldBuilds now refuses to collect a directory any live lane's gate names.
+    $gateFile = Join-Path $wsDir "gate-lane$lane.json"
     $gateHook = ''
-    if (Test-Path $gateSettings) {
-        try { $gateHook = ((Get-Content $gateSettings -Raw | ConvertFrom-Json).hooks.PreToolUse[0].hooks[0].command) } catch { $gateHook = '' }
+    if (Test-Path $gateFile) {
+        try { $gateHook = ((Get-Content $gateFile -Raw | ConvertFrom-Json).hooks.PreToolUse[0].hooks[0].command) } catch { $gateHook = '' }
     }
-    Check 'gate_registration_survives_the_swap' ($gateHook -match 'gate-hook') "settings=$gateSettings hook=$gateHook"
-    Check 'gate_points_at_running_build' ($runningExe -ne '' -and $gateHook.Contains($runningExe)) `
-        "exe=$runningExe wt=$wt hook=$gateHook"
+    # PARSED, not string-matched, and the reason is worth keeping from the previous version of this
+    # check: the file is JSON, so the command inside it has its backslashes doubled and its quotes
+    # written as \u0022. A raw Contains() against a Windows path with single backslashes can
+    # therefore NEVER match, and the check fails while the gate is perfectly well configured -- a
+    # false red, which is as damaging as a false green. `dev prove` caught that one.
+    Check 'gate_file_survives_the_swap' ($gateHook -match 'gate-hook' -and $gateHook -match "--lane $lane") `
+        "gate=$gateFile hook=$gateHook"
+    # THE ONE THAT MATTERS. A hook whose command cannot even start is a fail-open that never reaches
+    # Dodona's code to be logged -- and under layer 1 that is a write into the operator's live
+    # checkout. So the exe this live agent's gate names has to still be on disk after the swap.
+    $gateExe = ''
+    if ($gateHook -match '^"([^"]+)"') { $gateExe = $Matches[1] }
+    Check 'the_gate_exe_of_a_live_lane_survives_the_swap' ($gateExe -ne '' -and (Test-Path $gateExe)) `
+        "exe=$gateExe hook=$gateHook"
 
-    # ================= old build directories are collected =================
+    # ================= old build directories are collected, EXCEPT the ones still in use =========
+    # `binary_gc_kept` is the retention above, observed from the other side: SKY is still alive and
+    # its gate names the build it was launched from, so that directory must NOT have been collected
+    # while every other old one was. Asserting only "one directory left" would have made the
+    # retention look like a GC bug.
     $dirs = @(Get-ChildItem -Directory $binRoot | Where-Object { $_.Name -ne 'bogus' })
-    Check 'old_builds_gcd' ($dirs.Count -eq 1) "dirs=$($dirs.Name -join ',')"
+    $kept = [int](Sql "SELECT COUNT(*) FROM events WHERE kind='binary_gc_kept' ").Trim()
+    # Asserted as "retention HAPPENED", not "at most two directories": SKY is alive (proved two
+    # checks up) and its gate names the build it was launched from, so a run where nothing was kept
+    # means the retention never fired and this check would be agreeing with a collected exe.
+    Check 'old_builds_gcd_except_those_a_live_gate_names' `
+        ($kept -ge 1 -and $dirs.Count -le 2) "dirs=$($dirs.Name -join ',') kept-events=$kept"
+    # And the retained directory is the one GATEKEEP's gate actually needs -- still on disk after
+    # two swaps. This is the 2026-08-18 incident stated correctly: not "the gate points at the
+    # running build", which a live agent can never be made to do, but "the build the live agent's
+    # gate points at is still there".
+    Check 'the_retained_build_is_the_one_a_live_gate_needs' `
+        ($keepExe -ne '' -and (Test-Path $keepExe)) "exe=$keepExe"
 
     # ================= start-on-demand: the daemon is summoned, not served =================
     Dodona @("stop-daemon") | Out-Null

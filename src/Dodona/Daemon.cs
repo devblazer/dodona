@@ -818,38 +818,39 @@ sealed class Daemon
             Announce($"[dodona] stopped {reaped.Count} management agent(s) with no valid registration: {string.Join(", ", reaped)} — " +
                      "each was for a project this workspace no longer has, or was a second claimant on one project's slot");
 
-        // Re-deploy the claim gate into every open ticket's worktree. Gate files are
-        // deployment, and deployment rots: each script hard-codes the exe that wrote it,
-        // and GcOldBuilds deletes old build directories — so an adopted worktree's gate
-        // ends up invoking a binary that no longer exists and silently fails OPEN (found
-        // live 2026-08-18: every lane older than the running build had lost enforcement
-        // layer 1, with nothing but a bypass log to show for it). Two file writes per
-        // ticket buys a gate that always points at the build actually running.
+        // GATE REDEPLOYMENT IS GONE, AND DELETING IT WAS NOT A TIDY-UP -- IT HAD BECOME HARMFUL.
+        //
+        // It rewrote every open ticket's gate file so the hook named the build actually running,
+        // because `GcOldBuilds` deletes old build directories and a gate pointing at a collected
+        // exe fails OPEN (found live 2026-08-18: every lane older than the running build had lost
+        // enforcement layer 1). The plan (D-17) refused to let this be deleted until one question
+        // was measured: are hooks re-read after a publish, or fixed at session start?
+        //
+        // MEASURED 2026-08-20 -- FIXED AT SESSION START. A two-turn `--input-format stream-json`
+        // session kept firing its hook on turn 2 after the hook had been REMOVED from the settings
+        // file between turns. So rewriting the file under a live agent never reached it, and this
+        // loop was not solving the incident it was written for; the lanes it appeared to fix were
+        // the ones that respawned afterwards, which `AttachShimAsync` now writes a fresh file for
+        // anyway.
+        //
+        // Worse than useless, once the gate moved out of the worktree: the live agent holds the
+        // OLD exe path, and rewriting the file with the new one is what lets `GcOldBuilds` delete
+        // the directory that agent's gate still needs. The retention scan there is the real fix,
+        // and it reads these files -- so refreshing them would erase the evidence it depends on.
+        //
+        // What replaces it: a dead lane's gate file is removed, so it stops pinning a build
+        // directory that nothing needs any more.
         try
         {
-            foreach (var t in _store.Tickets().Where(t => t.State == "open" && t.Worktree.Length > 0 && Directory.Exists(t.Worktree)))
+            var live = _store.LanesAll().Where(l => l.State != "dead").Select(l => l.Id).ToHashSet();
+            foreach (var f in Directory.GetFiles(Paths.WorkspaceDir(_instanceId), "gate-lane*.json"))
             {
-                // RESOLVED BY PATH, AND NEVER SKIPPED (P0.1). This read `Repos.ByName(repos,
-                // t.Repo)` and `continue`d on null — so the moment a second project was
-                // attached and the repository stopped being called ".", every pre-existing
-                // ticket lost gate redeployment silently, GcOldBuilds deleted the exe its
-                // stale gate invoked, and enforcement layer 1 failed OPEN. A `continue` here
-                // is the fail-open, so there is not one any more: a repository that has left
-                // the workspace still gets its gate rewritten from the recorded path, because
-                // a gate is a restriction and deploying one can only ever be safer.
-                var repo = RepoOf(t)
-                        ?? (t.RepoPath.Length > 0 ? new RepoRef(t.Repo, t.RepoPath, t.RepoPath) : null);
-                if (repo is null)
-                {
-                    _store.Event("gate_redeploy_failed", null, $"ticket {t.Id}: repo '{t.Repo}' resolves to nothing and no path was recorded");
-                    Announce($"[dodona] ticket {t.Id}'s claim gate could not be redeployed: repo '{t.Repo}' resolves to nothing — that agent is UNGATED until it is fixed");
-                    continue;
-                }
-                try { DeployGate(t.Worktree, t.Id, repo); _store.Event("gate_redeployed", null, $"ticket {t.Id}: {t.Worktree}"); }
-                catch (Exception ex) { _store.Event("gate_redeploy_failed", null, $"ticket {t.Id}: {ex.Message}"); }
+                var name = Path.GetFileNameWithoutExtension(f);
+                if (long.TryParse(name.AsSpan("gate-lane".Length), out var gl) && !live.Contains(gl))
+                    try { File.Delete(f); } catch { /* untidy, never fatal */ }
             }
         }
-        catch (Exception ex) { _store.Event("gate_redeploy_failed", null, ex.Message); }
+        catch (Exception ex) { _store.Event("gate_cleanup_failed", null, ex.Message); }
 
         // A leak this quiet needs to be visible in the chain, not just absent.
         //
@@ -949,11 +950,13 @@ sealed class Daemon
                 if (!TryProject(One(e, "project"), out var laneProject, out var laneRefusal))
                 { w.WriteLine(laneRefusal!); w.WriteLine("##exit 1"); break; }
 
-                // No --child means the real thing. A lane with no ticket has no claim and
-                // therefore no gate — it is plain Claude Code in the workspace, which is
-                // fine for one lane and is why isolated work wants a ticket instead. T7: this
-                // phase lets that ungated agent open in a SECOND repository. Not a regression
-                // -- an expansion of a surface that was already ungated.
+                // No --child means the real thing. A lane with no ticket has no CLAIM -- but it is
+                // no longer UNGATED, and this comment used to say it was: layer 1 (P1 of
+                // docs/WORK-ISOLATION-PLAN.md) deploys the write gate to every work lane in
+                // `AttachShimAsync`, so a plain lane can read anywhere and still cannot write
+                // into a project outside a worktree. What a ticket adds is the claim, which
+                // bounds it against OTHER lanes; what layer 1 adds is that the shared checkout
+                // is nobody's workspace. The T7 expansion noted here is closed by that.
                 var lcfg = ConfigForProject(laneProject);
                 if (child is null)
                 {
@@ -1391,11 +1394,56 @@ sealed class Daemon
                     break;
                 }
                 _store.TicketSetGit(id, branch, wt);
-                DeployGate(wt, id, repo);
+                // NO GATE DEPLOYED HERE ANY MORE (D-17). A ticket has no lane yet -- `ticket-agent`
+                // creates it -- and the gate is now per-LANE and handed over on the launch line, so
+                // `AttachShimAsync` is the one place that writes it. That is the same funnel
+                // correction `DaemonClient.Send` needed for start-on-demand: a call site cannot
+                // forget what it does not do.
                 _store.Event("ticket_created", null, $"ticket {id} '{title}' repo {repo.Name} branch {branch} claims [{string.Join(", ", specs)}]");
                 // A single-repo project never sees the word "repo": there is only one, and
                 // naming it would be noise in the ordinary case.
                 w.WriteLine($"ticket {id}{RepoTag(repo.Name)} branch {branch} worktree {wt}");
+                break;
+            }
+            // ---------------- layer 1: which TREE a write is in (WORK-ISOLATION-PLAN section 3) ----
+            //
+            // Unconditional, model-free, and asked of EVERY work lane rather than only ticket
+            // lanes: no agent writes into a project outside a worktree. The operator's named
+            // failure was real work started in the shared checkout, where `.githooks/pre-commit`
+            // then refuses the commit -- so today's default destination for load-bearing work is
+            // a tree that cannot deliver it, and nothing stopped an agent editing it.
+            //
+            // IT APPLIES TO TICKET LANES TOO, and that is not belt-and-braces. `claim-check`
+            // resolves an absolute path through its repository and project rungs, so a ticket
+            // agent writing the ABSOLUTE path of a file its claim covers -- in the operator's
+            // live checkout rather than its own worktree -- resolves to the same claim-relative
+            // string and is ALLOWED. Found by reading the rungs while implementing this phase;
+            // it has been reachable since multi-repo landed. The tree question has to be asked
+            // first, and the claim question second.
+            case "tree-check":
+            {
+                var lane = e.GetProperty("lane").GetInt64();
+                var path = e.GetProperty("path").GetString()!;
+                var row = _store.LanesAll().FirstOrDefault(l => l.Id == lane);
+                // A relative `file_path` is relative to the AGENT'S working directory, which is
+                // the lane's own recorded cwd -- not this daemon's, and not the first project's.
+                var baseDir = row?.Cwd is { Length: > 0 } lc && Directory.Exists(lc) ? lc : _primary;
+                var full = Path.GetFullPath(path, baseDir);
+                var where = Trees.Locate(full, ProjectPaths());
+                if (Trees.Allowed(where)) { w.WriteLine($"tree-ok: {where.ToString().ToLowerInvariant()} {full}"); break; }
+
+                // D-13: A REFUSAL NAMES THE HOLDER. "outside your claim" sends the reader
+                // hunting (CLAUDE.md 0.3); the holder is a store read and therefore free.
+                var holder = ClaimHolder(full);
+                var msg = $"denied: {full} is in the SHARED CHECKOUT, not a worktree" +
+                          (holder is null ? "" : $" -- that path is held by {holder}") +
+                          ". The shared checkout is a source of truth, not a workspace: other lanes and " +
+                          "your operator are in it, and its pre-commit hook refuses commits from it, so work " +
+                          "done here cannot be delivered. Work that changes files needs a ticket worktree of " +
+                          "its own.";
+                _store.Event("tree_check_denied", lane, $"{full} holder={holder ?? "-"}");
+                w.WriteLine(msg);
+                w.WriteLine("##exit 1");
                 break;
             }
             case "claim-check":
@@ -2415,9 +2463,54 @@ sealed class Daemon
         foreach (var dir in Directory.GetDirectories(binRoot))
         {
             if (Path.GetFullPath(dir).TrimEnd('\\').Equals(mine, StringComparison.OrdinalIgnoreCase)) continue;
+            // AND NOT ONE A LIVE AGENT'S GATE STILL POINTS AT (WORK-ISOLATION-PLAN D-17).
+            //
+            // Hooks are read at SESSION START and never re-read (measured 2026-08-20 -- see the
+            // note where redeployment used to be), so an agent launched by an older build holds
+            // that build's exe path for its whole life. Collecting the directory therefore breaks
+            // its gate, and a gate whose command cannot even start is a FAIL-OPEN that never
+            // reaches our code to be logged -- which under layer 1 is a write into the operator's
+            // live checkout. That is the 2026-08-18 incident, and rewriting the gate file was
+            // never able to fix it.
+            //
+            // A text scan over small files, across EVERY workspace rather than just this one: any
+            // daemon may be the one that swapped, and another workspace's agent is no less live
+            // for it. Dead lanes' gate files are deleted in reconcile, so nothing pins a
+            // directory once its agent is gone.
+            if (GateFilesNaming(dir)) { _store.Event("binary_gc_kept", null, $"{dir}: a live lane's gate names it"); continue; }
             try { Directory.Delete(dir, recursive: true); _store.Event("binary_gc", null, dir); }
             catch (Exception ex) { _store.Event("binary_gc_skipped", null, $"{dir}: {ex.Message}"); }
         }
+    }
+
+    /// <summary>Does any workspace's per-lane gate file name this build directory? See
+    /// <see cref="GcOldBuilds"/> for why that must veto collection. Text, not JSON: the question
+    /// is whether the path appears at all, and a parse failure must not read as "no".</summary>
+    static bool GateFilesNaming(string buildDir)
+    {
+        var needle = Path.GetFullPath(buildDir).TrimEnd(Path.DirectorySeparatorChar);
+        try
+        {
+            if (!Directory.Exists(Paths.WorkspacesDir)) return false;
+            foreach (var ws in Directory.GetDirectories(Paths.WorkspacesDir))
+                foreach (var f in Directory.GetFiles(ws, "gate-lane*.json"))
+                    try
+                    {
+                        // UNESCAPED FIRST. The file is JSON, so every backslash in the command is
+                        // DOUBLED -- a raw Contains() against a Windows path with single
+                        // backslashes can never match, and the retention silently retains
+                        // nothing while looking installed. m4 carries the same trap for the
+                        // same file from the reading side, and this code walked straight into
+                        // it: caught by tightening the check to demand that a retention
+                        // actually FIRED rather than that few directories survived.
+                        var text = File.ReadAllText(f).Replace("\\\\", "\\");
+                        if (text.Contains(needle, StringComparison.OrdinalIgnoreCase)) return true;
+                    }
+                    catch { return true; }   // unreadable: assume it names us rather than break a gate
+        }
+        catch { return true; }               // ditto -- a stale directory costs disk, the other way
+                                             // costs enforcement
+        return false;
     }
 
     /// <summary>System-level announcements land in the dispatcher pane, and therefore in
@@ -2787,6 +2880,39 @@ sealed class Daemon
     /// fake-agent lane still proves *which project's config was resolved* without the event
     /// pretending to be evidence of an argv that was never built.
     /// </summary>
+    /// <summary>Which OPEN ticket, if any, holds a path -- named so a layer-1 refusal can say
+    /// who (D-13). The path is put back into workspace-relative claim terms with the same
+    /// repository-then-project rungs `claim-check` uses, minus the worktree rung: the caller has
+    /// already established this path is NOT in a worktree, which is why it is being refused.
+    ///
+    /// A store read and a string compare, so it costs nothing on the write path -- which matters,
+    /// because this runs behind a PreToolUse hook.</summary>
+    string? ClaimHolder(string fullPath)
+    {
+        var full = Path.GetFullPath(fullPath).Replace(Path.DirectorySeparatorChar, '/');
+        string? rel = null;
+        var bases = new List<(string Dir, string Prefix)>();
+        bases.AddRange(Repositories().OrderByDescending(r => r.Path.Length).Select(r => (r.Path, r.ClaimPrefix)));
+        bases.AddRange(ProjectPaths().OrderByDescending(pp => pp.Length).Select(pp => (pp, "")));
+        foreach (var (baseDir, basePrefix) in bases)
+        {
+            if (baseDir.Length == 0) continue;
+            var b = Path.GetFullPath(baseDir).Replace(Path.DirectorySeparatorChar, '/').TrimEnd('/') + "/";
+            if (full.StartsWith(b, StringComparison.OrdinalIgnoreCase)) { rel = basePrefix + full[b.Length..]; break; }
+        }
+        if (rel is null) return null;
+        rel = Claims.Normalize(rel);
+        foreach (var t in _store.Tickets().Where(t => t.State == "open"))
+        {
+            if (!_store.TicketClaims(t.Id).Any(cl => Claims.Covers(cl.Kind, cl.Value, rel))) continue;
+            var title = t.LaneId is long lid
+                ? _store.LanesAll().FirstOrDefault(l => l.Id == lid)?.Title
+                : null;
+            return $"ticket {t.Id}" + (title is { Length: > 0 } ? $" (lane {title})" : "");
+        }
+        return null;
+    }
+
     void RecordLaneConfig(long laneId, string project, Config cfg, List<string> args)
     {
         var fromArgv = Projects.ArgValue(args, "--permission-mode");
@@ -2930,6 +3056,47 @@ sealed class Daemon
         _store.LaneProject(id, scope
                                ?? Projects.Of(ProjectPaths(), workDir)
                                ?? (Projects.IsManagementRole(role) ? _primary : ""));
+
+        // ---- LAYER 1: THE GATE, ON EVERY WORK LANE (WORK-ISOLATION-PLAN section 3, P1) ----
+        //
+        // HERE because every spawn funnels through here -- `SpawnLaneAsync` and
+        // `RespawnLaneAsync` both call it -- so a call site cannot forget to gate a lane. That
+        // is the same correction `DaemonClient.Send` needed for start-on-demand (CLAUDE.md 3.1):
+        // two of three write paths ensured, the third carried the most traffic and did not.
+        //
+        // WORK LANES ONLY, and not as a carve-out: management roles (router, brain, compressor)
+        // run in the neutral directory and write nothing, so a gate on them would be a hook cost
+        // on every utility turn for a question whose answer is always the same. A non-claude
+        // child takes no claude flags at all (the fake agent of section 17), which is also why
+        // no acceptance suite using it can see this argv -- `unit` holds the argv shape instead.
+        //
+        // The lane's TICKET is looked up rather than passed: `ticket-agent` links ticket to lane
+        // AFTER the spawn, and a lane's ticket changes during its life (P2 promotes a plain lane
+        // into one). The file names only the lane, so the daemon answers from current state --
+        // which is the shape forced by hooks being fixed at session start (see `DeployGate`).
+        if (role == "work")
+        {
+            // THE TICKET IS RESOLVED BY WORKING DIRECTORY, NOT BY THE LANE LINK, and that is
+            // not a preference: `ticket-agent` calls `TicketSetLane` AFTER the spawn returns,
+            // so at this point the link does not exist yet and matching on it silently
+            // produced a ticket lane with no `--ticket` -- the claim question never asked, and
+            // m1's two gate checks red. A ticket lane's cwd IS its worktree (pinned by
+            // `m3:186-187` and `LaneCwdPrecedenceTests`), so the directory answers it with no
+            // ordering to get wrong. The lane link is still consulted, for a respawn whose
+            // recorded cwd has drifted.
+            var t = _store.Tickets().FirstOrDefault(t => t.State == "open" &&
+                        (t.LaneId == id ||
+                         (t.Worktree.Length > 0 && Paths.SamePath(t.Worktree, workDir))));
+            var gate = DeployGate(id, t?.Id ?? 0, t?.Worktree);
+            // THE FILE IS WRITTEN FOR EVERY WORK LANE; THE FLAG IS ONLY FOR A REAL CLAUDE.
+            // Splitting the two is what gives this a model-free surface: `IsClaude` is false
+            // for the fake agent of section 17, so gating only claude lanes would leave the
+            // deployment invisible to all thirteen suites -- and section 3 has the incident for
+            // what unobservable wiring costs (the routing ladder: fully covered, fully green,
+            // and dead in production for two days). The fake agent must not be handed a flag it
+            // does not understand, so it gets the file and not the argument.
+            if (gate is not null && IsClaude(child)) { childArgs.Add("--settings"); childArgs.Add(gate); }
+        }
 
         var shimExe = Environment.GetEnvironmentVariable("DODONA_SHIM")
                       ?? Path.Combine(AppContext.BaseDirectory, "DodonaShim.exe");
@@ -4184,42 +4351,66 @@ sealed class Daemon
         return $"landed ticket {tid} on {(t.Repo == "." ? "" : t.Repo + "/")}{cfg.Main}; {verifyMsg}";
     }
 
-    /// <summary>Deploy the claim gate (§6 enforcement layer 1) into a ticket's worktree:
-    /// a PreToolUse hook that asks the daemon whether the write is covered. Fails OPEN
-    /// (logged) — the merge-time backstop catches what slips; a broken gate must not
-    /// brick the lane.</summary>
-    void DeployGate(string worktree, long ticketId, RepoRef repo)
+    /// <summary>
+    /// Deploy the gate for a lane: a PreToolUse hook that asks the daemon whether a write is
+    /// allowed. Returns the settings file to hand the agent, or null when this lane gets no gate.
+    ///
+    /// **IT WRITES NOTHING INTO ANYBODY'S REPOSITORY (D-17).** It used to write
+    /// `.claude/settings.local.json` into the ticket worktree plus a block in the repo's shared
+    /// `.git/info/exclude`. The operator's challenge is what killed that, and it is correct: a
+    /// hook in a project's settings file binds EVERYTHING that runs Claude Code in that folder,
+    /// including the operator's own IDE session. Only the process Dodona started should be gated.
+    /// So the file lives in workspace state and is passed on the launch line with `--settings`.
+    ///
+    /// Three hazards died with it, and the first was live:
+    ///
+    ///  * `File.WriteAllText` on `settings.local.json` is a WHOLE-FILE OVERWRITE. Safe until now
+    ///    only by accident -- a ticket worktree is a fresh checkout and the file is untracked, so
+    ///    there was never one there to destroy. This phase gates the shared checkout too, where
+    ///    that write would have silently wiped the developer's own allowed-commands list with
+    ///    nothing in git to restore from.
+    ///  * both footprints in a repo that is not the operator's to modify.
+    ///  * the stale `dodona-gate.ps1` cleanup, and the generated script whose parse failure it
+    ///    existed to sweep up.
+    ///
+    /// **`--settings` is a PRECEDENCE LAYER, NOT A REPLACEMENT**, which is the property that makes
+    /// this safe: command-line settings sit above Local and Project, so the project's own settings
+    /// still load, and hook entries MERGE across levels rather than replacing each other -- a
+    /// repo's own PreToolUse hooks keep firing alongside this one. Two constraints fall out, both
+    /// easy to get wrong and both deliberate here:
+    ///
+    ///  * THE FILE CONTAINS ONLY THE HOOK. Command-line settings outrank the project on any
+    ///    colliding key, so a second key here would silently override what the project chose.
+    ///  * NO `--setting-sources` FOR A WORK LANE. `ClaudeArgs` passes `--setting-sources user`
+    ///    for utility roles on purpose; doing that to a work lane would cut the project's own
+    ///    settings and hooks out of the agent doing the work -- manufacturing exactly the problem
+    ///    this decision exists to avoid.
+    ///
+    /// MEASURED, 2026-08-20, because "the flag exists" is not "the hook fires": a PreToolUse hook
+    /// supplied via `--settings <file>` DOES fire under `-p --permission-mode bypassPermissions`,
+    /// and its deny is enforced -- the write never happened and the agent was told why. A control
+    /// run without the flag wrote the file, so the absence is the refusal and not the model
+    /// declining. (The pre-existing measurement was taken against a hook in a PROJECT file, which
+    /// is a different route and no longer the one used.)
+    ///
+    /// AND HOOKS ARE FIXED AT SESSION START, ALSO MEASURED: a two-turn stream-json session kept
+    /// firing the hook on turn 2 after it had been REMOVED from the settings file between turns.
+    /// So this file is read once, at launch, and rewriting it under a live agent does nothing --
+    /// which is why the gate names the LANE and lets the daemon look up the rest. A lane's ticket,
+    /// claims and worktree all change during its life; the lane id does not.
+    /// </summary>
+    string? DeployGate(long laneId, long ticketId = 0, string? worktree = null)
     {
-        // The gate files are deployment, not repo content: register them in the repo's
-        // shared info/exclude (applies to every worktree) so `git add -A` by an agent
-        // can never commit them — a ticket-1 gate landing on main conflicts with every
-        // other ticket's gate on rebase. (Found by the M1 acceptance test.)
-        // The exclude file belongs to the TICKET'S repository, not the workspace.
-        //
-        // The gate lives in settings.LOCAL.json, and that is the whole answer to "what
-        // about a repo with its own tracked .claude/": Claude Code merges local settings
-        // over project settings, so the repo's tracked settings.json is never touched,
-        // never shows as modified in the worktree, and its own hooks keep running
-        // alongside the gate. Writing settings.json here used to OVERWRITE the tracked
-        // file in the working copy — info/exclude does not untrack anything, so the
-        // agent saw a dirty file it did not change and the repo lost its hooks.
-        var exclude = Path.Combine(repo.Path, ".git", "info", "exclude");
-        Directory.CreateDirectory(Path.GetDirectoryName(exclude)!);
-        var marker = "# dodona-gate deployment files";
-        if (!File.Exists(exclude) || !File.ReadAllText(exclude).Contains(marker))
-            File.AppendAllText(exclude, $"\n{marker}\n.claude/settings.local.json\ndodona-gate.ps1\n.dodona-bypass.log\n");
-
-        // The hook is dodona.exe itself (`gate-hook`), not a generated PowerShell script. A
-        // .ps1 that fails to parse runs NOTHING -- it denies nothing while still being
-        // registered and still looking installed, which is a live failure this project has
-        // already paid for. The same mistake in C# cannot be shipped, because it does not
-        // compile. It is also one process instead of two: the script's whole job was to read
-        // stdin, shell out to this same binary, and format the refusal.
         var exe = Environment.ProcessPath ?? "dodona.exe";
-        var hookCmd = JsonSerializer.Serialize($"\"{exe}\" gate-hook --ticket {ticketId} " +
-                                               $"--workspace \"{_instanceId}\" --worktree \"{worktree}\"");
-        Directory.CreateDirectory(Path.Combine(worktree, ".claude"));
-        File.WriteAllText(Path.Combine(worktree, ".claude", "settings.local.json"), $$"""
+        var cmd = $"\"{exe}\" gate-hook --lane {laneId} --workspace \"{_instanceId}\"" +
+                  (ticketId > 0 ? $" --ticket {ticketId}" : "") +
+                  (worktree is { Length: > 0 } ? $" --worktree \"{worktree}\"" : "");
+        var hookCmd = JsonSerializer.Serialize(cmd);
+        var dir = Paths.WorkspaceDir(_instanceId);
+        Directory.CreateDirectory(dir);
+        var file = Path.Combine(dir, $"gate-lane{laneId}.json");
+        // ONE KEY. See the remarks: anything else in here outranks the project's own choice.
+        File.WriteAllText(file, $$"""
             {
               "hooks": {
                 "PreToolUse": [
@@ -4236,14 +4427,7 @@ sealed class Daemon
               }
             }
             """);
-
-        // A worktree adopted from an older build may still carry the generated script. Remove
-        // it, so there is exactly one gate and nobody debugs the one that is no longer wired.
-        try
-        {
-            var stale = Path.Combine(worktree, "dodona-gate.ps1");
-            if (File.Exists(stale)) File.Delete(stale);
-        }
-        catch { /* a leftover file is untidy, never fatal */ }
+        return file;
     }
+
 }

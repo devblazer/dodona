@@ -816,46 +816,127 @@ int GateAllowedUnchecked(string why, long ticket, string? path)
     try { Console.Error.WriteLine("dodona gate: " + line); } catch { }
     try
     {
+        // A PLAIN LANE HAS NO WORKTREE, so the trace falls back to workspace state rather than
+        // being dropped. Layer 1 gates every work lane now, and "a fail-open must leave a
+        // trace" (operator decision, 2026-08-19) was written when only ticket lanes had a gate
+        // -- keeping the rule while quietly losing the only place it was recorded would be the
+        // silent-degrade bug in a new costume.
         var wt = One("worktree");
         if (wt is { Length: > 0 } && Directory.Exists(wt))
             File.AppendAllText(Path.Combine(wt, ".dodona-bypass.log"), line + Environment.NewLine);
+        else if (One("workspace") is { Length: > 0 } wsid)
+        {
+            var dir = Paths.WorkspaceDir(wsid);
+            if (Directory.Exists(dir))
+                File.AppendAllText(Path.Combine(dir, "gate-bypass.log"), line + Environment.NewLine);
+        }
     }
     catch { /* a log we cannot write must still not block the write */ }
     return 0;
 }
 
+/// <summary>One line, for a diagnostic that must not break the log format it lands in.</summary>
+static string Flatten(string s) => s.Replace('\n', ' ').Replace('\r', ' ');
+
+/// <summary>Emit a PreToolUse refusal. The DECISION is the stdout JSON, not the exit code.</summary>
+int GateDeny(string reason)
+{
+    Console.WriteLine(JsonSerializer.Serialize(new
+    {
+        hookSpecificOutput = new
+        {
+            hookEventName = "PreToolUse",
+            permissionDecision = "deny",
+            permissionDecisionReason = reason,
+        }
+    }));
+    return 0;
+}
+
+/// <summary>Ask the daemon one gate question, capturing its reply instead of printing it --
+/// stdout here IS the hook's verdict and Claude Code parses it as JSON, so nothing else may
+/// reach it. Returns the exit code and whatever the daemon said.
+///
+/// IT NEVER SUMMONS A DAEMON. `Client` autostarts on a failed connect, and a summoned daemon
+/// runs its warm-up: the router, the brain and the compressor pool, four real
+/// `claude -p --model haiku` processes (CLAUDE.md 3.2, which is that incident). Starting four
+/// model agents from inside a PreToolUse hook, on every write, is not a thing to leave
+/// reachable -- and a gate that cannot reach its daemon has a correct answer available, which
+/// is to refuse.</summary>
+(int Code, string Reply) GateAsk(object request)
+{
+    var saved = Console.Out;
+    var buf = new StringWriter();
+    try
+    {
+        Environment.SetEnvironmentVariable("DODONA_NO_AUTOSTART", "1");
+        Console.SetOut(buf);
+        var code = Client(request);
+        return (code, buf.ToString().Trim());
+    }
+    catch (Exception ex) { return (2, $"{ex.GetType().Name}: {ex.Message}"); }
+    finally { Console.SetOut(saved); }
+}
+
 int GateHook()
 {
-    // No ticket means no gate was ever deployed for this lane, so there is nothing to check and
-    // nothing to report -- a plain `lane-start` runs ungated by design (CLAUDE.md section 7).
-    // This is the one allow that is genuinely not a bypass.
+    // WHAT THIS HOOK IS FOR, AND WHY IT NOW ASKS TWO QUESTIONS IN THIS ORDER
+    // (docs/WORK-ISOLATION-PLAN.md section 3, P1).
+    //
+    //   1. WHICH TREE is this write in? Layer 1: no agent writes into a project outside a
+    //      worktree. Unconditional, model-free, every work lane. Refusing is the DEFAULT for a
+    //      write in the shared checkout, so this one fails CLOSED -- see below.
+    //   2. Is it inside the ticket's CLAIM? The pre-existing question, ticket lanes only.
+    //
+    // The order is the whole reason the fail-opens below are still tolerable. Before this phase
+    // a claim fail-open meant a ticket agent's write slipped past to the merge-time backstop;
+    // layer 1 without ordering would have meant a fail-open putting a write in the operator's
+    // live checkout. Because the tree question is asked FIRST and refuses on doubt, every
+    // remaining fail-open in the claim path can only ever let a write through INSIDE A
+    // WORKTREE -- which is exactly the case the backstop already covers. Do not reorder these.
     var ticketArg = One("ticket");
-    if (string.IsNullOrEmpty(ticketArg)) return 0;
-    if (!long.TryParse(ticketArg, out var ticket))
+    var laneArg = One("lane");
+    _ = long.TryParse(ticketArg ?? "", out var ticket);
+    _ = long.TryParse(laneArg ?? "", out var lane);
+
+    // No lane and no ticket means no gate was ever deployed for this invocation, so there is
+    // nothing to check and nothing to report. This is the one allow that is genuinely not a
+    // bypass -- and it is no longer reachable from a work lane, which is the point of the phase:
+    // `AttachShimAsync` writes `--lane` for every one of them.
+    if (lane <= 0 && ticket <= 0) return 0;
+    if (ticketArg is { Length: > 0 } && ticket <= 0)
         return GateAllowedUnchecked($"--ticket '{ticketArg}' is not a number (gate misconfigured)", 0, null);
+    // A LANE ARGUMENT WE CANNOT READ IS NOT AN ALLOW. It means our own deployment wrote
+    // something wrong, and under layer 1 guessing "allow" is a write into the live tree.
+    if (laneArg is { Length: > 0 } && lane <= 0)
+        return GateDeny($"dodona gate: --lane '{laneArg}' is not a number, so the gate cannot tell which tree " +
+                        "this lane owns. This is a Dodona misconfiguration, not your mistake -- report it; " +
+                        "the write is refused rather than allowed unchecked.");
 
     string input;
     try { input = Console.In.ReadToEnd(); }
-    catch (Exception ex) { return GateAllowedUnchecked($"stdin unreadable: {ex.GetType().Name}", ticket, null); }
+    catch (Exception ex)
+    {
+        return lane > 0
+            ? GateDeny($"dodona gate: could not read the tool payload ({ex.GetType().Name}), so the gate cannot " +
+                       "tell which tree this write is in. Refused rather than allowed unchecked. Retry the write.")
+            : GateAllowedUnchecked($"stdin unreadable: {ex.GetType().Name}", ticket, null);
+    }
 
     // A BOM IS NOT CORRUPTION, AND IT WAS FAILING THIS GATE OPEN (2026-08-19).
     //
     // `Console.In` hands back a leading U+FEFF as an ordinary character, and JsonDocument.Parse
     // refuses a document that does not start with `{`. So stdin arriving as EF BB BF 7B ...
     // took the catch below, logged `JsonReaderException`, and ALLOWED the write unchecked --
-    // the claim gate, layer 1 of the safety model (§6), not enforcing at all. Measured: m1's
-    // `gate_allows_inside_claim` and `gate_denies_outside_claim` were red on `main` at d43dffb,
-    // deterministically, with `Ã¯Â»Â¿{"tool_input":...` in the bypass log.
+    // the claim gate, layer 1 of the safety model (section 6), not enforcing at all. Measured:
+    // m1's `gate_allows_inside_claim` and `gate_denies_outside_claim` were red on `main` at
+    // d43dffb, deterministically, with a mojibaked BOM before `{"tool_input":` in the bypass log.
     //
     // Windows writes BOMs everywhere -- PS 5.1's `>` and `Out-File` default to UTF-8-with-BOM
-    // in this environment (CLAUDE.md §0.2 has three separate incidents from that habit) -- so
+    // in this environment (CLAUDE.md 0.2 has three separate incidents from that habit) -- so
     // any producer piping a file into this hook can hand us one. Stripping it is not leniency
     // about malformed input; it is reading the encoding the platform actually emits, and the
     // alternative is a gate that silently does nothing.
-    //
-    // This is NOT the same failure as §3's intermittent one, and does not claim to explain it:
-    // that one left EMPTY output and an EMPTY bypass log under a parallel wave. This one is
-    // loud, deterministic and now fixed; that one is still open.
     input = input.TrimStart('\uFEFF').Trim();      // spelled as an escape on purpose: an
     // invisible literal here would be the same class of trap as the rest of CLAUDE.md 0.2
 
@@ -866,8 +947,14 @@ int GateHook()
     {
         using var doc = JsonDocument.Parse(input);
         if (doc.RootElement.TryGetProperty("tool_name", out var tn)) tool = tn.GetString() ?? "";
-        if (doc.RootElement.TryGetProperty("tool_input", out var ti) &&
-            ti.TryGetProperty("file_path", out var fp)) path = fp.GetString();
+        if (doc.RootElement.TryGetProperty("tool_input", out var ti))
+        {
+            // NOTEBOOKEDIT CARRIES `notebook_path`, NOT `file_path`, and reading only the latter
+            // was a named hole in layer 1 -- an allow with a log line. It is a write to a file
+            // like any other, so it is read here and gated like any other.
+            if (ti.TryGetProperty("file_path", out var fp)) path = fp.GetString();
+            else if (ti.TryGetProperty("notebook_path", out var np)) path = np.GetString();
+        }
     }
     catch (Exception ex)
     {
@@ -877,50 +964,61 @@ int GateHook()
         // stdin 60/60 under load). The BYTE COUNT and a prefix are recorded so the next
         // occurrence answers the question instead of raising it again.
         var head = input.Length > 120 ? input.Substring(0, 120) + "..." : input;
-        return GateAllowedUnchecked(
-            $"stdin unparseable as JSON ({input.Length} bytes, {ex.GetType().Name}): {head.Replace("\n", " ").Replace("\r", "")}",
-            ticket, null);
+        var why = $"stdin unparseable as JSON ({input.Length} bytes, {ex.GetType().Name}): {Flatten(head)}";
+        if (lane <= 0) return GateAllowedUnchecked(why, ticket, null);
+        GateAllowedUnchecked(why, ticket, null);   // for the trace only; the verdict is below
+        return GateDeny("dodona gate: the tool payload did not parse, so the gate cannot tell which tree this " +
+                        "write is in. Refused rather than allowed unchecked (see .dodona-bypass.log). Retry the write.");
     }
 
-    // NotebookEdit carries `notebook_path`, not `file_path`, so it lands here and is allowed --
-    // a real hole in layer 1, and now a visible one rather than a silent one.
     if (string.IsNullOrEmpty(path))
-        return GateAllowedUnchecked($"no file_path in tool_input (tool='{tool}', {input.Length} bytes)", ticket, null);
-
-    // Client() prints the daemon's reply to stdout, and stdout here IS the hook's verdict --
-    // Claude Code parses it as JSON. So it is silenced for the duration, which is exactly what
-    // the old script's `> $null 2> $null` was doing.
-    int code;
-    var saved = Console.Out;
-    try
     {
-        Console.SetOut(TextWriter.Null);
-        code = Client(new { cmd = "claim-check", ticket, path });
+        var why = $"no file_path or notebook_path in tool_input (tool='{tool}', {input.Length} bytes)";
+        if (lane <= 0) return GateAllowedUnchecked(why, ticket, null);
+        GateAllowedUnchecked(why, ticket, null);
+        return GateDeny($"dodona gate: '{tool}' carried no file path the gate could read, so it cannot tell which " +
+                        "tree the write lands in. Refused rather than allowed unchecked.");
     }
-    catch (Exception ex) { code = 2; try { Console.Error.WriteLine($"dodona gate: claim-check threw {ex.GetType().Name}"); } catch { } }
-    finally { Console.SetOut(saved); }
 
-    if (code == 0) return 0;                                         // covered by the claim
-    if (code == 1)
+    // ---- question 1: the TREE. Fails CLOSED, deliberately. ----
+    //
+    // Every other unanswerable case in this file allows and logs, because the merge-time diff
+    // backstop is behind it. There is nothing behind THIS one: the shared checkout is the
+    // operator's live tree and other lanes are working in it, so "we could not tell" has to mean
+    // no. A refused write is visible, recoverable and retryable; an allowed one is none of those,
+    // and CLAUDE.md 0.3 is largely a list of what invisible costs. A down daemon is already a
+    // degraded state -- the shim is buffering this lane's output into it -- so refusing there
+    // costs a message, not work.
+    if (lane > 0)
+    {
+        var (code, reply) = GateAsk(new { cmd = "tree-check", lane, path });
+        if (code == 1)
+            return GateDeny(reply.Length > 0 ? reply : $"denied: {path} is in the shared checkout, not a worktree.");
+        if (code != 0)
+        {
+            GateAllowedUnchecked($"tree-check could not answer (exit {code}): {Flatten(reply)}", ticket, path);
+            return GateDeny($"dodona gate: could not verify which tree {path} is in (the daemon did not answer: " +
+                            $"{(reply.Length > 0 ? Flatten(reply) : "no reply")}). Refused rather than allowed " +
+                            "unchecked -- a write into the shared checkout cannot be undone for the other lanes " +
+                            "in it. Retry the write.");
+        }
+    }
+
+    // ---- question 2: the CLAIM. Ticket lanes only, and still fails open ON PURPOSE ----
+    // Bounded by question 1 to writes inside a worktree, which is what the backstop covers.
+    if (ticket <= 0) return 0;
+    var (ccode, creply) = GateAsk(new { cmd = "claim-check", ticket, path });
+    if (ccode == 0) return 0;                                        // covered by the claim
+    if (ccode == 1)
     {
         var ws = One("workspace") ?? "";
-        var reason = $"outside ticket {ticket}'s claim: {path}. Stay within claimed paths, or request " +
-                     $"an extension: dodona claim-extend {ticket} --claim <spec>" +
-                     (ws.Length > 0 ? $" --workspace '{ws}'" : "");
-        Console.WriteLine(JsonSerializer.Serialize(new
-        {
-            hookSpecificOutput = new
-            {
-                hookEventName = "PreToolUse",
-                permissionDecision = "deny",
-                permissionDecisionReason = reason,
-            }
-        }));
-        return 0;                                                    // the DECISION is the output, not the exit code
+        return GateDeny($"outside ticket {ticket}'s claim: {path}. Stay within claimed paths, or request " +
+                        $"an extension: dodona claim-extend {ticket} --claim <spec>" +
+                        (ws.Length > 0 ? $" --workspace '{ws}'" : ""));
     }
 
     // Anything else: no daemon, a pipe error, a reply we do not understand.
-    return GateAllowedUnchecked($"claim-check could not answer (exit {code})", ticket, path);
+    return GateAllowedUnchecked($"claim-check could not answer (exit {ccode}): {Flatten(creply)}", ticket, path);
 }
 
 /// <summary>
@@ -1503,9 +1601,13 @@ static void Help() => Console.WriteLine("""
       dodona token-request <ticket> [--lease sec] | token-renew | token-release | token-status
       dodona land <ticket>
     hot swap (§13/§14 — nothing interrupted, no session lost):
-      dodona gate-hook --ticket <n> [--workspace <id>] [--worktree <dir>]
-              the claim gate, run BY CLAUDE CODE and not by hand: reads a PreToolUse
-              payload on stdin and answers deny/allow. Deployed by DeployGate.
+      dodona gate-hook --lane <n> [--ticket <n>] [--workspace <id>] [--worktree <dir>]
+              the write gate, run BY CLAUDE CODE and not by hand: reads a PreToolUse
+              payload on stdin and answers deny/allow. Two questions, in this order --
+              which TREE the write is in (layer 1: never the shared checkout, every work
+              lane, fails CLOSED) and then whether it is inside the ticket's CLAIM.
+              Handed to the agent by DeployGate on the launch line, never written into
+              a project (D-17).
       dodona stop-all [--lanes] [--orphans]
               --orphans also stops live daemons this registry does not own (another
               DODONA_HOME's test run, say). Without it they are listed and left alone.

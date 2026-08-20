@@ -71,6 +71,17 @@ static class Paths
     /// miniature (CLAUDE.md 3.2).</summary>
     public static string NeutralDir => Path.Combine(Home, "neutral");
 
+    /// <summary>Two paths naming the same directory. Separator- and case-insensitive, and
+    /// tolerant of a trailing separator -- the three ways the same folder gets spelled in a
+    /// store, an argv and a `ProcessStartInfo`.</summary>
+    public static bool SamePath(string a, string b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        static string N(string x) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(x));
+        try { return string.Equals(N(a), N(b), StringComparison.OrdinalIgnoreCase); }
+        catch { return false; }
+    }
+
     /// <summary>Ticket worktrees stay beside the MEMBER that holds the repository — the
     /// documented exception above. For a one-member workspace whose member is the project
     /// root this is byte-for-byte the path it has always been (`&lt;root&gt;\.dodona\wt\tN`),

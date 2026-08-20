@@ -628,16 +628,23 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
         ([int]((Invoke-StoreSql $driftStore "SELECT COUNT(*) FROM merge_token WHERE holder_ticket IS NOT NULL").Trim()) -eq 1) `
         (Invoke-StoreSql $driftStore "SELECT * FROM merge_token")
 
-    # The gate must keep being redeployed for the drifted ticket. `Repos.ByName(repos, '.')`
-    # returned null once the rename happened, and reconcile's answer to null was `continue` --
-    # so enforcement layer 1 silently stopped being refreshed, GcOldBuilds deleted the exe the
-    # stale gate invoked, and the gate then failed OPEN. Found live 2026-08-18 for a different
-    # reason; the rename is a second route into it.
+    # The drifted ticket must keep ENFORCING across a rename and a daemon restart.
+    #
+    # THIS USED TO COUNT `gate_redeployed` EVENTS, and that machinery is gone (WORK-ISOLATION-PLAN
+    # D-17). The incident it guarded was real: `Repos.ByName(repos, '.')` returned null once the
+    # rename happened, reconcile's answer to null was `continue`, so layer 1 silently stopped being
+    # refreshed, GcOldBuilds deleted the exe the stale gate invoked, and the gate failed OPEN.
+    #
+    # Redeployment cannot be the thing that prevents that, because hooks are read once at session
+    # start and never re-read (measured 2026-08-20) -- so rewriting the file never reached the live
+    # agent it was protecting. The gate now names only the LANE, and the daemon resolves the ticket,
+    # its repository and its claims fresh on every write -- so a rename has nothing to desync,
+    # because no deployed file caches a repository name any more. What must be asserted is
+    # therefore the OUTCOME rather than the maintenance, which is also the stronger claim.
     RestartDaemonFor $drift | Out-Null
-    Check 'a_drifted_ticket_keeps_its_claim_gate_redeployed' `
-        ([int]((Invoke-StoreSql $driftStore "SELECT COUNT(*) FROM events WHERE kind = 'gate_redeploy_failed'").Trim()) -eq 0 -and
-         [int]((Invoke-StoreSql $driftStore "SELECT COUNT(*) FROM events WHERE kind = 'gate_redeployed'").Trim()) -ge 1) `
-        (Invoke-StoreSql $driftStore "SELECT kind, detail FROM events WHERE kind LIKE 'gate_redeploy%'")
+    $dDenied = DodonaBare @("claim-check", "1", "$driftA\.dodona\wt\t1\src\three\x.cs", "--workspace", $drift)
+    Check 'a_drifted_ticket_still_refuses_a_path_it_does_not_own' `
+        ($DODONA_EXIT -ne 0 -and $dDenied -match 'denied') $dDenied
     # and its claims still mean what they meant when they were written: the ticket keeps the
     # name it was born with, so its claim prefix does not move underneath it
     $dCovered = DodonaBare @("claim-check", "1", "$driftA\.dodona\wt\t1\src\one\a.cs", "--workspace", $drift)

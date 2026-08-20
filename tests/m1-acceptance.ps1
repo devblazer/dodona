@@ -61,14 +61,23 @@ try {
     $t1 = Dodona @("ticket-create", "--title", "WATER", "--claim", "subtree:src/water")
     Check 'ticket1_created' ($t1 -match 'ticket 1 branch ticket/1') $t1
     Check 'worktree1_exists' (Test-Path "$root\.dodona\wt\t1\src\water\sim.cs")
-    # settings.LOCAL.json: merged over any tracked project settings.json, so a repo with
-    # its own .claude/ keeps its hooks and never sees a dirty tracked file in the worktree
-    # The gate is dodona.exe's own `gate-hook` subcommand now, not a generated .ps1: a script
-    # that fails to parse denies NOTHING while still looking installed, and the same mistake in
-    # C# cannot be shipped because it does not compile. So what must exist is the registration,
-    # and what must NOT exist is a stale script that nobody is running any more.
-    Check 'gate_deployed' ((Test-Path "$root\.dodona\wt\t1\.claude\settings.local.json") -and
-        (-not (Test-Path "$root\.dodona\wt\t1\dodona-gate.ps1")))
+    # THE GATE IS NOT IN THE PROJECT ANY MORE (WORK-ISOLATION-PLAN D-17). It used to be
+    # `.claude\settings.local.json` in the worktree plus a block in the repo's shared
+    # .git/info/exclude. The operator's challenge killed that and it was correct: a hook in a
+    # project's settings file binds EVERYTHING that runs Claude Code in that folder, including
+    # their own IDE session, while only the process Dodona started should be gated. It is handed
+    # over on the launch line with `--settings` instead, from workspace state.
+    #
+    # Three hazards went with it, and the first was live rather than theoretical: DeployGate wrote
+    # settings.local.json with File.WriteAllText -- a WHOLE-FILE OVERWRITE -- which was safe only
+    # because a fresh worktree never had one to destroy. This phase gates the shared checkout too,
+    # where that same write would have silently wiped the developer's own allowed-commands list
+    # with nothing in git to restore from.
+    Check 'gate_writes_nothing_into_the_project' (
+        (-not (Test-Path "$root\.dodona\wt\t1\.claude\settings.local.json")) -and
+        (-not (Test-Path "$root\.dodona\wt\t1\dodona-gate.ps1")) -and
+        (-not (Select-String -Path "$root\.git\info\exclude" -Pattern 'dodona-gate deployment' -Quiet -ErrorAction SilentlyContinue))
+    ) "worktree and info/exclude must carry no gate files"
     # and a repo's own tracked settings must be untouched by gate deployment
     Check 'tracked_settings_untouched' (-not (Test-Path "$root\.dodona\wt\t1\.claude\settings.json") -or
         ((git -C "$root\.dodona\wt\t1" status --porcelain ".claude/settings.json" | Out-String).Trim() -eq ''))
@@ -107,8 +116,30 @@ try {
     # because a missing script makes PowerShell print a banner, and a banner contains no "deny".
     # A check that passes when the thing under test is absent is worth nothing (CLAUDE.md 0.3),
     # so it now exercises whatever is wired, whatever that turns out to be.
-    $hookCmd = ((Get-Content "$wt1\.claude\settings.local.json" -Raw | ConvertFrom-Json).hooks.PreToolUse[0].hooks[0].command)
-    Check 'gate_registration_names_a_command' ([bool]$hookCmd) "settings.local.json: $hookCmd"
+    #
+    # THE GATE IS PER-LANE NOW, so a lane has to exist before there is a gate file to read. The
+    # ticket agent is the fake one (no model, this suite is free); `IsClaude` is false for it, so
+    # it is handed the FILE and not the `--settings` argument -- which is deliberately how the
+    # deployment stays observable in a model-free suite at all.
+    $tlane = Dodona @("ticket-agent", "1", "--child", "$bin\DodonaFakeAgent.exe")
+    Check 'ticket_agent_started' ($tlane -match 'lane (\d+)') $tlane
+    $tlaneId = if ($tlane -match 'lane (\d+)') { $Matches[1] } else { 0 }
+    $gateFile = Join-Path $wsDir "gate-lane$tlaneId.json"
+    $hookCmd = if (Test-Path $gateFile) { ((Get-Content $gateFile -Raw | ConvertFrom-Json).hooks.PreToolUse[0].hooks[0].command) } else { '' }
+    Check 'gate_registration_names_a_command' ([bool]$hookCmd) "gate file: $gateFile cmd=$hookCmd"
+    # ONE KEY, AND ONLY ONE. Command-line settings outrank a project's Local and Project settings
+    # on any colliding key, so a second key in this file would silently override whatever the
+    # project chose -- which is the opposite of the D-17 intent.
+    $gateJson = if (Test-Path $gateFile) { Get-Content $gateFile -Raw | ConvertFrom-Json } else { $null }
+    Check 'gate_file_carries_only_the_hook' (
+        $null -ne $gateJson -and
+        (@($gateJson.PSObject.Properties.Name) -join ',') -eq 'hooks' -and
+        (@($gateJson.hooks.PSObject.Properties.Name) -join ',') -eq 'PreToolUse'
+    ) "keys: $(if ($gateJson) { (@($gateJson.PSObject.Properties.Name) -join ',') } else { 'no file' })"
+    # It names the LANE, not only the ticket: a lane's ticket, claims and worktree all change
+    # during its life while the lane id does not -- and hooks are read once at session start
+    # (measured 2026-08-20), so the file cannot be rewritten under a live agent to keep up.
+    Check 'gate_names_the_lane' ($hookCmd -match "--lane $tlaneId") "cmd=$hookCmd"
     # STDERR IS CAPTURED, AND THE DENY IS A CONDITION-WAIT. Both because of what this check did
     # when the suites started running concurrently: it went red with an EMPTY detail, which said
     # only that the gate had not denied, never why. Worse, the ALLOW check passes on empty
@@ -142,6 +173,61 @@ try {
     $bypassed = if (Test-Path $bypass) { (Get-Content $bypass -Raw).Trim() } else { '' }
     Check 'gate_denies_outside_claim' ($deny -match '"permissionDecision":"deny"') `
         "hook=$hookCmd output=[$($deny.Trim())] bypass-log=[$bypassed]"
+    # ---- LAYER 1: THE SHARED CHECKOUT IS NOBODY'S WORKSPACE (WORK-ISOLATION-PLAN P1) ----
+    #
+    # The operator's named failure: nothing in code stopped an agent doing real work in their live
+    # tree. A plain lane had no PreToolUse hook AT ALL -- `GateHook` returned 0 on the first line
+    # when there was no --ticket -- so every write anywhere in the project was allowed. And that
+    # tree cannot even deliver the work: .githooks/pre-commit refuses commits made from it.
+    #
+    # Asserted through `dodona gate-hook`, the command Claude Code itself runs, because that is the
+    # only surface a model-free suite can reach: `IsClaude` is false for the fake agent, so no
+    # claude argv is ever built for one and the `--settings` hand-off cannot be observed here.
+    $plain = Dodona @("lane-start", "--title", "PLAIN", "--child", "$bin\DodonaFakeAgent.exe")
+    Check 'plain_lane_started' ($plain -match 'lane (\d+)') $plain
+    $plainId = if ($plain -match 'lane (\d+)') { $Matches[1] } else { 0 }
+    $plainHook = "`"$dodona`" gate-hook --lane $plainId --workspace `"$($ws.Id)`""
+
+    # A write in the SHARED CHECKOUT -- the operator's live tree, where every other lane and the
+    # operator are working. This is the one layer 1 refuses.
+    $sharedJson = @{ tool_name = 'Write'; tool_input = @{ file_path = "$root\src\water\sim.cs" } } | ConvertTo-Json -Compress
+    $sharedOut = ''
+    Wait-Until {
+        $script:sharedOut = ($sharedJson | & cmd /c $plainHook 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
+        $script:sharedOut -match '"permissionDecision":"deny"'
+    } 20000 'layer 1 denies a plain lane writing into the shared checkout' | Out-Null
+    Check 'gate_denies_a_plain_lane_writing_the_shared_checkout' `
+        ($sharedOut -match '"permissionDecision":"deny"') "hook=$plainHook output=[$($sharedOut.Trim())]"
+    # D-13: the refusal has to be ACTIONABLE. "Denied: outside your claim" sends the reader hunting
+    # (CLAUDE.md 0.3), so it names the tree and, when an open ticket holds the path, names it.
+    Check 'the_refusal_names_the_shared_checkout_and_the_holder' `
+        ($sharedOut -match 'SHARED CHECKOUT' -and $sharedOut -match 'ticket 1') "output=[$($sharedOut.Trim())]"
+
+    # AND IT IS NOT A BLANKET DENY -- asserted as a DISCRIMINATION rather than as a bare allow,
+    # deliberately. `dev prove` called the bare version VACUOUS and was right to: HEAD allows every
+    # write, so no assertion about the allow side alone can ever go red, and a check that cannot
+    # fail is worth nothing (CLAUDE.md 0.3). Stated as "denies the one, allows the other" it is red
+    # against HEAD on the first half and red against a gate that has become a brick on the second.
+    $wtJson = @{ tool_name = 'Write'; tool_input = @{ file_path = "$wt1\src\water\sim.cs" } } | ConvertTo-Json -Compress
+    $wtOut = ($wtJson | & cmd /c $plainHook 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
+    Check 'gate_tells_the_two_trees_apart_for_a_plain_lane' `
+        (($sharedOut -match '"permissionDecision":"deny"') -and ($wtOut.Trim() -eq '')) `
+        "shared=[$($sharedOut.Trim())] worktree=[$($wtOut.Trim())] (expected: deny, then silence)"
+
+    # A TICKET LANE IS SUBJECT TO LAYER 1 TOO, and this one is not belt-and-braces: `claim-check`
+    # resolves an absolute path through its repository and project rungs, so a ticket agent writing
+    # the ABSOLUTE path of a file its claim covers -- in the operator's live checkout instead of its
+    # own worktree -- resolved to the same claim-relative string and was ALLOWED. Reachable since
+    # multi-repo landed; found by reading the rungs while implementing this phase.
+    $tHook = $hookCmd
+    $tSharedOut = ''
+    Wait-Until {
+        $script:tSharedOut = ($sharedJson | & cmd /c $tHook 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
+        $script:tSharedOut -match '"permissionDecision":"deny"'
+    } 20000 'layer 1 denies a TICKET lane writing its claimed path in the shared checkout' | Out-Null
+    Check 'gate_denies_a_ticket_lane_writing_its_claim_in_the_shared_checkout' `
+        ($tSharedOut -match '"permissionDecision":"deny"') "hook=$tHook output=[$($tSharedOut.Trim())]"
+
     # ---- A FAIL-OPEN MUST LEAVE A TRACE, whatever caused it (operator decision 2026-08-19) ----
     # The gate had four paths that allowed a write and said nothing: no ticket, unreadable stdin,
     # unparseable stdin, and no file_path. Silence is the reason `gate_denies_outside_claim`
@@ -157,13 +243,36 @@ try {
     $gFlat = ($g -replace '\s+', ' ')
     # Whitespace collapsed before matching: captured native stderr is WRAPPED to the console
     # width, so a phrase can be split mid-sentence (CLAUDE.md 0.2).
-    Check 'unparseable_input_is_allowed_but_recorded' ($gFlat -match 'gate fail-open' -and $gFlat -match 'unparseable') $gFlat
+    Check 'unparseable_input_is_recorded' ($gFlat -match 'gate fail-open' -and $gFlat -match 'unparseable') $gFlat
     Check 'the_fail_open_says_how_much_it_got' ($gFlat -match '\d+ bytes') $gFlat
     $logged = if (Test-Path $bypassLog) { (Get-Content $bypassLog -Raw) } else { '' }
     Check 'the_fail_open_reaches_the_backstops_log' (($logged -replace '\s+', ' ') -match 'fail-open.*unparseable') "log=[$logged]"
-    # ...and it still ALLOWED the write, because layer 1 failing closed would strand a lane that
-    # has no way to ask a human for permission (CLAUDE.md 7). The backstop is layer 2.
-    Check 'a_fail_open_does_not_block_the_write' ($gFlat -notmatch 'permissionDecision') $gFlat
+
+    # ---- AND THE VERDICT ON UNREADABLE INPUT IS NOW A REFUSAL. A RECORDED RATIONALE, REVERSED ----
+    #
+    # This check used to be `a_fail_open_does_not_block_the_write`, asserting the opposite, with the
+    # reason written beside it: "layer 1 failing closed would strand a lane that has no way to ask a
+    # human for permission (CLAUDE.md 7). The backstop is layer 2."
+    #
+    # That was correct for the gate it was written about. It lived only inside ticket worktrees, so
+    # a fail-open let a write slip to the merge-time diff backstop, which catches it before anything
+    # can land. WORK-ISOLATION-PLAN section 9 requires exactly this re-reading, because layer 1
+    # changes what is behind the fail-open: nothing. A write allowed into the SHARED CHECKOUT is in
+    # the operator's live tree, next to their uncommitted work and every other lane's, and no
+    # backstop sees it -- it was never going to be merged, it is already there.
+    #
+    # So the two questions now fail in opposite directions, and the ORDER is what keeps that safe:
+    # the TREE question is asked first and refuses when it cannot get an answer; the CLAIM question
+    # is asked second and still fails open exactly as before. Because the tree answer has already
+    # been obtained, every remaining claim fail-open can only let a write through INSIDE A WORKTREE
+    # -- which is the case the original rationale was actually about, and the backstop still covers.
+    #
+    # A refused write is also not a stranding: it is announced to the agent, recorded, and
+    # retryable, and the daemon it needs an answer from is the same one already pumping this lane's
+    # output. An allowed one is invisible and permanent. CLAUDE.md 0.3 is largely a list of what
+    # invisible costs.
+    Check 'unreadable_input_is_refused_not_allowed_into_the_live_tree' `
+        ($gFlat -match 'permissionDecision.*deny') $gFlat
     Remove-Item $bypassLog -ErrorAction SilentlyContinue
 
     # A fail-open is not by itself a gate failure -- layer 2, the merge-time diff backstop,
@@ -285,6 +394,13 @@ print('\n'.join(k for (k,) in db.execute('SELECT kind FROM events ORDER BY id'))
     Dodona @("stop-daemon") | Out-Null
 }
 finally {
+    # STOP THE LANES THIS SUITE STARTED. It never had any until layer 1 needed one (P1): the gate
+    # checks used to drive `gate-hook` with no lane at all. Two fake agents then leaked on every
+    # run for `dev test` to reap, and leaked shims are not cosmetic -- with strays alive a full
+    # suite run went from 87 s to 300 s and reddened thirteen checks in suites nobody had edited.
+    # Resolved from THIS workspace's own shim-info files, never by process name: a name-based kill
+    # once murdered the operator's live session mid-trial (CLAUDE.md 4).
+    if ($wsDir) { Stop-WorkspaceShims $wsDir }
     Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
     if ($daemon -and -not $daemon.HasExited) { try { Stop-Process -Id $daemon.Id -Force } catch { } }
     Copy-Item $storeDb "$out\store.db" -ErrorAction SilentlyContinue
