@@ -921,7 +921,7 @@ Six concrete deltas to `tools/dev.ps1`:
    compile and vice versa;
 5. the `unit` refusal (`:1181`) stays for the bare form and gains one line pointing at `--with`. Its
    three recorded reasons are each answered: a new symbol will not compile against HEAD → answered
-   by the seam commit landing first; there is no `tests\unit-acceptance.ps1` → answered by routing
+   by the seam commit landing first; there is no `tests\unit-acceptance.ps1` (planned) (it does not exist and is not meant to; the name appears here only because `dev.ps1` records it as one of the reasons `dev prove` refuses `unit`) → answered by routing
    `unit` to `Run-Unit`; `Run-Unit` tests the working tree → answered by `Run-Unit -Root $wt`;
 6. mutation patches live in `tests/mutants/<slice>-NN.patch`, checked in, with a parsed header:
    `# expects-red:` (one per check, both languages), optional `# expects-green:` (the over-broad-test
