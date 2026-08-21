@@ -172,7 +172,7 @@ async Task<int> Dispatch() => cmd switch
     "stop-all" => StopAll(),
     // ---- the concierge (§2): one per machine, its own store, its own ctl pipe. It answers
     // exactly one question — which workspace — and holds no lanes, no claims, no tokens.
-    "concierge" => await Concierge.RunAsync(),
+    "concierge" => await Concierge.RunAsync(opts.ContainsKey("successor")),
     "concierge-status" => Cx(new { cmd = "status" }),
     "concierge-resolve" => Cx(new { cmd = "resolve", text = string.Join(" ", pos), from = One("from") }),
     // Prompt-first (§4): resolve, WAKE the workspace if it is asleep, and hand the sentence to
@@ -251,12 +251,13 @@ async Task<int> Dispatch() => cmd switch
 /// generic <see cref="Client"/>: that one summons a *workspace* daemon and reports failures
 /// in workspace terms, and the concierge belongs to no workspace.
 ///
-/// The concierge is also **not hot-swapped**, and that is a decision rather than an omission.
-/// The M4 handoff exists to protect an agent mid-turn from being interrupted; the concierge
-/// holds no work agents, no lanes, no claims and no merge tokens. Its only state that must
-/// survive is rows (pending questions, resolutions, feed), and rows survive anything. So a
-/// publish stops it and the next command revives it — losing at most one in-flight
-/// classification, which every rung of the ladder already treats as "no opinion".
+/// **THE CONCIERGE IS HOT-SWAPPED NOW, and this comment used to say the opposite** (issue #9).
+/// It read: *"not hot-swapped, and that is a decision rather than an omission … a publish stops
+/// it and the next command revives it."* Publish has never sent `stop` and the concierge never
+/// understood `swap`, so neither half of that was ever built — what actually happened was
+/// nothing, and the process aged two days on the operator's machine while every publish printed
+/// that it had swapped. `Concierge.ConsiderSwapAsync` carries the reasoning that reversed it and
+/// the reason it takes every swap immediately.
 /// </summary>
 int Cx(object request)
 {
@@ -752,7 +753,11 @@ int Version()
     if (opts.ContainsKey("json"))
         Console.WriteLine(JsonSerializer.Serialize(new
         {
-            build = Ver.Build, schema = Ver.Schema, shimProtocol = Ver.ShimProtocol, exe = Ver.ExePath,
+            build = Ver.Build, schema = Ver.Schema, shimProtocol = Ver.ShimProtocol,
+            // The concierge's own store shape. Read by a concierge deciding whether to swap
+            // to this binary (issue #9); absent from every build before that, which is why
+            // Daemon.Probe reads it with a default rather than requiring it.
+            conciergeSchema = Ver.ConciergeSchema, exe = Ver.ExePath,
             commit = Ver.Commit, branch = Ver.Branch, mainBaseline = Ver.MainBaseline,
             trial = Ver.IsTrial, dirty = Ver.Dirty, provenance = Ver.Provenance,
         }));
@@ -761,6 +766,7 @@ int Version()
         Console.WriteLine($"dodona build {Ver.Build}");
         Console.WriteLine($"  {Ver.ProvenanceLine}");
         Console.WriteLine($"  store schema   v{Ver.Schema}");
+        Console.WriteLine($"  concierge      v{Ver.ConciergeSchema}");
         Console.WriteLine($"  shim protocol  v{Ver.ShimProtocol}");
         Console.WriteLine($"  exe            {Ver.ExePath}");
         Console.WriteLine($"  published to   {Ver.BinRoot}");
@@ -1304,16 +1310,57 @@ int Publish()
         }
     }
 
+    // ---- REPORT WHAT HAPPENED, NOT WHAT WAS ABOUT TO BE ATTEMPTED (issue #9) -----------
+    //
+    // This loop used to print `— swapping <label>` and nothing else. That line is a statement of
+    // INTENT, written before the call, and it is the only thing publish ever said about a target.
+    // A non-zero code raised `worst` without naming who failed, and `accepted` needs just ONE
+    // target to succeed for the desktop shortcut to move — so a publish where the concierge did
+    // absolutely nothing looked entirely successful. It did nothing for two days.
+    //
+    // The third verdict is the one that matters and is new: ANSWERED NOTHING. A daemon that does
+    // not recognise a command falls out of its switch, writes no line, and `Client` reports 0 —
+    // indistinguishable from success at the wire. Both dispatchers have a `default:` now, but
+    // this test does not depend on that: it catches the next silent no-op whatever produces it,
+    // including an OLDER build on the far end that will never learn a `default`. That is why it
+    // is here rather than only there.
     int worst = 0;
     var accepted = targets.Count == 0;      // probe-verified, and nothing running to object
+    var stillOld = new List<string>();
     if (targets.Count == 0) Console.WriteLine($"published {newExe}; no daemon running to swap");
     foreach (var (label, target) in targets)
     {
         Console.WriteLine($"— swapping {label} on {target}");
-        var code = Client(new { cmd = "swap", exe = newExe, mode = One("mode") ?? "ask" }, target);
-        if (code == 0) accepted = true;     // handed off, or armed to land — a daemon vouched for it
+        var reply = new List<string>();
+        var code = Client(new { cmd = "swap", exe = newExe, mode = One("mode") ?? "ask" }, target, capture: reply);
+        foreach (var line in reply) Console.WriteLine($"    {line}");
+
+        string verdict;
+        if (code != 0)
+        {
+            verdict = $"DID NOT SWAP (exit {code})";
+            stillOld.Add(label);
+        }
+        else if (reply.Count == 0)
+        {
+            // Silence. Do not let it pass as success, and do not let it pass as exit 0 either.
+            verdict = "ANSWERED NOTHING — it did not take this build";
+            stillOld.Add(label);
+            code = 1;
+        }
+        else if (reply.Any(l => l.StartsWith("armed:")))
+            verdict = "armed — it takes this build when its blocker clears";   // vouched for, not yet running
+        else
+            verdict = "took this build";
+        // `armed` still counts as accepted for the shortcut, exactly as before: a daemon read
+        // the binary, judged it, and committed to it.
+        if (code == 0) accepted = true;
+        Console.WriteLine($"  {label}: {verdict}");
         worst = Math.Max(worst, code);
     }
+    if (stillOld.Count > 0)
+        Console.Error.WriteLine($"note: STILL ON THE OLD BUILD — {string.Join(", ", stillOld)}. " +
+                                "Nothing swapped them; they keep running whatever they were already running.");
 
     // The front door moves LAST: only onto a build a daemon accepted, or that the probe
     // verified when nothing was running to ask. A publish where every swap failed leaves
@@ -1701,7 +1748,7 @@ static void Help() => Console.WriteLine("""
               a daemon deliberately outlives its window, so "I closed the app" does NOT
               mean nothing is running — `ps` is how you find out
     the concierge (one per machine; answers only "which workspace"):
-      dodona concierge                      (run it; any concierge-* command starts one)
+      dodona concierge [--successor]        (run it; any concierge-* command starts one)
       dodona concierge-status               (tiers, the search fence, open questions)
       dodona concierge-resolve <text>       (walk the ladder, print the verdict as JSON)
       dodona route <text>                   (resolve, WAKE that workspace, deliver to it)

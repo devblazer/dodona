@@ -666,6 +666,27 @@ SELECT ts, kind, detail FROM events
   and startup. No daemon is running, but nothing is lost: the shims are buffering, and
   the next client command starts a daemon (start-on-demand) which drains them.
 
+**The CONCIERGE swaps too, and its trail is in its OWN store** (issue #9) —
+`<DODONA_HOME>\concierge\store.db`, never a workspace's. It has no `swaps` table and never
+will: it always takes a swap immediately (nothing of its can be mid-turn), so there is no
+proposal to record and no arm/hold state to inspect. The events are
+`concierge_swap_refused`, `concierge_swap_spawned`, `concierge_handoff`,
+`concierge_swap_failed`, and they read exactly like their daemon namesakes:
+
+```sql
+SELECT ts, kind, detail FROM events
+ WHERE kind LIKE 'concierge_swap%' OR kind IN ('concierge_handoff','concierge_start','concierge_stop')
+ ORDER BY id;
+```
+
+If a publish said the concierge did not take the build and there is **no row at all** here,
+the swap never reached this process — check that `dodona ps` shows a concierge live under the
+same `DODONA_HOME`. Before issue #9 that was the normal case and nothing anywhere said so:
+the concierge understood ten commands, `swap` was not one of them, its dispatch had no
+`default:`, and publish printed its intention to swap before ever making the call. Measured
+2026-08-21: the workspace daemon on a build from that morning, the concierge on one from two
+days earlier, `dodona ps` calling it healthy.
+
 Start-on-demand means *any* client command revives a dead daemon. Set
 `DODONA_NO_AUTOSTART=1` when you want the honest "daemon not running" instead — the
 acceptance tests all do, so they own daemon lifetime.

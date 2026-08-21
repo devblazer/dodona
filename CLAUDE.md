@@ -436,6 +436,23 @@ registered workspace is never a swap target, which is what finally made
 `tests/publish-acceptance.ps1` possible. Narrower: `--workspace <name>...` and `--concierge`;
 with neither, the workspace that owns `--project`.
 
+**PUBLISH REPORTS OUTCOMES NOW, NOT INTENTIONS, AND READING ITS OUTPUT IS PART OF PUBLISHING**
+(issue #9, 2026-08-21). It used to print `— swapping <target>` *before* the call and never say
+anything after it, so a target that refused, errored, or ignored the swap outright was never
+named — and `accepted` needs only ONE target to succeed for the desktop shortcut to move. That
+is how the concierge ran a **two-day-old build** across many publishes with nothing anywhere
+reporting it: it understood ten commands, `swap` was not one of them, its dispatch had no
+`default:`, and silence at the wire is indistinguishable from success. Every target now prints a
+verdict — *took this build* / *armed* / *DID NOT SWAP* / **ANSWERED NOTHING** — a `note: STILL
+ON THE OLD BUILD — <names>` follows, and **publish exits non-zero** when anyone did not take it.
+The answered-nothing test is the one that generalises: it catches the next silent no-op whatever
+causes it, including an older build on the far end that will never learn a `default:` branch.
+Both dispatchers have one now anyway. **The concierge takes the swap immediately** — no
+arm/hold, and `WORKSPACES-CONCIERGE.md` §2 carries the reversed decision and why.
+
+So: after any publish, read the per-target lines. A green-looking publish with one
+`ANSWERED NOTHING` in it is a process still running the old code.
+
 One thing publish cannot do, so say it plainly when it applies:
 
 - **Publishing does not commit.** Commit the work too, or it will be published and then
@@ -516,7 +533,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 | `compression` | selective compression (§5) |
 | `brain` | the dispatcher brain, its routing ladder, the no-second-brain-beside-a-live-one guard, and the manager who reviews finished ticket work: it may send it back, it is bounded at three, and it can never approve. It may also ask to READ a named changed file — once per review, refused if it is not in the record's own list — and a send-back on a `verify: red` record spends no round, decided from the RECORD and never from what the reviewer says its reason was |
 | `concierge` | the group-scope ladder, the fence, the review-behind |
-| `publish` | publish targeting: `--all` spares foreign instances |
+| `publish` | publish targeting: `--all` spares foreign instances; and issue #9's pair — a swapped concierge reports the NEW build, and a target that answers nothing is NAMED and fails the publish (the fixture is a bare named-pipe server on a registered ctl pipe, which is what a silent no-op looks like at the wire) |
 | `voice` | dictation: speech composes and can never send (docs/VOICE-INPUT-PLAN.md Phase A) |
 
 **The per-suite durations that were a column here are gone (P5.2).** They drifted: two were

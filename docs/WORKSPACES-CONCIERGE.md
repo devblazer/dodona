@@ -213,12 +213,31 @@ persistent-coordinator serialization point §12 designed out.
   *reads* stay direct everywhere for the same reason a UI reads stores directly — a dead
   manager must never blind you.
 
-- **The concierge does not hot-swap. It is stopped and re-summoned.** The M4 handoff exists
-  to protect an agent mid-turn; the concierge holds no work agents, no lanes, no claims and
-  no merge tokens. Everything of its that must survive is rows, and rows survive anything. So
-  a publish stops it and the next command revives it (start-on-demand), losing at most one
-  in-flight classification — which every rung already treats as "this rung had no opinion".
-  Building it a handoff protocol would be ceremony protecting nothing.
+- ~~**The concierge does not hot-swap. It is stopped and re-summoned.**~~ **REVERSED, and the
+  reversal is an incident** (issue #9, 2026-08-21). This bullet used to argue that a handoff
+  would be "ceremony protecting nothing": the concierge holds no work agents, no lanes, no
+  claims and no merge tokens, everything of its that must survive is rows, so *a publish stops
+  it and the next command revives it*.
+
+  **Neither half of that was ever built.** Publish sends `swap` and has never sent `stop`; the
+  concierge's dispatch understood ten commands, `swap` was not one of them, and it had no
+  `default:` branch — so the command was discarded in silence and the process simply aged.
+  Measured on the operator's machine at `f346b76`, immediately after a publish that printed
+  `— swapping concierge`: the workspace daemon on build `20260821-105924`, the concierge on
+  `20260819-212126`. Two days, many publishes, `dodona ps` reporting it healthy throughout. It
+  was healthy. It was just old. That is precisely the quietly-stale that CLAUDE.md §0.1 calls a
+  bug rather than a safety feature.
+
+  **It hot-swaps now, and always takes the swap immediately** — no `swap-answer`, no `swaps`, no
+  arming. Two things settle it against re-deciding for stop-and-revive: `stop` shuts both
+  management tiers down, so stop-and-revive would kill two model agents and lose their sessions
+  on *every publish*, where a handoff lets the successor adopt them; and a revived concierge is
+  spawned by whichever CLI happens to summon it next, which may be any build on the machine,
+  where a handoff starts the exact binary publish just verified. The arm/hold machinery stays
+  unbuilt for the reason the old bullet was right about: `Daemon.Blockers` has two entries and
+  neither can exist here, so it would have no reachable state. The only refusals are a candidate
+  that will not answer `version --json` and a concierge-store schema downgrade
+  (`Ver.ConciergeSchema`).
 
 - **It reuses the shim wire, not the workspace store.** `LaneRuntime` — stream-json parsing,
   presence derivation, exactly-once seq dedup, turn-final detection — now takes an

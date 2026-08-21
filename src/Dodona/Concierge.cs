@@ -97,19 +97,46 @@ sealed class Concierge
         _config = ConciergeConfig.Load();
     }
 
-    public static async Task<int> RunAsync()
+    public static async Task<int> RunAsync(bool successor = false)
     {
+        // A SUCCESSOR WAITS ITS TURN BEFORE TOUCHING ANYTHING — the same handshake the daemon
+        // uses, on this instance's own handoff pipe (issue #9). Three things here are
+        // single-holder and the predecessor holds all three until it exits: the mutex below,
+        // the control pipe, and each tier shim (a shim serves one client at a time). So the
+        // handshake ends by waiting for the predecessor's PROCESS to be gone, not merely for
+        // it to say go.
+        if (successor && await Daemon.HandshakeAsSuccessorAsync(Id) < 0)
+        {
+            Console.Error.WriteLine("successor handshake failed; the predecessor concierge keeps running");
+            return 4;
+        }
+
         // One concierge per machine, enforced at the OS — the same guard the daemon uses,
         // for the same reason: two of these would be two registries' worth of opinions and
         // two sets of pending questions.
-        using var mutex = new Mutex(initiallyOwned: true, $"Global\\dodona-{Id}", out bool createdNew);
-        if (!createdNew)
+        //
+        // The retry loop is for the successor only, and it is the residual race the handshake
+        // cannot close: `WaitForExitAsync` returning does not mean Windows has released the
+        // mutex handle yet. 80 x 250 ms mirrors Daemon.RunAsync.
+        Mutex? mutex = null;
+        for (int i = 0; i < (successor ? 80 : 1); i++)
+        {
+            mutex = new Mutex(initiallyOwned: true, $"Global\\dodona-{Id}", out bool createdNew);
+            if (createdNew) break;
+            mutex.Dispose();
+            mutex = null;
+            await Task.Delay(250);
+        }
+        if (mutex is null)
         {
             Console.Error.WriteLine("a concierge is already running on this machine");
             return 3;
         }
-        using var store = new ConciergeStore(Paths.ConciergeStore);
-        return await new Concierge(store).LoopAsync();
+        using (mutex)
+        {
+            using var store = new ConciergeStore(Paths.ConciergeStore);
+            return await new Concierge(store).LoopAsync();
+        }
     }
 
     async Task<int> LoopAsync()
@@ -248,8 +275,137 @@ sealed class Concierge
                 w.WriteLine("stopping");
                 foreach (var t in _tiers.Values) t.Shutdown();
                 return true;
+
+            // ---------------- hot swap (M4, §13/§14) — issue #9 ----------------
+            case "swap":
+            {
+                var (handedOff, lines) = await ConsiderSwapAsync(e.GetProperty("exe").GetString()!);
+                foreach (var l in lines) w.WriteLine(l);
+                return handedOff;
+            }
+
+            // A COMMAND THIS BUILD DOES NOT KNOW IS AN ERROR, NOT A NO-OP. There was no default
+            // here, which is the whole of issue #9: `publish --all` sends `swap`, this switch
+            // understood ten commands and that was not one of them, and an unmatched `switch`
+            // falls out to `return false` — no line written, so the client saw a clean reply and
+            // exit 0. Measured 2026-08-21 at f346b76, right after a publish that printed
+            // "— swapping concierge": the workspace daemon on build 20260821-105924 and this
+            // process still on 20260819-212126. Two days stale, across many publishes, with
+            // `dodona ps` calling it healthy the whole time. It was healthy; it was just old.
+            //
+            // `swap-answer`, `swap-fire` and `swaps` land here deliberately — see
+            // ConsiderSwapAsync for why the concierge has no arm/hold state machine at all.
+            default:
+                w.WriteLine($"error: the concierge (build {Ver.Build}) does not understand \"{e.GetProperty("cmd").GetString()}\"");
+                break;
         }
         return false;
+    }
+
+    // ------------------------------------------------------------- hot swap (issue #9)
+
+    /// <summary>
+    /// The concierge's swap decision, and it has exactly two refusals and no third state.
+    ///
+    /// **THE RECORDED DECISION SAID THE OPPOSITE AND IS REVERSED HERE**
+    /// (docs/WORKSPACES-CONCIERGE.md §2): *"the concierge does not hot-swap; a publish stops it
+    /// and the next command revives it"*. Neither half was ever built — publish sends `swap`
+    /// and has never sent `stop` — so what actually happened was neither, and the process just
+    /// aged. Two things settle it against stop-and-revive now that somebody has looked:
+    ///
+    ///   * `stop` calls Shutdown on both management tiers, so stop-and-revive would kill two
+    ///     model agents and lose their sessions on **every publish** — a quota cost (CLAUDE.md
+    ///     §0.1) for a process that a handoff lets the successor simply adopt.
+    ///   * a revived concierge is spawned by whichever CLI happens to summon it next, which
+    ///     may be any build on the machine. A handoff starts the exact binary publish just
+    ///     verified, which is the whole point of publishing.
+    ///
+    /// **No `swap-answer`, no `swaps`, no arming — it always takes the swap immediately**, and
+    /// that is a decision rather than an omission. `Daemon.Blockers` has exactly two entries and
+    /// neither can exist here: a repository mid-merge (the concierge holds no merge tokens, and
+    /// concierge-acceptance asserts its store has no such table at all) and a live shim speaking
+    /// a protocol NEWER than the candidate (a downgrade, and every daemon commits to speaking
+    /// all protocols ≤ its own, which is what lets the successor adopt the tiers). So an
+    /// arm/hold state machine would have no reachable state — and it would need a `swaps` table
+    /// in a store that has none, plus a ticker. Machinery with no reachable state is machinery
+    /// that rots unread; that is CLAUDE.md §3's dead routing ladder, which was fully covered and
+    /// green while being dead in production for two days.
+    /// </summary>
+    async Task<(bool HandedOff, List<string> Lines)> ConsiderSwapAsync(string exe)
+    {
+        var lines = new List<string>();
+        var nb = Daemon.Probe(exe, out var probeError);
+        if (nb is null)
+        {
+            _store.Event("concierge_swap_refused", null, $"{exe}: {probeError}");
+            lines.Add($"error: {probeError}");
+            lines.Add("##exit 1");
+            return (false, lines);
+        }
+        if (nb.ConciergeSchema < Ver.ConciergeSchema)
+        {
+            // Not a decision — a refusal. A build that cannot read this store must not open it.
+            _store.Event("concierge_swap_refused", null,
+                $"{nb.Build}: concierge schema v{nb.ConciergeSchema} < live v{Ver.ConciergeSchema}");
+            lines.Add($"refused: build {nb.Build} expects concierge store v{nb.ConciergeSchema}, this one is " +
+                      $"v{Ver.ConciergeSchema} — a downgrade could not read it");
+            lines.Add("##exit 1");
+            return (false, lines);
+        }
+        return await HandoffAsync(nb);
+    }
+
+    /// <summary>Successor handoff (§13), the concierge's much shorter version: spawn the new
+    /// binary, wait for it to say it is ready, then say go and exit. **The tiers are left
+    /// running on purpose** — `stop` shuts them down, a swap must not, because the successor's
+    /// reconcile adopts any tier whose shim is still up. If the successor never answers, THIS
+    /// concierge keeps running: a bad publish must never take the machine's router down.</summary>
+    async Task<(bool HandedOff, List<string> Lines)> HandoffAsync(Daemon.NewBuild nb)
+    {
+        var lines = new List<string>();
+        var server = new NamedPipeServerStream(Instance.HandoffPipe(Id), PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        Process? p = null;
+        try
+        {
+            var psi = new ProcessStartInfo(nb.Exe)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Paths.NeutralCwd(),   // it has no project, and must load none
+            };
+            psi.ArgumentList.Add("concierge");
+            psi.ArgumentList.Add("--successor");
+            p = Process.Start(psi);
+            _store.Event("concierge_swap_spawned", null, $"build {nb.Build} pid={p?.Id} exe={nb.Exe}");
+
+            using var cts = new CancellationTokenSource(30000);
+            await server.WaitForConnectionAsync(cts.Token);
+            var r = new StreamReader(server);
+            var w = new StreamWriter(server) { AutoFlush = true };
+            var ready = await r.ReadLineAsync();
+            if (ready is null || !ready.StartsWith("ready "))
+                throw new InvalidOperationException($"successor said '{ready}' instead of ready");
+
+            _store.Event("concierge_handoff", null,
+                $"{Ver.Build} (pid {Environment.ProcessId}) → {nb.Build} ({ready})");
+            _store.Announce($"[dodona] concierge swapped to build {nb.Build} — {_tiers.Count} tier(s) left running");
+
+            w.WriteLine($"go {Environment.ProcessId}");
+            await Task.Delay(150);          // let the successor read `go` before our handles close
+            lines.Add($"handed off to build {nb.Build} (pid {p?.Id}); this concierge is exiting — the tiers keep running");
+            return (true, lines);
+        }
+        catch (Exception ex)
+        {
+            try { if (p is not null && !p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+            _store.Event("concierge_swap_failed", null, $"build {nb.Build}: {ex.Message}");
+            _store.Announce($"[dodona] concierge update {nb.Build} FAILED to start — staying on {Ver.Build}");
+            lines.Add($"error: swap failed ({ex.Message}) — this concierge is still running on build {Ver.Build}, nothing was lost");
+            lines.Add("##exit 1");
+            return (false, lines);
+        }
+        finally { try { server.Dispose(); } catch { } }
     }
 
     static string? Opt(JsonElement e, string prop) =>

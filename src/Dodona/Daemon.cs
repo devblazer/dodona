@@ -576,8 +576,12 @@ sealed class Daemon
     /// <summary>The successor half of the handoff (§13). Connect to the predecessor's
     /// handoff pipe, declare what this build is, wait for `go`, then wait for the
     /// predecessor's process to actually be gone. Returns its pid, or -1 on failure —
-    /// in which case this process exits and the predecessor stays up, unharmed.</summary>
-    static async Task<int> HandshakeAsSuccessorAsync(string instanceId)
+    /// in which case this process exits and the predecessor stays up, unharmed.
+    ///
+    /// Internal because the concierge's successor performs the identical dance on its own
+    /// handoff pipe (issue #9). It is already parameterised by instance id and touches no
+    /// daemon state, so sharing it beat writing a second one that could drift.</summary>
+    internal static async Task<int> HandshakeAsSuccessorAsync(string instanceId)
     {
         var pipe = new NamedPipeClientStream(".", Instance.HandoffPipe(instanceId), PipeDirection.InOut, PipeOptions.Asynchronous);
         try { await pipe.ConnectAsync(20000); }
@@ -2215,18 +2219,32 @@ sealed class Daemon
                 w.WriteLine($"workspace {_wsName} forgotten: stopped {forgottenLanes.Count} lane(s), stopping this daemon");
                 return true;
             }
+
+            // A COMMAND THIS BUILD DOES NOT KNOW IS AN ERROR, NOT A NO-OP (issue #9). This
+            // switch had no default for its whole life, and neither did the concierge's — where
+            // it cost two days: `publish --all` sent `swap`, the concierge understood ten
+            // commands and that was not one of them, and the reply was silence, which every
+            // caller reads as success. The same hole is here, one dispatcher over, and it is
+            // reachable the same way: a newer client speaking to an older daemon across a
+            // partial swap. Say so, and let it raise publish's exit code.
+            default:
+                w.WriteLine($"error: this daemon (build {Ver.Build}) does not understand \"{e.GetProperty("cmd").GetString()}\"");
+                break;
         }
         return false;
     }
 
     // ------------------------------------------------------------- hot swap (§13/§14)
 
-    sealed record NewBuild(string Exe, string Build, int Schema, int ShimProtocol);
+    /// <summary>Internal rather than private because the CONCIERGE swaps too now (issue #9)
+    /// and asks the same question of the same binary. One prober, so the two can never
+    /// disagree about what a build is.</summary>
+    internal sealed record NewBuild(string Exe, string Build, int Schema, int ShimProtocol, int ConciergeSchema);
 
     /// <summary>Ask a candidate binary what it is. Running `<exe> version --json` is the
     /// only honest way — the file name proves nothing, and we must know its schema and
     /// shim protocol BEFORE it touches the store.</summary>
-    static NewBuild? Probe(string exe, out string error)
+    internal static NewBuild? Probe(string exe, out string error)
     {
         error = "";
         if (!File.Exists(exe)) { error = $"no such binary: {exe}"; return null; }
@@ -2242,7 +2260,13 @@ sealed class Daemon
             return new NewBuild(exe,
                 d.RootElement.GetProperty("build").GetString()!,
                 d.RootElement.GetProperty("schema").GetInt32(),
-                d.RootElement.GetProperty("shimProtocol").GetInt32());
+                d.RootElement.GetProperty("shimProtocol").GetInt32(),
+                // Defaulted, not required: `conciergeSchema` was added when the concierge
+                // learned to swap, and every build before that had a v1 concierge store —
+                // the only version there has ever been. Demanding the field would turn
+                // "swap to a slightly older build" into an unreadable JSON error.
+                d.RootElement.TryGetProperty("conciergeSchema", out var cs) && cs.ValueKind == JsonValueKind.Number
+                    ? cs.GetInt32() : 1);
         }
         catch (Exception ex) { error = $"binary did not answer `version --json` ({ex.Message})"; return null; }
     }

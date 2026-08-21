@@ -29,6 +29,15 @@ static class Ver
     public const int Schema = 10;  // v10: lanes.project -- a brain is a REGISTRATION per (role, project), not a count (P5.1/D-L8)
     public const int ShimProtocol = 1;
 
+    /// <summary>The CONCIERGE store's shape (ConciergeStore.Migrate), which is deliberately
+    /// not <see cref="Schema"/>: the concierge is not a workspace, and bumping the workspace
+    /// number for tables no workspace uses would make every ordinary swap non-seamless.
+    ///
+    /// It exists because the concierge can be hot-swapped now (issue #9), and a swap needs the
+    /// one refusal that is not a policy choice: a build that cannot READ this store must never
+    /// be allowed to open it. Must equal the highest migration in ConciergeStore.Migrate.</summary>
+    public const int ConciergeSchema = 1;
+
     public static string Build { get; } = Compute();
     public static string ExePath => Environment.ProcessPath ?? AppContext.BaseDirectory;
 

@@ -157,6 +157,92 @@ try {
     $legacyPipe = (Dx @('where', '--root', $orphan, '--json'))    # resolves + migrates: no daemon holds it
     Check 'an_unheld_legacy_store_migrates_normally' ($legacyPipe -match '"store"') $legacyPipe
 
+    # ---- THE CONCIERGE ACTUALLY TAKES THE SWAP (issue #9) -------------------------------
+    # `all_includes_the_concierge` above asserts that publish SAYS "swapping concierge". It said
+    # that for two days while the concierge understood ten commands, `swap` was not one of them,
+    # its dispatch had no `default:`, and the command was discarded in silence. Measured on the
+    # operator's machine 2026-08-21 at f346b76, right after a publish that printed that line:
+    # the workspace daemon on build 20260821-105924, the concierge still on 20260819-212126.
+    # So: assert the OUTCOME, not the intention.
+    #
+    # A distinguishable build with no second compile: Ver.Build is the assembly version plus the
+    # mtime of dodona.dll, so a copy of these same binaries with a different mtime IS a different
+    # build as far as every part of this system is concerned.
+    $bin2 = Join-Path $out 'bin2'
+    New-Item -ItemType Directory -Force $bin2 | Out-Null
+    Copy-Item "$bin\*" $bin2 -Recurse -Force
+    (Get-Item "$bin2\dodona.dll").LastWriteTimeUtc = [datetime]::new(2026, 1, 2, 3, 4, 5, [DateTimeKind]::Utc)
+    $newBuild = ((& "$bin2\dodona.exe" version --json) | ConvertFrom-Json).build
+    $cxStatusBefore = Dx @('concierge-status')
+    $cxPidBefore = if ($cxStatusBefore -match 'concierge pid=(\d+)') { [int]$Matches[1] } else { 0 }
+    # A fixture assertion, not a product one: if the copy is not a DIFFERENT build then the
+    # check below would pass without anything having swapped at all.
+    Check 'the_copied_binary_is_a_distinguishable_build' `
+        ($cxPidBefore -gt 0 -and $newBuild -like '*20260102030405' -and $cxStatusBefore -notmatch [regex]::Escape($newBuild)) `
+        "pid=$cxPidBefore newBuild=$newBuild"
+
+    $pubCx = Dx @('publish', '--exe', "$bin2\dodona.exe", '--workspace', 'alpha', '--concierge', '--mode', 'now')
+    # Asserted on the PROCESS and on what the successor says about itself -- never on an
+    # instantaneous pipe read, which blinks out while the swap hands the ctl pipe over
+    # (check-authoring rule 2). The wait covers everything the checks below assert.
+    $cxStatusAfter = ''
+    Wait-Until {
+        $script:cxStatusAfter = Dx @('concierge-status')
+        ($script:cxStatusAfter -match "build=$([regex]::Escape($newBuild))") -and $cx.HasExited
+    } 40000 'the concierge swaps to the new build and the old process exits' | Out-Null
+    $cxPidAfter = if ($cxStatusAfter -match 'concierge pid=(\d+)') { [int]$Matches[1] } else { 0 }
+
+    Check 'a_swapped_concierge_reports_the_new_build' `
+        (($cxStatusAfter -match "build=$([regex]::Escape($newBuild))") -and $cxPidAfter -gt 0 -and $cxPidAfter -ne $cxPidBefore) `
+        "want=$newBuild pidBefore=$cxPidBefore pidAfter=$cxPidAfter status=$(($cxStatusAfter -replace '\s+', ' '))"
+    # The status line could in principle be told by the same old process; the process could not.
+    Check 'the_old_concierge_process_is_gone_after_the_swap' ($cx.HasExited) `
+        "pid $cxPidBefore still alive; publish said: $(($pubCx -replace '\s+', ' '))"
+
+    # ---- PUBLISH REPORTS OUTCOMES, AND NAMES A TARGET THAT DID NOT SWAP (issue #9) -------
+    # This is the half that stops the NEXT silent no-op. A target that answers nothing at all is
+    # exactly what the concierge was, and at the wire it is indistinguishable from success: no
+    # `error:` line, so `Client` returns 0. The fixture reproduces that deterministically -- a
+    # plain named-pipe server holding a registered workspace's ctl pipe name, which accepts the
+    # connection, reads the request and says nothing. It is what an OLDER build on the far end
+    # of a partial swap looks like, and no `default:` branch on the receiving side can help.
+    $muteRoot = Join-Path (Use-SuiteTemp) ("dodona-pub-mute-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    New-Item -ItemType Directory -Force $muteRoot | Out-Null
+    Dx @('workspace-create', '--name', 'mute', '--member', $muteRoot) | Out-Null
+    $allWs = (Dx @('workspaces', '--json')) | ConvertFrom-Json
+    $muteId = (@($allWs) | Where-Object { $_.name -eq 'mute' }).id
+    $mutePipe = "dodona-$muteId-ctl"
+    $muteScript = Join-Path $out 'mute-server.ps1'
+    Set-Content $muteScript @"
+`$ErrorActionPreference = 'Stop'
+while (`$true) {
+    `$s = New-Object System.IO.Pipes.NamedPipeServerStream('$mutePipe', [System.IO.Pipes.PipeDirection]::InOut, 1)
+    `$s.WaitForConnection()
+    `$r = New-Object System.IO.StreamReader(`$s)
+    try { `$r.ReadLine() | Out-Null } catch { }
+    `$s.Dispose()
+}
+"@ -Encoding utf8
+    $muteProc = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $muteScript) `
+        -PassThru -NoNewWindow -RedirectStandardOutput "$out\mute.out" -RedirectStandardError "$out\mute.err"
+    Wait-Until { Test-DodonaPipe $mutePipe } 20000 "the mute fixture holds $mutePipe" | Out-Null
+    Check 'the_mute_target_really_is_live' (Test-DodonaPipe $mutePipe) $mutePipe
+
+    $pubMute = Dx @('publish', '--exe', $dodona, '--workspace', 'mute', '--workspace', 'alpha', '--mode', 'now')
+    $muteExit = $DODONA_EXIT
+    # Collapsed first: captured native output is WRAPPED to the console width, so a regex
+    # spanning a space can match today and fail tomorrow because a path got longer (CLAUDE.md
+    # 0.2). ASCII only in the pattern for the same family of reasons -- redirected child stdio
+    # defaults to the OEM codepage and an em dash arrives mangled.
+    $muteFlat = ($pubMute -replace '\s+', ' ')
+    Check 'publish_names_a_target_that_did_not_take_the_build' `
+        (($muteFlat -match 'mute \([^)]+\): ANSWERED NOTHING') -and ($muteFlat -notmatch 'alpha \([^)]+\): ANSWERED NOTHING')) `
+        $muteFlat
+    # ...and it FAILS. `accepted` needs only one target to succeed, so alpha taking the build
+    # used to make the whole publish look successful no matter what anyone else did.
+    Check 'publish_fails_when_a_target_did_not_take_the_build' ($muteExit -ne 0) `
+        "exit=$muteExit $muteFlat"
+
     Dx @('concierge-stop') | Out-Null
     # ---- provenance: only a build we PERFORMED may claim what it was built from ----------
     # Auto-publish asks "has main moved?", and answers by comparing `git rev-parse main` to the
@@ -256,9 +342,16 @@ print(r[0] if r else '')
     foreach ($n in 'alpha', 'beta') { Dx @('stop-daemon', '--workspace', $wsIds[$n]) | Out-Null }
 }
 finally {
-    foreach ($p in @($daemons.Values) + @($cx, $foreignDaemon)) {
+    # `concierge-stop` reaches whichever concierge is live -- which after the swap check is the
+    # SUCCESSOR, a process this suite never started and therefore has no object for. Autostart is
+    # off for this suite, so this can only ever talk to one that is already up; it never summons.
+    Dx @('concierge-stop') | Out-Null
+    foreach ($p in @($daemons.Values) + @($cx, $foreignDaemon, $muteProc)) {
         if ($p -and -not $p.HasExited) { try { Stop-Process -Id $p.Id -Force } catch { } }
     }
+    # ...and the successor by pid, if it outlived the stop. Resolved from THIS suite's own
+    # status output, never by process name (CLAUDE.md 4).
+    if ($cxPidAfter -and $cxPidAfter -gt 0) { try { Stop-Process -Id $cxPidAfter -Force -ErrorAction Stop } catch { } }
     Remove-Item env:DODONA_BIN_ROOT -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue
     Remove-Item env:DODONA_HOME -ErrorAction SilentlyContinue
