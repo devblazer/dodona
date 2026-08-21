@@ -480,7 +480,7 @@ the three are now wrong for the case that matters:
 
 - reason 1 (the HEAD build compiled the unit-test project) is **already fixed** for acceptance —
   an acceptance proof no longer compiles `tests\Dodona.Tests`;
-- reason 2 (no `tests\unit-acceptance.ps1`) is a dispatch detail;
+- reason 2 (no `tests\unit-acceptance.ps1`) is a dispatch detail;  <!-- (planned) no such suite exists; the name is quoted from dev.ps1 -->
 - reason 3 (`Run-Unit` builds and tests the **working tree**, so the verdict is the change measured
   against itself) is the real blocker — **and prove already solves exactly this shape**: build HEAD's
   product projects in the prove worktree, copy the working tree's `tests\*` over HEAD's, run there.

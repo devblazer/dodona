@@ -295,7 +295,7 @@ verdict vocabulary (PROVEN / VACUOUS / MISSING) and identical exit codes.
    belongs to the SEAM COMMIT, which section 5's ordering guarantees is already in HEAD.
 5. The `unit` refusal at dev.ps1:1216 stays for the bare form and gains one line pointing at
    `--with`. Its three reasons are each answered: (1) a new symbol will not compile against HEAD --
-   answered by the seam commit landing first; (2) there is no `tests\unit-acceptance.ps1` --
+   answered by the seam commit landing first; (2) there is no `tests\unit-acceptance.ps1` --  <!-- (planned) no such suite exists; the name is quoted from dev.ps1 -->
    answered by routing `unit` to `Run-Unit` rather than `Start-Suite`; (3) `Run-Unit` tests `$repo`,
    i.e. the change measured against itself -- answered by `Run-Unit -Root $wt`, a one-parameter
    change.

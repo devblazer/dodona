@@ -211,7 +211,7 @@ substitute. The three recorded reasons it was broken before the refusal:
 1. the HEAD build compiled `tests\Dodona.Tests`, so a unit test naming a symbol the change ADDS
    failed to compile → prove aborted `"HEAD does not build"` and **took every acceptance check in
    the same run down with it**;
-2. `Start-Suite` would then abort `"no suite 'unit'"` (there is no `tests\unit-acceptance.ps1`);
+2. `Start-Suite` would then abort `"no suite 'unit'"` (there is no `tests\unit-acceptance.ps1`);  <!-- (planned) no such suite exists; the name is quoted from dev.ps1 -->
 3. `Run-Unit` builds and tests `$repo` — **the working tree** — so the verdict would be the change
    measured against itself. *"A silently wrong proof is worse than no proof; it is the
    believed-a-green-check disease with a certificate."*
