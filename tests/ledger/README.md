@@ -242,3 +242,49 @@ name however it is spelled.
   edit once the census exists, and it belongs in that commit.
 - **`--rehash`** (mentioned at 3.3.1) is not implemented. It would rewrite `wires.tsv`,
   which W2 does not own.
+
+## The first capture lost two names, and the tool is what lost them
+
+`dev ledger --capture` keyed every name into ONE PowerShell hashtable. `@{}` is
+**case-insensitive**, so a unit method whose name matched a suite check apart from
+capitalisation was silently skipped. Two such pairs exist, and both are DELIBERATE -- the same
+property proved at both layers, spelled to each language's convention:
+
+| suite check | unit method |
+|---|---|
+| `brain:a_one_project_workspace_says_nothing_about_scope` (`brain-acceptance.ps1:806`) | `A_one_project_workspace_says_nothing_about_scope` |
+| `workspace:a_named_project_is_not_overruled_by_a_busy_one` (`workspace-acceptance.ps1:1465`) | `A_named_project_is_not_overruled_by_a_busy_one` |
+
+Measured on the first real capture: **962 names frozen where 964 had run**, and nothing said so.
+A census that loses names is the one thing this tool exists to prevent, so it lost them in its
+own first artifact.
+
+**The fix is two things, not one.**
+
+1. `Ledger-NewSet` -- an ordinal dictionary, everywhere the ledger keys a name. `A_x` and `a_x`
+   are different names and merging them is never right.
+2. `Ledger-Key` -- one function both the capture and the integrity rung call, so they cannot
+   disagree. Suite checks key on the **bare name** (that is what keeps W6's suite rename free);
+   harness rows key `suite/check`; **unit methods key `unit/check`**. The layer matters because a
+   suite check and a unit method may share a name ON PURPOSE -- it is the plan's end state for a
+   wire, and step B1 names the new C# method after the old check verbatim.
+
+**A genuine leaf collapse is now announced rather than swallowed.** Two unit methods in different
+classes can share a method name -- `A_trailing_separator_is_not_a_different_folder` exists in both
+`InstanceCanonicalTests` and `ProjectResolutionTests` -- and the census holds one row for it. The
+capture prints a NOTE naming both fully-qualified methods and telling you to rename one to count
+both.
+
+### Proved red before it was fixed
+
+A synthetic green run carrying exactly those collisions, captured twice on the same tree:
+
+| | names | unit methods | the four pair rows |
+|---|---|---|---|
+| HEAD (unfixed) | 34 | 2 | **only the two suite rows survive** |
+| fixed | 36 | 4 | all four present, plus the leaf-collapse NOTE |
+
+A full green gate is the honest source for the real freeze, but it takes ~5 minutes and could not
+demonstrate this at all -- the drop is silent, so a green gate looks identical either way. The
+fixture is what makes the failure visible, and it is the reason this is a fix rather than a
+number nobody questioned.

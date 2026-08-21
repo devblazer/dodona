@@ -2159,6 +2159,29 @@ function Ledger-HarnessNames($sites) {
     return $names
 }
 
+# A dictionary that tells 'A_x' from 'a_x'. PowerShell's @{} does NOT: it is case-insensitive,
+# and that silently merged two DELIBERATE PAIRS out of the first census ever captured --
+# `a_named_project_is_not_overruled_by_a_busy_one` (workspace-acceptance.ps1:1465) with the C#
+# `A_named_...`, and `a_one_project_workspace_says_nothing_about_scope`
+# (brain-acceptance.ps1:806) with its C# twin. 962 names were frozen where 964 had run, and
+# nothing said so. A census that loses names is the one thing this tool exists to prevent.
+function Ledger-NewSet { , (New-Object 'System.Collections.Hashtable' ([System.StringComparer]::Ordinal)) }
+
+# THE KEY, in one place so the capture and the integrity rung can never disagree about it.
+#
+# Suite checks key on the BARE NAME -- that is deliberate and is what keeps W6's rename of every
+# suite free (plan section 5.2). Two exceptions, both namespaced:
+#   * harness rows -- one source site in _workspace.ps1 emitted into EVERY suite's results, so
+#     the same name legitimately appears once per suite;
+#   * unit methods -- a suite check and a unit method may carry the same name ON PURPOSE. That
+#     is the plan's end state for a wire (keep one integration check, add unit tests beneath
+#     it), and step B1 names the new C# method after the old check verbatim.
+function Ledger-Key([string]$suite, [string]$check, $harness) {
+    if ($suite -eq 'unit') { return "unit/$check" }
+    if ($null -ne $harness -and $harness.ContainsKey($check)) { return "$suite/$check" }
+    return $check
+}
+
 function Ledger-DupProblems($sites) {
     $problems = @()
     $named = @($sites | Where-Object { -not $_.Dynamic -and $_.Check -ne '' })
@@ -2474,7 +2497,7 @@ function Ledger-Live($static) {
     # Cross-suite uniqueness at RUNTIME. The harness row is written into every suite's
     # $results on purpose and is the one derived exemption.
     $harness = Ledger-HarnessNames $static.Sites
-    $where = @{}
+    $where = Ledger-NewSet
     foreach ($s in @($out.Suite.Keys)) {
         foreach ($k in $out.Suite[$s].Keys) {
             if ($harness.ContainsKey($k)) { continue }
@@ -2486,20 +2509,22 @@ function Ledger-Live($static) {
     }
 
     if ($static.Baseline.Present) {
-        $base = @{}
-        foreach ($r in $static.Baseline.Rows) { $base[$r.check] = $r }
-        $declared = @{}
-        if ($static.Added.Present) { foreach ($r in $static.Added.Rows) { $declared[$r.check] = $r } }
+        $base = Ledger-NewSet
+        foreach ($r in $static.Baseline.Rows) { $base[(Ledger-Key $r.suite $r.check $harness)] = $r }
+        $declared = Ledger-NewSet
+        if ($static.Added.Present) { foreach ($r in $static.Added.Rows) { $declared[(Ledger-Key $r.suite $r.check $harness)] = $r } }
         $undeclared = @()
         foreach ($s in @($out.Suite.Keys)) {
             foreach ($k in $out.Suite[$s].Keys) {
-                if ($base.ContainsKey($k) -or $declared.ContainsKey($k)) { continue }
+                $key = Ledger-Key $s $k $harness
+                if ($base.ContainsKey($key) -or $declared.ContainsKey($key)) { continue }
                 $undeclared += "${s}:$k"
             }
         }
         foreach ($m in @($out.Unit.Keys)) {
             $leaf = @($m -split '\.')[-1]
-            if ($base.ContainsKey($leaf) -or $declared.ContainsKey($leaf)) { continue }
+            $key = Ledger-Key 'unit' $leaf $harness
+            if ($base.ContainsKey($key) -or $declared.ContainsKey($key)) { continue }
             $undeclared += "unit:$m"
         }
         if ($undeclared.Count -gt 0) {
@@ -2530,29 +2555,38 @@ function Ledger-Capture($static) {
     }
 
     $rows = @()
-    $existing = @{}
+    $existing = Ledger-NewSet
     $harness = Ledger-HarnessNames $static.Sites
     if ($static.Baseline.Present) {
         foreach ($r in $static.Baseline.Rows) {
-            $key = if ($harness.ContainsKey($r.check)) { "$($r.suite)/$($r.check)" } else { $r.check }
-            $existing[$key] = $true
+            $existing[(Ledger-Key $r.suite $r.check $harness)] = $true
             $rows += [pscustomobject]@{ check = $r.check; suite = $r.suite; cases = $r.cases }
         }
     }
     $new = 0
     foreach ($s in $expected) {
         foreach ($k in @($live.Suite[$s].Keys | Sort-Object)) {
-            $key = if ($harness.ContainsKey($k)) { "$s/$k" } else { $k }
+            $key = Ledger-Key $s $k $harness
             if ($existing.ContainsKey($key)) { continue }
             $existing[$key] = $true
             $rows += [pscustomobject]@{ check = $k; suite = $s; cases = '1' }
             $new++
         }
     }
+    # A unit leaf that two FQNs share is a REAL collapse and must be reported, not skipped in
+    # silence: `A_trailing_separator_is_not_a_different_folder` exists in both
+    # InstanceCanonicalTests and ProjectResolutionTests, and the census can hold one row.
+    $seenLeaf = Ledger-NewSet
     foreach ($m in @($live.Unit.Keys | Sort-Object)) {
         $leaf = @($m -split '\.')[-1]
-        if ($existing.ContainsKey($leaf)) { continue }
-        $existing[$leaf] = $true
+        if ($seenLeaf.ContainsKey($leaf)) {
+            Say "  NOTE two unit methods share the leaf name '$leaf' ($($seenLeaf[$leaf]) and $m) -- the census holds one row; rename one to count both"
+            continue
+        }
+        $seenLeaf[$leaf] = $m
+        $key = Ledger-Key 'unit' $leaf $harness
+        if ($existing.ContainsKey($key)) { continue }
+        $existing[$key] = $true
         $rows += [pscustomobject]@{ check = $leaf; suite = 'unit'; cases = "$($live.Unit[$m])" }
         $new++
     }
