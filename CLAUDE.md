@@ -908,6 +908,12 @@ session anyway — not from disagreement but because forty minutes had passed. A
 **If one of these turns out to be skipped as reliably as a section of this file was, promote its
 contents to enforcement and delete the skill.** Do not write a fourth one (D-6).
 
+**`ticket` is a WORKFLOW skill and D-6 does not cover it** — D-6 forbids a fourth *trap* skill,
+one that fires a warning at the moment of a dangerous edit. `ticket` is the sibling of `/ship`:
+the named job of writing an issue on the tracker (§6). Saying which of the two kinds a new skill
+is, in the commit that adds it, is the check on this — otherwise D-6 erodes one reasonable
+exception at a time.
+
 ## 5.1.1 Delivery itself
 
 `/ship` (`.claude/skills/ship/SKILL.md`) is the complete build → suites → commit →
@@ -997,6 +1003,14 @@ correction, 2026-08-20: an agent reading either half alone will skip the other.
   back but **never approve**. Supersedes the declared-claims-as-a-lock idea entirely.
 - `docs/LANE-LIFECYCLE.md` — decisions already taken and **ideas already rejected** about
   closing lanes and the attention model. Read before proposing either.
+- **`github.com/devblazer/dodona/issues` — the tracker, and it is PUBLIC.** Outstanding work lives
+  there rather than in a plan's unbuilt sections, and the issues are on the operator's project
+  board (`gh project` 1, owner `devblazer`). Write them with the `ticket` skill: plain English
+  above the fold for a person, folded `<details>` below it for an agent. **The repo is public as
+  of 2026-08-21**, which is a change of kind rather than degree — this file, every plan in
+  `docs/`, and the operator's own words quoted throughout are world-readable now. Nothing here
+  changes what to write; it changes what to check before writing a credential, a path off this
+  machine, or somebody's name into any of it.
 - `DEBUGGING.md` — the schema, every event kind, the pipes, and how to read a store with
   nothing running. Start here when something looks wrong.
 
