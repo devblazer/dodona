@@ -21,12 +21,12 @@ This is not a new convention. It is the shape the operator's other repo already 
 | | |
 |---|---|
 | repository | `devblazer/dodona` (public) |
-| project board | `gh project` **1**, owner `devblazer`, titled *MassWorks* — shared across repos; the `Repository` column separates them |
+| project board | `gh project` **2**, owner `devblazer`, titled *Dodona* — **this project's own board.** One board per project, the way `MassWorks` (board 1) is that project's. Dodona work does not go on another project's board |
 | new items land in | Status **Todo** |
 
 ```powershell
 gh issue create --repo devblazer/dodona --title "<title>" --body-file <file> --label "kind/x,prio/y,area/z"
-gh project item-add 1 --owner devblazer --url <issue-url>
+gh project item-add 2 --owner devblazer --url <issue-url>
 ```
 
 **Add it to the board in the same breath as creating it.** An issue that is not on the board is

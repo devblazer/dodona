@@ -1005,7 +1005,8 @@ correction, 2026-08-20: an agent reading either half alone will skip the other.
   closing lanes and the attention model. Read before proposing either.
 - **`github.com/devblazer/dodona/issues` — the tracker, and it is PUBLIC.** Outstanding work lives
   there rather than in a plan's unbuilt sections, and the issues are on the operator's project
-  board (`gh project` 1, owner `devblazer`). Write them with the `ticket` skill: plain English
+  board (`gh project` **2**, owner `devblazer`, titled *Dodona* — this project's own, one board per
+  project). Write them with the `ticket` skill: plain English
   above the fold for a person, folded `<details>` below it for an agent. **The repo is public as
   of 2026-08-21**, which is a change of kind rather than degree — this file, every plan in
   `docs/`, and the operator's own words quoted throughout are world-readable now. Nothing here
