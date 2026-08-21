@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('check', 'build', 'test', 'suites', 'prove', 'gate', 'lint', 'ship', 'worktree', 'help')]
+    [ValidateSet('check', 'build', 'test', 'suites', 'prove', 'gate', 'lint', 'ledger', 'ship', 'worktree', 'help')]
     [string]$Verb,
 
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
@@ -1053,7 +1053,16 @@ function Report-Suites($results, [switch]$Wide) {
 # that prints twenty lines of MSBuild banner in front of it teaches people to skip reading it.
 function Run-Unit {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $o = & dotnet test "$repo\tests\Dodona.Tests\Dodona.Tests.csproj" -c Release --nologo -v q 2>&1
+    $trxDir = "$repo\tests\unit-output"
+    New-Item -ItemType Directory -Force $trxDir | Out-Null
+    Remove-Item "$trxDir\unit.trx" -Force -ErrorAction SilentlyContinue
+    # THE TRX IS THE UNIT SUITE'S CENSUS. `dev ledger` needs per-test verdicts, and the
+    # scraped "Passed: N" line is the CASE count -- a [Theory] with 8 [InlineData] rows is
+    # one METHOD and eight cases, and the ledger is keyed on the method (plan 1.2/5.2).
+    # --results-directory is not decoration: the default is tests\Dodona.Tests\TestResults,
+    # which is a TRACKED path, and the gate asserts a suite run dirtied nothing. Every other
+    # suite writes to tests\<name>-output\, which .gitignore already covers.
+    $o = & dotnet test "$repo\tests\Dodona.Tests\Dodona.Tests.csproj" -c Release --nologo -v q --logger "trx;LogFileName=unit.trx" --results-directory $trxDir 2>&1
     $code = $LASTEXITCODE
     $sw.Stop()
     Add-Content -Path $log -Value "===== unit =====" -Encoding utf8
@@ -1897,6 +1906,846 @@ function Do-Ship {
     Say "log: $log"
 }
 
+# ---------------------------------------------------------------- the check-name ledger
+#
+# W2 of docs\TEST-ARCHITECTURE-PLAN.md. The accounting that makes "no coverage was lost" a
+# fact rather than a promise, for a migration that moves ~560 acceptance checks down into
+# pure-logic tests.
+#
+# WHY IT IS HERE AND NOT IN A NEW TOOL: D-3 (RECOVERY-PHASES) -- dev.ps1 is the one door --
+# and D-T6: there is exactly ONE parser of check names in this repo, and it is this one,
+# because tools\dev.ps1 must run on a tree that will not compile (CLAUDE.md section 1). The
+# C# side reads the tracked TSV artefact and never parses a .ps1. Two enumerators of one
+# thing are two hand copies, which is the failure the whole plan exists to prevent.
+#
+# THE SCANNER USES THE POWERSHELL AST, NOT A REGEX, and that is load-bearing twice over.
+# tests\ledger\README.md records the two real cases a text scan gets wrong:
+#   (1) _workspace.ps1:409 is a commented-out Check '...' inside a doc comment. A grep
+#       reports it as a duplicate registration forever, and a permanent false positive in a
+#       gate assertion is how people learn to ignore the assertion -- the same disease as a
+#       gate that is always green. The AST has no comment nodes, so it cannot see it at all.
+#   (2) m2-acceptance.ps1:330 and :334 are the two arms of ONE if/else writing ONE name. A
+#       source-line rule would have to forbid a perfectly correct idiom. The AST can prove
+#       the two sites are mutually exclusive, so the idiom stays legal.
+
+function Ledger-Dir { Join-Path $repo 'tests\ledger' }
+
+function Ledger-Sha([string]$text) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') }) -join '' }
+    finally { $sha.Dispose() }
+}
+
+# The ledger files are TSV, ASCII-only, CRLF, no BOM, and this asserts all of it (plan
+# section 5.2). Not JSON: ConvertFrom-Json emits a JSON ARRAY as one pipeline item
+# (CLAUDE.md 0.2) and that trap has already turned three acceptance checks into silent
+# no-ops here. ASCII-only, because Repo-Lint's known gap is exactly a non-ASCII byte in a
+# BOM-less file read by PS 5.1, and one em dash in a ledger row would match nothing and
+# drop that row SILENTLY. The reader strips a leading U+FEFF defensively anyway -- that is
+# the GateHook incident, where Console.In handed a BOM back as an ordinary character.
+function Ledger-ReadTsv([string]$path, [string[]]$columns) {
+    $r = [pscustomobject]@{ Present = $false; Rows = @(); Problems = @(); Path = $path }
+    if (-not (Test-Path $path)) { return $r }
+    $r.Present = $true
+    $rel = $path.Substring($repo.Length).TrimStart('\')
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        $r.Problems += "$rel has a UTF-8 BOM -- ledger files are ASCII with no BOM"
+        $bytes = if ($bytes.Length -gt 3) { $bytes[3..($bytes.Length - 1)] } else { @() }
+    }
+    for ($i = 0; $i -lt $bytes.Length; $i++) {
+        if ($bytes[$i] -gt 0x7F) {
+            $line = 1; for ($k = 0; $k -lt $i; $k++) { if ($bytes[$k] -eq 0x0A) { $line++ } }
+            $r.Problems += ("{0}:{1} non-ASCII byte 0x{2:x2} -- a ledger row read as ANSI matches nothing and drops SILENTLY" -f $rel, $line, $bytes[$i])
+            break
+        }
+    }
+    $bare = 0
+    for ($i = 0; $i -lt $bytes.Length; $i++) {
+        if ($bytes[$i] -eq 0x0A) { if (-not ($i -gt 0 -and $bytes[$i - 1] -eq 0x0D)) { $bare++ } }
+    }
+    if ($bare -gt 0) { $r.Problems += "$rel has $bare bare LF line ending(s) -- ledger files are CRLF" }
+
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    $lines = @($text -split "`r`n|`n")
+    $n = 0; $sawHeader = $false; $rows = @()
+    foreach ($raw in $lines) {
+        $n++
+        if ($raw -eq '') { continue }
+        if ($raw.StartsWith('#')) { continue }
+        $f = @($raw -split "`t")
+        if (-not $sawHeader) {
+            $sawHeader = $true
+            if (($f -join ',') -ne ($columns -join ',')) {
+                $r.Problems += "${rel}:${n} header is [$($f -join '|')] -- expected [$($columns -join '|')]"
+            }
+            continue
+        }
+        if ($f.Count -ne $columns.Count) {
+            $r.Problems += "${rel}:${n} has $($f.Count) tab-separated field(s), expected $($columns.Count) -- [$raw]"
+            continue
+        }
+        $o = New-Object psobject
+        for ($c = 0; $c -lt $columns.Count; $c++) { $o | Add-Member -NotePropertyName $columns[$c] -NotePropertyValue $f[$c] }
+        $o | Add-Member -NotePropertyName '_line' -NotePropertyValue $n
+        $o | Add-Member -NotePropertyName '_file' -NotePropertyValue $rel
+        $rows += $o
+    }
+    if (-not $sawHeader) { $r.Problems += "$rel has no header row" }
+    $r.Rows = @($rows)
+    return $r
+}
+
+function Ledger-WriteTsv([string]$path, [string[]]$columns, $rows) {
+    $sb = New-Object System.Text.StringBuilder
+    $null = $sb.Append(($columns -join "`t")).Append("`r`n")
+    foreach ($row in @($rows)) {
+        $vals = @()
+        foreach ($c in $columns) { $vals += ("" + $row.$c) }
+        $null = $sb.Append(($vals -join "`t")).Append("`r`n")
+    }
+    # An encoder that emitted a BOM would break the very file this tool refuses a BOM on.
+    [System.IO.File]::WriteAllText($path, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# ---- the scanner -------------------------------------------------------------------
+#
+# One site per place a check name is REGISTERED: Check '<name>' in fourteen suites, and
+# m0's inline $results['<name>'] = (m0 has no Check helper and never had one).
+# Dynamic == the name is built at runtime (Check "event_$k"), which no static parse can
+# enumerate; plan section 5.4 says those are reachable on the --live side only.
+function Ledger-ScanChecks {
+    $sites = @()
+    $files = @()
+    foreach ($s in (AllSuites)) {
+        if ($s -eq 'unit') { continue }                      # xunit; the TRX is its census
+        $f = "$repo\tests\$s-acceptance.ps1"
+        if (Test-Path $f) { $files += [pscustomobject]@{ Suite = $s; Path = $f } }
+    }
+    # The harness writes one row into EVERY suite's $results (Assert-NoBuildOutputProcesses).
+    # It is a real check and one of the 750; it is also the one name that is deliberately
+    # not unique (plan section 5.4: fifteen rows, "not deduplicable").
+    $ws = "$repo\tests\_workspace.ps1"
+    if (Test-Path $ws) { $files += [pscustomobject]@{ Suite = '_harness'; Path = $ws } }
+
+    foreach ($entry in $files) {
+        $tok = $null; $errs = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($entry.Path, [ref]$tok, [ref]$errs)
+        if ($errs -and @($errs).Count -gt 0) {
+            $sites += [pscustomobject]@{ Suite = $entry.Suite; Check = ''; Line = @($errs)[0].Extent.StartLineNumber
+                File = $entry.Path; Dynamic = $false; ParseError = @($errs)[0].Message; Ast = $null }
+            continue
+        }
+        foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+            if ($c.GetCommandName() -ne 'Check') { continue }
+            if (@($c.CommandElements).Count -lt 2) { continue }
+            if (Ledger-InsideCheckHelper $c) { continue }
+            $a = $c.CommandElements[1]
+            if ($a -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+                $sites += [pscustomobject]@{ Suite = $entry.Suite; Check = $a.Value; Line = $a.Extent.StartLineNumber
+                    File = $entry.Path; Dynamic = $false; ParseError = $null; Ast = $c }
+            }
+            else {
+                $sites += [pscustomobject]@{ Suite = $entry.Suite; Check = $a.Extent.Text; Line = $a.Extent.StartLineNumber
+                    File = $entry.Path; Dynamic = $true; ParseError = $null; Ast = $c }
+            }
+        }
+        foreach ($s in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+            $l = $s.Left
+            if ($l -isnot [System.Management.Automation.Language.IndexExpressionAst]) { continue }
+            if ("$($l.Target.Extent.Text)" -ne '$results') { continue }
+            if (Ledger-InsideCheckHelper $s) { continue }
+            $ix = $l.Index
+            if ($ix -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+                $sites += [pscustomobject]@{ Suite = $entry.Suite; Check = $ix.Value; Line = $s.Extent.StartLineNumber
+                    File = $entry.Path; Dynamic = $false; ParseError = $null; Ast = $s }
+            }
+            else {
+                $sites += [pscustomobject]@{ Suite = $entry.Suite; Check = $ix.Extent.Text; Line = $s.Extent.StartLineNumber
+                    File = $entry.Path; Dynamic = $true; ParseError = $null; Ast = $s }
+            }
+        }
+    }
+    return @($sites)
+}
+
+# function Check writes $results[$name] itself. That is the helper, not a registration, and
+# counting it would put one phantom dynamic site in every suite.
+function Ledger-InsideCheckHelper($node) {
+    $p = $node
+    while ($null -ne $p) {
+        if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $p.Name -eq 'Check') { return $true }
+        $p = $p.Parent
+    }
+    return $false
+}
+
+function Ledger-Ancestors($node) {
+    $chain = @()
+    $p = $node
+    while ($null -ne $p) { $chain += $p; $p = $p.Parent }
+    return @($chain)
+}
+
+# TWO SITES, ONE NAME, IN ONE FILE -- is exactly one of them going to run?
+#
+# Two shapes are legal and both are in this repo today:
+#   if (...) { Check 'x' ... } else { Check 'x' ... }        m2-acceptance.ps1:330 / :334
+#   if (...) { $results['x'] = 'PASS'; return }              _workspace.ps1:377 / :380
+#   $results['x'] = "FAIL ..."
+# The first diverges AT a branching node; the second is sequential, but the earlier arm
+# leaves the block. Anything else is a real collision: the second write overwrites the
+# first, the tally comes out one lower than the suite believes, and nothing anywhere says
+# so. That silent overwrite is the failure this rung exists to catch.
+function Ledger-MutuallyExclusive($a, $b) {
+    if ($null -eq $a.Ast -or $null -eq $b.Ast) { return $false }
+    $ca = Ledger-Ancestors $a.Ast
+    $cb = Ledger-Ancestors $b.Ast
+    $common = $null; $ia = -1; $ib = -1
+    for ($i = 0; $i -lt $ca.Count; $i++) {
+        for ($k = 0; $k -lt $cb.Count; $k++) {
+            if ([object]::ReferenceEquals($ca[$i], $cb[$k])) { $common = $ca[$i]; $ia = $i; $ib = $k; break }
+        }
+        if ($null -ne $common) { break }
+    }
+    if ($null -eq $common) { return $false }
+
+    if ($common -is [System.Management.Automation.Language.IfStatementAst] -or
+        $common -is [System.Management.Automation.Language.SwitchStatementAst] -or
+        $common -is [System.Management.Automation.Language.TryStatementAst]) { return $true }
+
+    if ($common -is [System.Management.Automation.Language.StatementBlockAst] -or
+        $common -is [System.Management.Automation.Language.NamedBlockAst] -or
+        $common -is [System.Management.Automation.Language.ScriptBlockAst]) {
+        $stmtA = if ($ia -gt 0) { $ca[$ia - 1] } else { $null }
+        $stmtB = if ($ib -gt 0) { $cb[$ib - 1] } else { $null }
+        if ($a.Line -lt $b.Line) { $firstStmt = $stmtA; $firstAst = $a.Ast }
+        else { $firstStmt = $stmtB; $firstAst = $b.Ast }
+        if ($null -ne $firstStmt -and $firstStmt -is [System.Management.Automation.Language.IfStatementAst]) {
+            return (Ledger-BranchLeaves $firstStmt $firstAst)
+        }
+    }
+    return $false
+}
+
+# Does the arm of $ifStmt that contains $node end in return/throw/break/continue?
+function Ledger-BranchLeaves($ifStmt, $node) {
+    $bodies = @()
+    foreach ($clause in $ifStmt.Clauses) { $bodies += $clause.Item2 }
+    if ($null -ne $ifStmt.ElseClause) { $bodies += $ifStmt.ElseClause }
+    $chain = Ledger-Ancestors $node
+    foreach ($body in $bodies) {
+        $inside = $false
+        foreach ($anc in $chain) { if ([object]::ReferenceEquals($anc, $body)) { $inside = $true; break } }
+        if (-not $inside) { continue }
+        $stmts = @($body.Statements)
+        if ($stmts.Count -eq 0) { return $false }
+        $last = $stmts[$stmts.Count - 1]
+        return ($last -is [System.Management.Automation.Language.ReturnStatementAst] -or
+            $last -is [System.Management.Automation.Language.ThrowStatementAst] -or
+            $last -is [System.Management.Automation.Language.BreakStatementAst] -or
+            $last -is [System.Management.Automation.Language.ContinueStatementAst])
+    }
+    return $false
+}
+
+# The harness row is written once per suite BY DESIGN (fifteen rows, plan section 5.4,
+# "not deduplicable"). It is therefore the one name exempt from repo-wide uniqueness, and
+# the exemption is DERIVED -- a name whose registration site is in _workspace.ps1 --
+# rather than a hand-maintained list that could go stale.
+function Ledger-HarnessNames($sites) {
+    $names = @{}
+    foreach ($s in @($sites | Where-Object { -not $_.Dynamic -and $_.Suite -eq '_harness' })) { $names[$s.Check] = $true }
+    return $names
+}
+
+function Ledger-DupProblems($sites) {
+    $problems = @()
+    $named = @($sites | Where-Object { -not $_.Dynamic -and $_.Check -ne '' })
+    foreach ($g in ($named | Group-Object Check)) {
+        if ($g.Count -le 1) { continue }
+        $group = @($g.Group)
+        $where = ($group | ForEach-Object { "$(Split-Path -Leaf $_.File):$($_.Line)" }) -join ' and '
+        # Cross-file first: two suites both writing one name means BOTH survive at runtime
+        # and the census -- which is keyed on the check name -- can only hold one of them.
+        $files = @($group | Select-Object -ExpandProperty File -Unique)
+        if ($files.Count -gt 1) {
+            $problems += "duplicate check name '$($g.Name)' is registered by more than one suite -- $where. baseline.tsv is keyed on the CHECK NAME (plan 5.2), so one of the two cannot be represented at all"
+            continue
+        }
+        $ok = $true
+        for ($i = 0; $i -lt $group.Count -and $ok; $i++) {
+            for ($k = $i + 1; $k -lt $group.Count -and $ok; $k++) {
+                if (-not (Ledger-MutuallyExclusive $group[$i] $group[$k])) { $ok = $false }
+            }
+        }
+        if (-not $ok) {
+            $problems += "duplicate check name '$($g.Name)' is registered twice in one suite and the sites are NOT mutually exclusive -- $where. The second write overwrites the first: the tally comes out one lower and nothing says so"
+        }
+    }
+    return @($problems)
+}
+
+# ---- the C# destinations -----------------------------------------------------------
+#
+# A moved row's destination names a test METHOD. The last-segment rule (plan 5.2) makes
+# the mapping checkable without trusting the row's author: the final dotted segment must
+# equal old_check character for character. So "does the destination exist" reduces to "is
+# there a method by that name in that project", which a text scan answers on a tree that
+# has never been built -- which is the property dev.ps1 exists for.
+function Ledger-TestMethods([string]$projectDir) {
+    $found = @{}
+    if (-not (Test-Path $projectDir)) { return $found }
+    $keywords = @('return', 'new', 'await', 'if', 'while', 'for', 'foreach', 'switch', 'using', 'lock', 'catch', 'throw')
+    foreach ($f in (Get-ChildItem $projectDir -Recurse -Filter '*.cs' -ErrorAction SilentlyContinue)) {
+        if ($f.FullName -match '\\(bin|obj)\\') { continue }
+        $text = [System.IO.File]::ReadAllText($f.FullName)
+        foreach ($m in [regex]::Matches($text, '(?m)^[ \t]*(?:\[[^\r\n\]]*\][ \t]*)*(?:(?:public|internal|private|protected|static|async|sealed|override|virtual)[ \t]+)*([A-Za-z_][A-Za-z0-9_<>,\.\[\]\?]*)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(')) {
+            if ($keywords -contains $m.Groups[1].Value) { continue }
+            $found[$m.Groups[2].Value] = $f.FullName
+        }
+    }
+    return $found
+}
+
+# The Wire '<id>' { ... } block W7 introduces, normalised: whitespace collapsed, so
+# reindenting is not a rewrite but narrowing an assertion is.
+function Ledger-WireBody([string]$wireId) {
+    foreach ($f in (Get-ChildItem "$repo\tests" -Filter '*.ps1' -ErrorAction SilentlyContinue)) {
+        $tok = $null; $errs = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tok, [ref]$errs)
+        if ($errs -and @($errs).Count -gt 0) { continue }
+        foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+            if ($c.GetCommandName() -ne 'Wire') { continue }
+            if (@($c.CommandElements).Count -lt 3) { continue }
+            $a = $c.CommandElements[1]
+            if ($a -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
+            if ($a.Value -ne $wireId) { continue }
+            return (($c.Extent.Text -replace '\s+', ' ').Trim())
+        }
+    }
+    return $null
+}
+
+# ---- the static rungs ---------------------------------------------------------------
+
+function Ledger-Static {
+    $dir = Ledger-Dir
+    $out = [pscustomobject]@{ Problems = @(); Readings = @(); Sites = @(); Baseline = $null; Added = $null; Wires = $null; Moves = @() }
+
+    $sites = Ledger-ScanChecks
+    $out.Sites = $sites
+    foreach ($p in @($sites | Where-Object { $_.ParseError })) {
+        $out.Problems += "$(Split-Path -Leaf $p.File):$($p.Line) will not parse -- $($p.ParseError)"
+    }
+    $out.Problems += (Ledger-DupProblems $sites)
+
+    $baseline = Ledger-ReadTsv (Join-Path $dir 'baseline.tsv') @('check', 'suite', 'cases')
+    $added = Ledger-ReadTsv (Join-Path $dir 'added.tsv') @('check', 'suite', 'reason')
+    $wires = Ledger-ReadTsv (Join-Path $dir 'wires.tsv') @('wire_id', 'owner_suite', 'owner_check', 'owner_body_sha', 'what_it_proves', 'why_real_machinery')
+    $out.Baseline = $baseline; $out.Added = $added; $out.Wires = $wires
+    $out.Problems += @($baseline.Problems) + @($added.Problems) + @($wires.Problems)
+
+    if (-not $baseline.Present) {
+        $out.Readings += "baseline.tsv: ABSENT -- capture it with 'dev ledger --capture' from a GREEN full run. Every accounting rung that needs it is inert until then"
+    }
+    if (-not $wires.Present) {
+        # W1.2 builds it. A ledger that fell over because a sibling work item has not landed
+        # would be an outage, not an assertion.
+        $out.Readings += "wires.tsv: ABSENT (W1.2) -- wire resolution is skipped, and any row REQUIRING a wire is refused by name below"
+    }
+
+    # THE INTEGRITY PROPERTY. Without it the verdict is green-able by deleting a row, which
+    # is the one edit nobody would notice in a 958-line file. Only appends by --capture, and
+    # edits to suite and cases, are legal.
+    if ($baseline.Present) {
+        $head = @(& git -C $repo show 'HEAD:tests/ledger/baseline.tsv' 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $head.Count -gt 0) {
+            $old = @()
+            foreach ($line in $head) {
+                if ("$line" -eq '' -or "$line".StartsWith('#')) { continue }
+                $f = @("$line" -split "`t")
+                if ($f[0] -eq 'check') { continue }
+                $old += $f[0]
+            }
+            $now = @{}
+            foreach ($r in $baseline.Rows) { $now[$r.check] = $true }
+            $gone = @($old | Where-Object { -not $now.ContainsKey($_) })
+            if ($gone.Count -gt 0) {
+                $tail = if ($gone.Count -gt 5) { ' ...' } else { '' }
+                $out.Problems += "baseline.tsv REMOVED OR ALTERED $($gone.Count) frozen row(s): $(($gone | Select-Object -First 5) -join ', ')$tail. The baseline is FROZEN -- only appends by --capture, and edits to suite/cases, are legal"
+            }
+            $out.Readings += "baseline.tsv: $(@($baseline.Rows).Count) rows, $($old.Count) frozen at HEAD"
+        }
+        else {
+            $out.Readings += "baseline.tsv: $(@($baseline.Rows).Count) rows, NOT YET COMMITTED -- the integrity compare has nothing to compare against until it is"
+        }
+        $seen = @{}
+        $harness = Ledger-HarnessNames $sites
+        foreach ($r in $baseline.Rows) {
+            $key = if ($harness.ContainsKey($r.check)) { "$($r.suite)/$($r.check)" } else { $r.check }
+            if ($seen.ContainsKey($key)) { $out.Problems += "baseline.tsv:$($r._line) repeats the key '$key'" }
+            $seen[$key] = $true
+        }
+    }
+
+    # ---- wires.tsv ----
+    $wireIds = @{}
+    if ($wires.Present) {
+        foreach ($w in $wires.Rows) {
+            if ($wireIds.ContainsKey($w.wire_id)) { $out.Problems += "wires.tsv:$($w._line) repeats wire id '$($w.wire_id)'" }
+            $wireIds[$w.wire_id] = $w
+            if ($w.owner_check -eq '') { $out.Problems += "wires.tsv:$($w._line) has no owner_check"; continue }
+            $hit = @($sites | Where-Object { -not $_.Dynamic -and $_.Check -eq $w.owner_check })
+            if ($hit.Count -eq 0) {
+                $out.Problems += "wires.tsv:$($w._line) names owner_check '$($w.owner_check)', which no suite registers -- deleted, renamed, or misspelled"
+            }
+            elseif ($w.owner_suite -ne '' -and $w.owner_suite -ne '_harness' -and @($hit | Where-Object { $_.Suite -eq $w.owner_suite }).Count -eq 0) {
+                $out.Problems += "wires.tsv:$($w._line) says owner_suite '$($w.owner_suite)' but '$($w.owner_check)' is registered in $(($hit | Select-Object -ExpandProperty Suite -Unique) -join ', ')"
+            }
+            # owner_body_sha is EMPTY until W7 creates the Wire '<id>' { } block it hashes
+            # (plan 3.3.1). Set, with no block to hash, is a misconfiguration and not a pass.
+            if ($w.owner_body_sha -ne '') {
+                $body = Ledger-WireBody $w.wire_id
+                if ($null -eq $body) {
+                    $out.Problems += "wires.tsv:$($w._line) sets owner_body_sha but no Wire '$($w.wire_id)' block exists to hash (the Wire block is W7)"
+                }
+                elseif ((Ledger-Sha $body) -ne $w.owner_body_sha) {
+                    $out.Problems += "wires.tsv:$($w._line) owner_body_sha does not match the Wire '$($w.wire_id)' block -- it was narrowed or rewritten. Re-state the row so a reviewer sees the diff beside the test diff"
+                }
+            }
+        }
+    }
+
+    # ---- moves\<slice>.tsv ----
+    $moveCols = @('old_suite', 'old_check', 'disposition', 'destination', 'wire', 'mutation', 'red_old', 'red_new', 'note')
+    $dispositions = @('moved', 'kept', 'merged', 'stays', 'vacuous-guard', 'renamed')
+    $reasons = @('process-fact', 'git-ref-mutation', 'real-window', 'timing', 'absence-of-process', 'wire-shape', 'harness-hygiene', 'no-seam-yet')
+    $movesDir = Join-Path $dir 'moves'
+    $unitMethods = $null; $uiMethods = $null
+    $claimed = @{}
+    if (Test-Path $movesDir) {
+        foreach ($file in (Get-ChildItem $movesDir -Filter '*.tsv' -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $slice = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+            $t = Ledger-ReadTsv $file.FullName $moveCols
+            $out.Problems += @($t.Problems)
+            foreach ($r in $t.Rows) { $r | Add-Member -NotePropertyName '_slice' -NotePropertyValue $slice }
+            $out.Moves += @($t.Rows)
+
+            foreach ($r in $t.Rows) {
+                $at = "moves\$($file.Name):$($r._line)"
+                if ($dispositions -notcontains $r.disposition) {
+                    $out.Problems += "$at disposition '$($r.disposition)' is outside the closed vocabulary [$($dispositions -join ' ')] -- so it cannot become a shrug (D-T21)"
+                    continue
+                }
+                if ($claimed.ContainsKey($r.old_check)) {
+                    $out.Problems += "$at claims '$($r.old_check)', already claimed by $($claimed[$r.old_check]) -- a name is disposed of exactly once"
+                }
+                $claimed[$r.old_check] = $at
+                if ($baseline.Present -and @($baseline.Rows | Where-Object { $_.check -eq $r.old_check }).Count -eq 0) {
+                    $out.Problems += "$at names '$($r.old_check)', which is in no baseline.tsv row"
+                }
+                # REACHABILITY (D-T6): a check deleted from a .ps1 while its row survives.
+                # Loop-generated names are the one exception, reachable on --live only.
+                $stillThere = @($sites | Where-Object { -not $_.Dynamic -and $_.Check -eq $r.old_check }).Count -gt 0
+                if (@('kept', 'stays', 'vacuous-guard') -contains $r.disposition -and -not $stillThere) {
+                    $out.Problems += "$at is '$($r.disposition)' but no suite registers '$($r.old_check)' any more"
+                }
+                switch ($r.disposition) {
+                    'moved' {
+                        if ($r.mutation -eq '') { $out.Problems += "$at is 'moved' with no mutation -- a move is proved by a PAIRED RED under one checked-in mutant (D-T5)" }
+                        elseif (-not (Test-Path (Join-Path $repo $r.mutation))) { $out.Problems += "$at names mutation '$($r.mutation)', which does not exist" }
+                        if ($r.red_old -eq '' -or $r.red_new -eq '') { $out.Problems += "$at is 'moved' without BOTH recorded reds (red_old, red_new) -- the literal observed failure lines" }
+                    }
+                    'renamed' { if ($r.note -eq '') { $out.Problems += "$at is 'renamed' with no note" } }
+                    'stays' {
+                        if ($r.note -eq '') { $out.Problems += "$at is 'stays' with no note" }
+                        else {
+                            $word = @($r.note -split '[ :,]')[0]
+                            if ($reasons -notcontains $word) { $out.Problems += "$at note begins '$word', which is outside the closed reason vocabulary [$($reasons -join ' ')]" }
+                        }
+                    }
+                    'vacuous-guard' { if ($r.note -eq '') { $out.Problems += "$at is 'vacuous-guard' with no note" } }
+                }
+                if (@('kept', 'merged', 'stays') -contains $r.disposition) {
+                    if ($r.wire -eq '') { $out.Problems += "$at is '$($r.disposition)' and names no wire" }
+                    elseif (-not $wires.Present) { $out.Problems += "$at names wire '$($r.wire)' but tests\ledger\wires.tsv does not exist yet (W1.2)" }
+                    elseif (-not $wireIds.ContainsKey($r.wire)) { $out.Problems += "$at names wire '$($r.wire)', which is in no wires.tsv row" }
+                }
+                if (@('moved', 'renamed', 'merged') -contains $r.disposition -and $r.destination -eq '') {
+                    $out.Problems += "$at is '$($r.disposition)' with no destination"
+                    continue
+                }
+                if (@('moved', 'renamed') -contains $r.disposition) {
+                    $parts = @($r.destination -split ':', 2)
+                    if ($parts.Count -ne 2 -or @('unit', 'ui-unit') -notcontains $parts[0]) {
+                        $out.Problems += "$at destination '$($r.destination)' must be 'unit:<FQN>' or 'ui-unit:<FQN>' -- two prefixes because dev prove --with has to know which project to build"
+                        continue
+                    }
+                    $leaf = @($parts[1] -split '\.')[-1]
+                    $leaf = ($leaf -replace '\(.*$', '')          # a TRX theory row is name(arg: 1)
+                    if ($r.disposition -eq 'moved' -and $leaf -ne $r.old_check) {
+                        $out.Problems += "$at THE LAST-SEGMENT RULE: destination ends '$leaf' but old_check is '$($r.old_check)' -- they must match character for character, so a typo cannot silently orphan a name"
+                    }
+                    if ($parts[0] -eq 'unit') {
+                        if ($null -eq $unitMethods) { $unitMethods = Ledger-TestMethods "$repo\tests\Dodona.Tests" }
+                        if (-not $unitMethods.ContainsKey($leaf)) { $out.Problems += "$at destination method '$leaf' does not exist in tests\Dodona.Tests" }
+                    }
+                    else {
+                        if ($null -eq $uiMethods) { $uiMethods = Ledger-TestMethods "$repo\tests\Dodona.Ui.Tests" }
+                        if (-not $uiMethods.ContainsKey($leaf)) { $out.Problems += "$at destination method '$leaf' does not exist in tests\Dodona.Ui.Tests (that project is created in W3)" }
+                    }
+                }
+                if ($r.disposition -eq 'merged') {
+                    $parts = @($r.destination -split ':', 3)
+                    if ($parts.Count -ne 3 -or $parts[0] -ne 'suite') {
+                        $out.Problems += "$at destination '$($r.destination)' must be 'suite:<suite>:<check>' for a merged row"
+                    }
+                    else {
+                        $survivor = $parts[2]
+                        if (@($sites | Where-Object { -not $_.Dynamic -and $_.Check -eq $survivor }).Count -eq 0) {
+                            $out.Problems += "$at merges into '$survivor', which no suite registers -- a merged row must name a LIVE survivor"
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    $gen = @($sites | Where-Object { $_.Dynamic })
+    if ($gen.Count -gt 0) {
+        $where = (($gen | ForEach-Object { "$(Split-Path -Leaf $_.File):$($_.Line)" }) -join ', ')
+        $out.Readings += "generated names: $($gen.Count) site(s) build their name at runtime ($where) -- reachable on the --live side only (plan 5.4)"
+    }
+    $hn = @((Ledger-HarnessNames $sites).Keys)
+    if ($hn.Count -gt 0) {
+        $out.Readings += "harness rows: $($hn -join ', ') -- written by tests\_workspace.ps1 into EVERY suite's results, so keyed suite+check in baseline.tsv and exempt from repo-wide name uniqueness (plan 5.4: not deduplicable)"
+    }
+    return $out
+}
+
+# ---- the live side -------------------------------------------------------------------
+#
+# RUNTIME KEYS, NOT SOURCE LINES. tests\ledger\README.md rule 2: uniqueness is a property
+# of what a run actually wrote into $results, which is the only authority that agrees with
+# dev.ps1's tally-is-authority rule. A name that exists in a file but never ran counts as
+# nothing -- this repo has been bitten by both halves of that.
+function Ledger-Live($static) {
+    $out = [pscustomobject]@{ Problems = @(); Readings = @(); Suite = @{}; Unit = @{}; Missing = @() }
+    foreach ($s in (AllSuites)) {
+        if ($s -eq 'unit') { continue }
+        $f = "$repo\tests\$s-output\results.json"
+        if (-not (Test-Path $f)) { $out.Missing += $s; continue }
+        # ConvertFrom-Json on a JSON OBJECT gives one PSCustomObject; enumerate its
+        # properties, never pipe it (CLAUDE.md 0.2 -- an array arrives as ONE pipeline item,
+        # a trap that has already turned three acceptance checks into silent no-ops).
+        $obj = (Get-Content $f -Raw) | ConvertFrom-Json
+        $props = @($obj.PSObject.Properties)
+        $keys = @($props | ForEach-Object { $_.Name })
+        $fails = @($props | Where-Object { "$($_.Value)" -like 'FAIL*' } | ForEach-Object { $_.Name })
+        $out.Suite[$s] = [pscustomobject]@{ Keys = $keys; Fails = $fails; When = (Get-Item $f).LastWriteTime }
+    }
+    $trx = "$repo\tests\unit-output\unit.trx"
+    if (Test-Path $trx) {
+        $xml = [xml](Get-Content $trx -Raw)
+        $methods = @{}
+        $failed = @()
+        foreach ($r in @($xml.TestRun.Results.UnitTestResult)) {
+            if ($null -eq $r) { continue }
+            $name = "$($r.testName)"
+            $method = ($name -replace '\(.*$', '')             # a theory row is Method(arg: 1)
+            if (-not $methods.ContainsKey($method)) { $methods[$method] = 0 }
+            $methods[$method] = $methods[$method] + 1
+            if ("$($r.outcome)" -ne 'Passed') { $failed += $name }
+        }
+        $out.Unit = $methods
+        $cases = (@($methods.Values) | Measure-Object -Sum).Sum
+        if ($null -eq $cases) { $cases = 0 }
+        $out.Readings += "unit.trx: $($methods.Count) methods, $cases executed cases, $($failed.Count) not passed"
+        if ($failed.Count -gt 0) { $out.Readings += "unit.trx: NOT PASSED -- $(($failed | Select-Object -First 5) -join ', ')" }
+    }
+    else {
+        $out.Readings += "unit.trx: ABSENT at tests\unit-output\unit.trx -- run 'dev test unit' (Run-Unit writes it)"
+    }
+    if ($out.Missing.Count -gt 0) {
+        $out.Readings += "no results.json for: $($out.Missing -join ', ') -- those suites did not run"
+    }
+
+    # Cross-suite uniqueness at RUNTIME. The harness row is written into every suite's
+    # $results on purpose and is the one derived exemption.
+    $harness = Ledger-HarnessNames $static.Sites
+    $where = @{}
+    foreach ($s in @($out.Suite.Keys)) {
+        foreach ($k in $out.Suite[$s].Keys) {
+            if ($harness.ContainsKey($k)) { continue }
+            if ($where.ContainsKey($k)) {
+                $out.Problems += "check name '$k' was written by TWO suites in this run ($($where[$k]) and $s) -- baseline.tsv is keyed on the check name and can hold only one"
+            }
+            else { $where[$k] = $s }
+        }
+    }
+
+    if ($static.Baseline.Present) {
+        $base = @{}
+        foreach ($r in $static.Baseline.Rows) { $base[$r.check] = $r }
+        $declared = @{}
+        if ($static.Added.Present) { foreach ($r in $static.Added.Rows) { $declared[$r.check] = $r } }
+        $undeclared = @()
+        foreach ($s in @($out.Suite.Keys)) {
+            foreach ($k in $out.Suite[$s].Keys) {
+                if ($base.ContainsKey($k) -or $declared.ContainsKey($k)) { continue }
+                $undeclared += "${s}:$k"
+            }
+        }
+        foreach ($m in @($out.Unit.Keys)) {
+            $leaf = @($m -split '\.')[-1]
+            if ($base.ContainsKey($leaf) -or $declared.ContainsKey($leaf)) { continue }
+            $undeclared += "unit:$m"
+        }
+        if ($undeclared.Count -gt 0) {
+            $tail = if ($undeclared.Count -gt 8) { ' ...' } else { '' }
+            $out.Problems += "$($undeclared.Count) name(s) ran and are in neither baseline.tsv nor added.tsv: $(($undeclared | Select-Object -First 8) -join ', ')$tail. Growth is DECLARED, so a loss cannot hide inside it"
+        }
+    }
+    return $out
+}
+
+# ---- --capture ------------------------------------------------------------------------
+
+function Ledger-Capture($static) {
+    $live = Ledger-Live $static
+    $expected = @((AllSuites) | Where-Object { $_ -ne 'unit' })
+    if ($live.Missing.Count -gt 0) {
+        Abort "capture needs a FULL run: no results.json for $($live.Missing -join ', ')" "powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 gate"
+    }
+    if ($live.Unit.Count -eq 0) {
+        Abort "capture needs the unit TRX: tests\unit-output\unit.trx is absent or empty" "powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit"
+    }
+    $red = @()
+    foreach ($s in $expected) { if ($live.Suite[$s].Fails.Count -gt 0) { $red += "${s}: $($live.Suite[$s].Fails -join ', ')" } }
+    if ($red.Count -gt 0) {
+        # A census taken from a red run freezes names whose meaning nobody has established.
+        foreach ($r in $red) { Say "  RED  $r" }
+        Abort "capture refuses a run with failures -- the baseline is frozen from a GREEN full run, only" "fix the failures, run the gate again, then dev ledger --capture"
+    }
+
+    $rows = @()
+    $existing = @{}
+    $harness = Ledger-HarnessNames $static.Sites
+    if ($static.Baseline.Present) {
+        foreach ($r in $static.Baseline.Rows) {
+            $key = if ($harness.ContainsKey($r.check)) { "$($r.suite)/$($r.check)" } else { $r.check }
+            $existing[$key] = $true
+            $rows += [pscustomobject]@{ check = $r.check; suite = $r.suite; cases = $r.cases }
+        }
+    }
+    $new = 0
+    foreach ($s in $expected) {
+        foreach ($k in @($live.Suite[$s].Keys | Sort-Object)) {
+            $key = if ($harness.ContainsKey($k)) { "$s/$k" } else { $k }
+            if ($existing.ContainsKey($key)) { continue }
+            $existing[$key] = $true
+            $rows += [pscustomobject]@{ check = $k; suite = $s; cases = '1' }
+            $new++
+        }
+    }
+    foreach ($m in @($live.Unit.Keys | Sort-Object)) {
+        $leaf = @($m -split '\.')[-1]
+        if ($existing.ContainsKey($leaf)) { continue }
+        $existing[$leaf] = $true
+        $rows += [pscustomobject]@{ check = $leaf; suite = 'unit'; cases = "$($live.Unit[$m])" }
+        $new++
+    }
+    New-Item -ItemType Directory -Force (Ledger-Dir) | Out-Null
+    Ledger-WriteTsv (Join-Path (Ledger-Dir) 'baseline.tsv') @('check', 'suite', 'cases') @($rows | Sort-Object suite, check)
+    $cases = (@($rows | ForEach-Object { [int]("0" + $_.cases) }) | Measure-Object -Sum).Sum
+    Say "captured $(@($rows).Count) name(s) into tests\ledger\baseline.tsv ($new new)"
+    Say "  suite checks:   $(@($rows | Where-Object { $_.suite -ne 'unit' }).Count)"
+    Say "  unit methods:   $(@($rows | Where-Object { $_.suite -eq 'unit' }).Count)"
+    Say "  executed cases: $cases"
+    Say ""
+    Say "COMMIT IT. A baseline that is not in git has nothing to be frozen against, and the"
+    Say "integrity rung says so on every run until it is."
+}
+
+# ---- --slice / --verdict / --origin ---------------------------------------------------
+
+function Ledger-Slice($static, [string]$name) {
+    $rows = @($static.Moves | Where-Object { $_._slice -eq $name })
+    if ($rows.Count -eq 0) {
+        $known = @($static.Moves | Select-Object -ExpandProperty _slice -Unique)
+        if ($known.Count -gt 0) { Say "no slice '$name' -- known: $($known -join ', ')" }
+        else { Say "no slice '$name' -- tests\ledger\moves\ is empty or absent" }
+        return
+    }
+    Say "slice $name -- $($rows.Count) row(s)"
+    foreach ($d in @('moved', 'merged', 'kept', 'stays', 'vacuous-guard', 'renamed')) {
+        $these = @($rows | Where-Object { $_.disposition -eq $d })
+        if ($these.Count -eq 0) { continue }
+        Say ""
+        Say "  $d ($($these.Count))"
+        foreach ($r in $these) {
+            $proof = switch ($d) {
+                'moved' { if ($r.red_old -and $r.red_new -and $r.mutation) { "PAIRED RED under $($r.mutation)" } else { 'NOT PROVED' } }
+                'merged' { "into $($r.destination) on $($r.wire)" }
+                default { if ($r.wire) { "on $($r.wire)" } else { $r.note } }
+            }
+            Say ("    {0,-58} {1}" -f "$($r.old_suite):$($r.old_check)", $proof)
+        }
+    }
+}
+
+function Ledger-Verdict($static) {
+    $b = $static.Baseline
+    $moves = @($static.Moves)
+    $sites = @($static.Sites | Where-Object { -not $_.Dynamic -and $_.Check -ne '' })
+    $liveNames = @($sites | Select-Object -ExpandProperty Check -Unique)
+    $by = @{}
+    foreach ($d in @('moved', 'kept', 'merged', 'stays', 'vacuous-guard', 'renamed')) { $by[$d] = @($moves | Where-Object { $_.disposition -eq $d }).Count }
+    $accounted = @{}
+    foreach ($r in $moves) { $accounted[$r.old_check] = $true }
+    $unaccounted = 0
+    if ($b.Present) { $unaccounted = @($b.Rows | Where-Object { -not $accounted.ContainsKey($_.check) }).Count }
+
+    $reasonCounts = @{}
+    foreach ($r in @($moves | Where-Object { $_.disposition -eq 'stays' })) {
+        $w = @($r.note -split '[ :,]')[0]
+        if (-not $reasonCounts.ContainsKey($w)) { $reasonCounts[$w] = 0 }
+        $reasonCounts[$w] = $reasonCounts[$w] + 1
+    }
+    $noSeam = if ($reasonCounts.ContainsKey('no-seam-yet')) { $reasonCounts['no-seam-yet'] } else { 0 }
+
+    $frozenAt = "$(& git -C $repo log -1 --format=%h -- 'tests/ledger/baseline.tsv' 2>$null)"
+    if (-not $frozenAt) { $frozenAt = 'NOT COMMITTED' }
+    $baseCount = if ($b.Present) { @($b.Rows).Count } else { 0 }
+    $suiteRows = if ($b.Present) { @($b.Rows | Where-Object { $_.suite -ne 'unit' }).Count } else { 0 }
+    $unitRows = if ($b.Present) { @($b.Rows | Where-Object { $_.suite -eq 'unit' }).Count } else { 0 }
+    $cases = 0
+    if ($b.Present) {
+        $cases = (@($b.Rows | ForEach-Object { [int]("0" + $_.cases) }) | Measure-Object -Sum).Sum
+        if ($null -eq $cases) { $cases = 0 }
+    }
+    $addedCount = if ($static.Added.Present) { @($static.Added.Rows).Count } else { 0 }
+
+    $wireRows = if ($static.Wires.Present) { @($static.Wires.Rows).Count } else { 0 }
+    $wireNote = if ($static.Wires.Present) { '' } else { '   <- wires.tsv does not exist yet (W1.2)' }
+    $surviving = @((AllSuites) | Where-Object { $_ -ne 'unit' }).Count
+    $target = $wireRows + $surviving
+
+    Say "LEDGER"
+    Say ("  baseline            {0} names, frozen at {1}   ({2} suite + {3} unit methods; {4} cases)" -f $baseCount, $frozenAt, $suiteRows, $unitRows, $cases)
+    Say ("  live in suite       {0}" -f $liveNames.Count)
+    Say ("  moved to unit       {0}   (each with a mutant and two recorded reds)" -f $by['moved'])
+    Say ("  merged into         {0}   (each naming a LIVE survivor and a wire)" -f $by['merged'])
+    $rs = @()
+    foreach ($w in @('process-fact', 'git-ref-mutation', 'real-window', 'timing', 'absence-of-process', 'wire-shape', 'harness-hygiene')) {
+        $rs += "$w $(if ($reasonCounts.ContainsKey($w)) { $reasonCounts[$w] } else { 0 })"
+    }
+    Say ("  stays               {0}   by reason: {1}" -f ($by['stays'] + $by['kept']), ($rs -join ', '))
+    Say ("  stays (no-seam-yet)   {0}   <- MUST BE 0, or every one carries an issue number" -f $noSeam)
+    Say ("  vacuous-guard         {0}   (kept and labelled, by decision)" -f $by['vacuous-guard'])
+    Say ("  unaccounted           {0}   <- MUST BE 0" -f $unaccounted)
+    Say ("  added (declared)      {0}" -f $addedCount)
+    Say "INTEGRATION CHECKS"
+    Say ("  wires.tsv rows       {0}{1}" -f $wireRows, $wireNote)
+    Say ("  harness rows         {0}   (one per surviving suite; not deduplicable)" -f $surviving)
+    Say ("  live integration     {0}   target {1}   <- MUST BE <= target" -f $liveNames.Count, $target)
+    Say "DOUBLES"
+    Say "  anchored              -   <- W4 builds the double ledger; there is nothing to read yet"
+    Say "  known divergence      -"
+    Say "  unwitnessed shapes    -"
+    Say "VERDICT: on the accounting above, and only that."
+}
+
+# git log -S over tests\: which commit changed the number of occurrences of a name, and the
+# lines it took with it. The paired red proves CO-SENSITIVITY, not equivalence (plan 5.3) --
+# a check that asserted three things and now asserts one still passes. Closing that gap
+# means READING the old body, so this makes reading it one command rather than archaeology.
+function Ledger-Origin([string]$check) {
+    Say "== origin: $check =="
+    $commits = @(& git -C $repo log --format=%H -S $check -- 'tests/' 2>$null)
+    $commits = @($commits | Where-Object { $_ -match '^[0-9a-f]{7,}$' })
+    if ($commits.Count -eq 0) { Say "no commit under tests\ ever changed the number of occurrences of '$check'"; return }
+    Say "$($commits.Count) commit(s), newest first:"
+    foreach ($c in $commits) {
+        Say ""
+        Say "  $(& git -C $repo log -1 --format='%h %ad %s' --date=short $c 2>$null)"
+        $diff = @(& git -C $repo show $c --format='' --unified=0 -S $check -- 'tests/' 2>$null)
+        foreach ($line in @($diff | Where-Object { "$_" -match [regex]::Escape($check) })) {
+            Say "    $("$line".TrimEnd())"
+        }
+    }
+    Say ""
+    Say "The first commit listed is the one that removed it, if it is gone. git show <sha> for the whole body."
+}
+
+function Do-Ledger {
+    # ValueFromRemainingArguments hands back $null with no arguments, and @($null) has a
+    # Count of ONE (CLAUDE.md 0.2's .Count trap in its other direction) -- so a bare
+    # `dev ledger` came out as one unknown empty argument.
+    $flags = @($Rest | Where-Object { "$_" -ne '' })
+    $wantLive = @($flags | Where-Object { $_ -eq '--live' }).Count -gt 0
+    $wantCapture = @($flags | Where-Object { $_ -eq '--capture' }).Count -gt 0
+    $wantVerdict = @($flags | Where-Object { $_ -eq '--verdict' }).Count -gt 0
+    $slice = ''; $origin = ''; $unknown = @()
+    for ($i = 0; $i -lt $flags.Count; $i++) {
+        $a = $flags[$i]
+        if ($a -eq '--live' -or $a -eq '--capture' -or $a -eq '--verdict') { continue }
+        if ($a -eq '--slice' -and $i + 1 -lt $flags.Count) { $slice = $flags[$i + 1]; $i++; continue }
+        if ($a -eq '--origin' -and $i + 1 -lt $flags.Count) { $origin = $flags[$i + 1]; $i++; continue }
+        $unknown += $a
+    }
+    if ($unknown.Count -gt 0) {
+        Abort "unknown argument(s): $($unknown -join ' ')" "dev ledger [--live] [--capture] [--slice <name>] [--verdict] [--origin <check>]"
+    }
+
+    if ($origin) { Ledger-Origin $origin; Say "log: $log"; return }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    Say "== ledger =="
+    $static = Ledger-Static
+    $problems = @($static.Problems)
+    $readings = @($static.Readings)
+
+    if ($wantCapture) {
+        if ($problems.Count -gt 0) {
+            foreach ($p in $problems) { Say "  $p" }
+            Abort "$($problems.Count) static problem(s) -- capture will not freeze a census over a repo that fails its own rungs" "fix the problems above, then dev ledger --capture"
+        }
+        Ledger-Capture $static
+        Say "log: $log"
+        return
+    }
+
+    if ($wantLive) {
+        $live = Ledger-Live $static
+        $problems += @($live.Problems)
+        $readings += @($live.Readings)
+    }
+
+    foreach ($r in $readings) { Say "  note: $r" }
+    if ($readings.Count -gt 0) { Say "" }
+
+    if ($slice) { Ledger-Slice $static $slice; Say "" }
+    if ($wantVerdict) { Ledger-Verdict $static; Say "" }
+
+    $sw.Stop()
+    if ($problems.Count -eq 0) {
+        if (-not $slice -and -not $wantVerdict) {
+            Say "clean: $(@($static.Sites | Where-Object { -not $_.Dynamic }).Count) registration site(s), no duplicate name, every ledger row resolves"
+        }
+        Say ("{0:N2}s" -f $sw.Elapsed.TotalSeconds)
+        Say "log: $log"
+    }
+    else {
+        foreach ($p in $problems) { Say "  $p" }
+        Say ""
+        Say "$($problems.Count) problem(s)"
+        Say "log: $log"
+        exit 1
+    }
+}
+
 function Do-Help {
     Say "dev.ps1 -- the only door for mechanical work here (CLAUDE.md 0.3 / 1)"
     Say ""
@@ -1910,6 +2759,10 @@ function Do-Help {
     Say "                           Phase 1 earns. Names the six it does not cover yet."
     Say "                           With suite names: a PARTIAL self-test of the gate itself,"
     Say "                           seconds instead of minutes. Never a gate verdict."
+    Say "  ledger [--live] [--capture] [--slice <n>] [--verdict] [--origin <check>]"
+    Say "                           the check-name ledger: every check accounted for, no"
+    Say "                           name lost. STATIC by default -- ~1 s, builds nothing,"
+    Say "                           runs on a tree that will not compile."
     Say "  ship                     build + suites + publish."
     Say "  worktree <name>          a tree of your own under .claude\worktrees\. ALL work"
     Say "                           goes in one: the shared checkout refuses agent writes"
@@ -1936,6 +2789,7 @@ switch ($Verb) {
         else { foreach ($x in $l) { Say "  $x" }; Say ""; Say "$($l.Count) problem(s)"; exit 1 }
     }
     'gate' { Do-Gate }
+    'ledger' { Do-Ledger }
     'ship' { Do-Ship }
     'worktree' { Do-Worktree }
     'help' { Do-Help }
