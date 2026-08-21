@@ -402,6 +402,30 @@ It is written down as a CHECK and not only as prose: it is an `expects-green` ro
 `w3-verify-01.patch`, so if somebody strengthens that check the proof goes OVER-BROAD and says
 so. Prose is not enforcement (0.2's whole lesson, and 3.3.1's).
 
+### The five refusals `--with` adds, and the literal words each one produced
+
+W2's rungs were each broken by hand and the refusal copied out verbatim, because `dev prove`
+cannot judge `dev.ps1` itself. The same standard applies here. Every one of these was run
+against this tree and exits **2**:
+
+| what was wrong | the literal refusal |
+|---|---|
+| a mutant touching a path outside `src\` | `the mutant touches 1 path(s) outside src\: tests/ledger/README.md` / `FIX: a mutant is a DEFECT IN THE PRODUCT; a patch that edits tests\ measures a change against itself` |
+| a mutant header with no `expects-red` | `the mutant names no check to redden: <path>` / `FIX: add at least one  # expects-red: <suite>:<check>  line above the diff (plan W3 delta 6)` |
+| `--with` with nothing after it | `--with needs a patch file` / `FIX: dev prove --with tests\mutants\<slice>-NN.patch [<suite>:<check> ...]` |
+| `dev prove unit <check>`, no `--with` | `the unit suites cannot be proved against a bare HEAD` ... `dev prove --with tests\mutants\<slice>-NN.patch unit:<FQN> <suite>:<old_check>` |
+| a bare `dev prove` on a clean tree | `src and tests are identical to HEAD, so there is no change to prove` / `FIX: make the fix first, leave it uncommitted, then run prove  --  or supply a defect: dev prove --with <patch>` |
+
+The last two are the OLD refusals, re-read on purpose: delta 5 keeps the bare-form refusal and
+delta 2 keeps the dirty-tree guard, and a change that quietly disarmed either would be a proof
+tool that stopped proving. Both still fire, and both now name `--with` as the other road.
+
+**Not proved by hand, and named rather than left to be found:** the `git apply --check` failure
+path (a patch cut against a different commit) and the OVER-BROAD verdict. The first is git's own
+refusal wrapped in a message; the second is `Prove-Judge` reading a declared `expects-green` row
+as FAIL, and it is the same code path as a PROVEN row read the other way up. Neither has been
+seen red.
+
 ### A mutant patch is stored LF and checked out CRLF, and that is FINE -- measured, not assumed
 
 `git add` says `LF will be replaced by CRLF the next time Git touches it` for every file under
