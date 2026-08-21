@@ -107,6 +107,28 @@ nothing while looking installed).
 - Feedback like "that's bullshit" about a proposal is a decision — record it (rejected
   ideas live in `docs/LANE-LIFECYCLE.md` §2 style: *with the reason*) so it is never
   re-proposed.
+- **`..\MassWorks\` IS THE OPERATOR'S, AND YOU DO NOT WORK IN IT** (standing directive,
+  2026-08-21, in their words: *"you're not allowed to mess with the MassWorks project unless
+  it's to investigate something. I asked you to investigate. I will use Dodona for MassWorks,
+  and you can of course investigate from that if I need you to. But you're not doing anything
+  there yourself."*). So, in that directory: no `dodona` command pointed at it, no workspace
+  registered over it, no lane opened in it, no file written there, no repo initialised, no
+  branch touched — **unless the operator has just asked you to look at something specific, and
+  then only the looking they asked for.** They drive Dodona over MassWorks themselves, and two
+  drivers over one project is the same class of hazard as two workspaces over one repo (§5).
+
+  **The incident, which is why this is written down rather than assumed.** A session answering
+  the innocent question *"is Dodona running anything in MassWorks?"* ran `dodona where --root
+  <MassWorks>` — a command §3.2 lists under **commands that observe** — and it **registered
+  MassWorks as a workspace**, writing a row into the concierge registry and creating a state
+  directory. Reverted the same minute with `workspace-forget` and by removing the empty
+  directory it left behind, and the operator's answer was this rule.
+
+  **The general trap, which outlives the MassWorks case: "does not summon a daemon" and "does
+  not write" are DIFFERENT PROPERTIES, and §3.2's list only ever promised the first.** It reads
+  as though it promised both. `where` is the known instance; assume there are others, and check
+  before pointing any `dodona` command at a path the operator did not hand you. Reading a file
+  with `cat` is always safe; a `dodona` verb is not, whatever the list says.
 - **Never hung, halted, stuck, or outdated** (standing directive, 2026-08-18). Anything
   that parks behind a question, waits on a human who did not opt into waiting, or goes
   quietly stale is a bug, not a safety feature. The pattern is always the same: make the
@@ -1109,7 +1131,9 @@ correction, 2026-08-20: an agent reading either half alone will skip the other.
 
 The design docs are copies; the masters live in `..\MassWorks\`. They were copied in
 because a lane works from `<root>\.dodona\wt\t<N>`, where the old `..\MassWorks\` path
-resolves to nothing — see `docs/README.md`.
+resolves to nothing — see `docs/README.md`. **Reading a master there is the ONLY thing you may
+do in that directory** — it is the operator's project, not a place this repo's agents work, and
+§0.1 carries the rule and the incident that produced it.
 
 ## 7. Permissions: a lane cannot ask
 
