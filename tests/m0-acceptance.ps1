@@ -104,7 +104,7 @@ try {
     Set-Content "$out\tail.txt" $tail
     $hits = @(($tail -split "`r?`n") | Where-Object { $_ -match [regex]::Escape($token) -and $_ -match 'result' })
     $results['orphaned_result_landed'] = if ($hits.Count -ge 1) { 'PASS' } else { 'FAIL' }
-    $results['landed_exactly_once']    = if ($hits.Count -eq 1) { 'PASS' } else { "FAIL (count=$($hits.Count))" }
+    $results['orphaned_result_landed_exactly_once'] = if ($hits.Count -eq 1) { 'PASS' } else { "FAIL (count=$($hits.Count))" }
 
     $status = Dodona @("status")
     $results['session_id_recorded'] = if ($status -match 'session=fake-') { 'PASS' } else { 'FAIL' }
