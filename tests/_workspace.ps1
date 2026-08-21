@@ -111,8 +111,14 @@ function Get-WorkspacePaths([string]$dodona, [string]$root) {
     # clean exit (CLAUDE.md §0.2), and `where` deliberately narrates a first-time workspace
     # creation on stderr. Continue here, and read stdout only.
     $ErrorActionPreference = 'Continue'
-    $json = (& $dodona where --root $root --json) | Out-String
-    if (-not $json.Trim()) { throw "dodona where --root $root --json produced nothing" }
+    # --adopt is REQUIRED now and is the whole point of the flag (issue #12). A bare `--root`
+    # used to create the workspace as a side effect of being asked about it, which is how a
+    # command listed under "commands that observe" adopted the operator's other project. The
+    # suites are the one caller that genuinely means "make me one": each hands this function a
+    # fresh empty temp directory as its first dodona call, inside an isolated DODONA_HOME.
+    # Saying so out loud here is what let the default become a refusal everywhere else.
+    $json = (& $dodona where --root $root --adopt --json) | Out-String
+    if (-not $json.Trim()) { throw "dodona where --root $root --adopt --json produced nothing" }
     $w = $json | ConvertFrom-Json
     [pscustomobject]@{
         Id      = $w.id

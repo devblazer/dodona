@@ -411,11 +411,15 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
     # and CREATED a workspace named after whatever folder the daemon happened to spawn that
     # process in -- moving a legacy store into workspace territory on the way.
     #
-    # THIS SITS DELIBERATELY BESIDE THE MIGRATION SET ABOVE, which must keep passing: an
-    # EXPLICIT `--root` still creates (that is what Get-WorkspacePaths passes, and it is the
-    # whole invisible-migration mechanism). The distinction being asserted here is provenance,
-    # not the path -- the same folder either creates or refuses depending on whether anybody
-    # asked for it.
+    # THIS SITS DELIBERATELY BESIDE THE MIGRATION SET ABOVE, which must keep passing: `--root
+    # <p> --adopt` still creates, and it is the whole invisible-migration mechanism. The
+    # distinction being asserted here is provenance, not the path -- the same folder either
+    # creates or refuses depending on whether anybody asked for it.
+    #
+    # THE COMMENT ABOVE USED TO SAY "an EXPLICIT `--root` still creates", and issue #12 is what
+    # that cost. A typed `--root` alone no longer creates: naming a path is not adopting it,
+    # and `--adopt` is how a caller says it means the second thing. Get-WorkspacePaths passes
+    # it; the checks below assert that nothing else gets it for free.
     $stray = Join-Path (Use-SuiteTemp) ("dodona-stray-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force "$stray\.dodona" | Out-Null
     # Shaped like a real legacy store, so "the store did not move" is an assertion about this
@@ -503,6 +507,75 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
         ((($staleOut -replace '\s+', ' ') -match 'names no workspace in this registry') -and
          $staleExit -ne 0 -and $wsStale -eq $wsBefore) `
         "exit=$staleExit workspaces=$wsStale/$wsBefore :: $staleOut"
+
+    # ---- A NAMED `--root` IS NOT AN ADOPTION EITHER (issue #12) --------------------------
+    # The sibling of the D-L9 set above, one provenance along. D-L9 split "nobody said this
+    # path" from "somebody said it" and let the second create. A typed path can be a SUBJECT OF
+    # INQUIRY rather than a DECLARATION OF OWNERSHIP, and nothing distinguished them.
+    #
+    # THE INCIDENT (2026-08-21, commit 2ef0c54): a session asked "is Dodona running anything in
+    # the operator's other project?" and answered it with `dodona where --root <that project>`
+    # -- a command CLAUDE.md §3.2 lists under "commands that observe". It started nothing, and
+    # it registered that folder as a workspace. Had the folder held a legacy `.dodona\store.db`
+    # it would also have MOVED that store out of it and written a file into it.
+    #
+    # The same fixture shape as the stray set above, and for the same reason: a real-looking
+    # legacy store makes "the store did not move" an assertion about this exact file.
+    $named = Join-Path (Use-SuiteTemp) ("dodona-named-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force "$named\.dodona" | Out-Null
+    $namedMarker = "named-store-" + [guid]::NewGuid().ToString('N')
+    Set-Content "$named\.dodona\store.db" $namedMarker
+
+    $namedBefore = WsCount
+    $namedOut = DodonaBare @("where", "--root", $named, "--json")
+    $namedExit = $DODONA_EXIT
+    # COUNT, not just the message -- the same reasoning as `inherited_cwd_creates_no_workspace`
+    # above: a refusal that still wrote a registry row prints exactly the same words.
+    Check 'a_named_root_creates_no_workspace' `
+        ($namedExit -ne 0 -and (WsCount) -eq $namedBefore) `
+        "exit=$namedExit before=$namedBefore after=$(WsCount) :: $namedOut"
+    Check 'a_named_root_does_not_move_a_legacy_store' `
+        ((Test-Path "$named\.dodona\store.db") -and (Get-Content "$named\.dodona\store.db" -Raw).Trim() -eq $namedMarker) `
+        "still there: $(Test-Path "$named\.dodona\store.db")"
+    # A refusal must name what un-sticks it (CLAUDE.md §0.1). Whitespace-normalised first:
+    # PowerShell WRAPS captured native stderr to the console width, so a phrase spanning a
+    # space can match today and fail tomorrow because a path got longer (§0.2).
+    Check 'the_named_root_refusal_names_adopt' `
+        ((($namedOut -replace '\s+', ' ') -match '--adopt')) $namedOut
+
+    # AND IT IS NOT A PROPERTY OF `where`. The adoption was never per-verb: `Client`'s first
+    # statement resolves the workspace, so every verb that talks to a daemon adopted on sight
+    # -- including `status`, which was put on the no-summon list to make it safe and then
+    # reported the workspace it had just invented as ASLEEP. Asserting it through `status`
+    # rather than `where` is what makes this a check about the resolution layer.
+    #
+    # ITS OWN FRESH DIRECTORY, and that is load-bearing rather than tidiness: against the build
+    # this is proved against, the `where` call above ADOPTS $named -- so a `status` reusing it
+    # would find an owner, create nothing, and come back VACUOUS while the bug was still live.
+    $namedS = Join-Path (Use-SuiteTemp) ("dodona-named-s-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force $namedS | Out-Null
+    $namedStatusBefore = WsCount
+    $namedStatusOut = DodonaBare @("status", "--root", $namedS)
+    Check 'a_named_root_creates_no_workspace_for_a_daemon_command' `
+        ((WsCount) -eq $namedStatusBefore) `
+        "before=$namedStatusBefore after=$(WsCount) :: $namedStatusOut"
+
+    # THE OTHER DIRECTION: `--adopt` must still create, or the migration mechanism goes with
+    # the fix. This is the one thing every acceptance suite depends on (Get-WorkspacePaths),
+    # and a change that refused it too would fail sixteen suites at startup with no explanation
+    # of why.
+    #
+    # READ ITS PROOF HONESTLY. `dev prove` reports it PROVEN, and that is an ARTIFACT OF
+    # ORDERING rather than teeth of its own: against the old build the `where` above already
+    # adopted $named, so by here there is nothing left to create and the count does not move.
+    # It is a PIN on a property the old build also had. Do not cite it as evidence that
+    # adoption works -- `migration_moved_the_store` above is that evidence, and it runs through
+    # Get-WorkspacePaths, which is the caller that actually matters.
+    $adoptBefore = WsCount
+    $adoptOut = DodonaBare @("where", "--root", $named, "--adopt", "--json")
+    Check 'an_adopted_root_still_creates' `
+        ($DODONA_EXIT -eq 0 -and (WsCount) -eq ($adoptBefore + 1)) `
+        "exit=$DODONA_EXIT before=$adoptBefore after=$(WsCount) :: $adoptOut"
 
     # ---- creating a workspace cannot quietly take an owned repo with it ----
     DodonaBare @("workspace-create", "--name", "twin", "--member", $solo) | Out-Null

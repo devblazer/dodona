@@ -154,7 +154,9 @@ try {
     New-Item -ItemType Directory -Force "$orphan\.dodona" | Out-Null
     Set-Content "$orphan\.dodona\store.db" "pretend-store"
     # Make it look like a pre-workspace daemon owns it, by holding the legacy ctl pipe name.
-    $legacyPipe = (Dx @('where', '--root', $orphan, '--json'))    # resolves + migrates: no daemon holds it
+    # --adopt: this fixture MEANS to migrate the orphan, and a bare --root stopped creating in
+    # issue #12 (naming a path is not adopting it).
+    $legacyPipe = (Dx @('where', '--root', $orphan, '--adopt', '--json'))  # resolves + migrates: no daemon holds it
     Check 'an_unheld_legacy_store_migrates_normally' ($legacyPipe -match '"store"') $legacyPipe
 
     # ---- THE CONCIERGE ACTUALLY TAKES THE SWAP (issue #9) -------------------------------

@@ -25,14 +25,41 @@ sealed class WorkspaceUnavailable : Exception
 ///
 /// The distinction is a parameter rather than something the resolver infers, because there is
 /// nothing in a path that says whether a person typed it. Every call site has to answer.
+///
+/// **THERE ARE THREE VALUES, AND THERE USED TO BE TWO** (issue #12, 2026-08-21). D-L9 split
+/// "nobody said it" from "somebody said it" and let the second one create, on the reasoning
+/// that a typed path is intentional. It is — but a typed path can be a SUBJECT OF INQUIRY
+/// rather than a DECLARATION OF OWNERSHIP, and nothing in the type system told them apart.
+///
+/// The incident: a session asked "is Dodona running anything in the operator's other project?"
+/// and answered it with `dodona where --root &lt;that project&gt;` — a command CLAUDE.md §3.2 lists
+/// under "commands that observe". `where` started nothing, and it registered that folder as a
+/// workspace. Had the folder held a legacy `.dodona\store.db`, the same call would have MOVED
+/// that store out of it and written a file into it (<see cref="MigrateStore"/>).
+///
+/// And it was never really about `where`. <c>Client</c>'s first statement resolves the
+/// workspace, so EVERY verb that talks to a daemon adopted on sight with a typed
+/// <c>--root</c> — including <c>status</c>, which had been put on the no-summon list to make it
+/// safe, and which then reported the workspace it had just invented as ASLEEP. A per-verb list
+/// cannot fix that: the adoption happens before any verb-specific guard runs. So the fix is
+/// here, at the one place that creates, and it is the same split
+/// <see cref="Paths.NeutralDir"/> vs <c>Paths.NeutralCwd()</c> already makes for a directory:
+/// asking where something is must not be what brings it into being.
 /// </summary>
 enum PathSource
 {
-    /// <summary>Somebody said this path out loud: a typed <c>--root</c>, a path the operator
-    /// wrote in a sentence (concierge rung 0), a folder chosen inside the discovery fence.
-    /// Creating is CORRECT here, and is the whole legacy-store migration mechanism
-    /// (<c>tests/workspace-acceptance.ps1</c>'s migration set, which passes <c>--root</c>).</summary>
+    /// <summary>Somebody asked for this path to be TAKEN ON: <c>--root &lt;p&gt; --adopt</c>, a
+    /// path the operator wrote in a sentence they want acted on (concierge rung 0 under
+    /// <c>route</c>), a folder chosen inside the discovery fence. Creating is CORRECT here, and
+    /// is the whole legacy-store migration mechanism (<c>tests/workspace-acceptance.ps1</c>'s
+    /// migration set, and <c>Get-WorkspacePaths</c>, which both pass <c>--adopt</c>).</summary>
     Explicit,
+
+    /// <summary>Somebody typed this path, and said nothing about owning it: a bare
+    /// <c>--root</c>. Addressing a workspace that already owns the path is fine and is what
+    /// this is for; an UNOWNED one is a REFUSAL naming <c>--adopt</c>, never a creation.
+    /// This is the value that did not exist, and issue #12 is what it cost.</summary>
+    Named,
 
     /// <summary>Nobody said it. It is the process's inherited working directory, which for an
     /// agent in a lane is a folder chosen by the daemon and for a shell is wherever the
@@ -87,18 +114,30 @@ static class WorkspaceResolve
         // It refuses rather than parking behind a question (CLAUDE.md §0.1: never hung,
         // halted, stuck): both un-sticking commands are in the message, and running either
         // one makes the very next invocation succeed.
-        if (source == PathSource.Inherited)
+        // AND A TYPED `--root` NOBODY ASKED TO ADOPT IS A REFUSAL TOO (issue #12). Both
+        // refusals are here, ahead of the legacy-store probe, because a folder holding a
+        // `.dodona\store.db` is exactly the case where creating would also MOVE that store —
+        // and a store must never relocate because somebody asked a question about the folder
+        // it is in.
+        //
+        // They refuse rather than parking behind a question (CLAUDE.md §0.1: never hung,
+        // halted, stuck): every un-sticking command is in the message, and running any one of
+        // them makes the very next invocation succeed.
+        if (source != PathSource.Explicit)
         {
             var have = reg.All();
+            var why = source == PathSource.Inherited
+                ? $"no workspace owns {canonical}, and that path was not asked for — it is just" +
+                  " the folder this process happens to be running in."
+                : $"no workspace owns {canonical}, and naming a path is not the same as adopting it.";
             throw new WorkspaceUnavailable(
-                $"no workspace owns {canonical}, and that path was not asked for — it is just" +
-                " the folder this process happens to be running in.\n" +
+                why + "\n" +
                 "       Creating a workspace is a user action, so Dodona will not invent one here.\n" +
                 (have.Count > 0
                     ? $"       address one:  dodona <command> --workspace <{string.Join("|", have.Take(6).Select(x => x.Name))}>\n"
                     : "       (no workspaces exist yet)\n") +
                 $"       make one:     dodona workspace-create --name <NAME> --member \"{canonical}\"\n" +
-                $"       or say where: dodona <command> --root \"{canonical}\"   (an explicit path DOES create)");
+                $"       or adopt it:  dodona <command> --root \"{canonical}\" --adopt");
         }
 
         var legacyStore = Path.Combine(canonical, ".dodona", "store.db");
@@ -132,7 +171,15 @@ static class WorkspaceResolve
             reg.Event("workspace_migrated", ws.Id, $"from {canonical}");
         }
         else
-            note = $"new workspace \"{ws.Name}\" ({ws.Id}) for {canonical} — undo: dodona workspace-forget --workspace {ws.Id}";
+            // The undo says what it does NOT do, because `workspace-forget` deliberately keeps
+            // the store directory (nothing in this system deletes a transcript, §12) and the
+            // person reading this is undoing something that just happened by surprise.
+            // `WorkspaceCreate` has always said so; this note did not, and it is the note the
+            // issue-#12 incident printed — which is why the operator had to find the leftover
+            // directory by hand.
+            note = $"new workspace \"{ws.Name}\" ({ws.Id}) for {canonical} — " +
+                   $"undo: dodona workspace-forget --workspace {ws.Id}   " +
+                   $"(the store directory {Paths.WorkspaceDir(ws.Id)} is KEPT)";
 
         return new Resolved(reg.ById(ws.Id)!, note);
     }

@@ -174,7 +174,12 @@ async Task<int> Dispatch() => cmd switch
     // exactly one question — which workspace — and holds no lanes, no claims, no tokens.
     "concierge" => await Concierge.RunAsync(opts.ContainsKey("successor")),
     "concierge-status" => Cx(new { cmd = "status" }),
-    "concierge-resolve" => Cx(new { cmd = "resolve", text = string.Join(" ", pos), from = One("from") }),
+    // `--adopt` for the same reason `--root --adopt` needs it (issue #12): rung 0 attaches an
+    // unowned path found in the sentence, and DEBUGGING.md sells this verb as "walk the ladder
+    // and print the verdict as JSON". A query must not be how a folder comes to be adopted, so
+    // the ladder is walked read-only unless the caller says otherwise, and says so with the
+    // same word the CLI uses everywhere else.
+    "concierge-resolve" => Cx(new { cmd = "resolve", text = string.Join(" ", pos), from = One("from"), adopt = opts.ContainsKey("adopt") }),
     // Prompt-first (§4): resolve, WAKE the workspace if it is asleep, and hand the sentence to
     // ITS dispatcher. This is what the shell's input box calls when several workspaces are on
     // screen. Needs no entry in a skip list: workspace resolution is lazy, so a command that
@@ -1591,7 +1596,10 @@ int Client(object request, string? pipeName = null, List<string>? capture = null
         //
         // CLAUDE.md 3.2 exists solely to warn that `dodona status` is not read-only: it summons a
         // daemon, and a summoned daemon runs its warm-up, which spawns the router, the brain and
-        // the compressor pool -- five real `claude -p --model haiku` processes. On 2026-08-19 a
+        // the compressor pool. TWO lanes with no `dodona.json` (router + brain) and FOUR in this
+        // repo, which sets `"compressors": 2` -- this comment said "five" until issue #12 counted
+        // them in `Daemon.cs`, and a wrong number asserted as measured is the thing this file has
+        // a whole section about. On 2026-08-19 a
         // session used it twice as a health check against the operator's LIVE workspace, left a
         // daemon and five model lanes on a machine they believed was idle, and then spent two
         // hours diagnosing its own five leaked shims as "machine contention".
@@ -1615,9 +1623,16 @@ int Client(object request, string? pipeName = null, List<string>? capture = null
                 // just a refusal -- an enforcement that leaves you with no next step is a new way
                 // to be stuck (CLAUDE.md 0.1).
                 isWorkspaceCtl && cmd == "status"
-                    ? $"workspace {wsCache!.Name} is ASLEEP -- nothing was started to answer this. " +
-                      "`dodona where` and `dodona ps` report without starting anything; any command that " +
-                      "needs the daemon (say, tail, lane-start) will summon one."
+                    // BOTH PROPERTIES, because saying only the first is what issue #12 cost.
+                    // This message used to end "`dodona where` and `dodona ps` report without
+                    // starting anything" -- true, and silent about the fact that `where` then
+                    // registered whatever folder you pointed it at. It recommended, by name,
+                    // the command from the incident. A typed `--root` no longer adopts, so the
+                    // recommendation is finally safe; say what it is safe FROM.
+                    ? $"workspace {wsCache!.Name} is ASLEEP -- nothing was started to answer this, " +
+                      "and nothing was created. `dodona where` and `dodona ps` neither start a daemon " +
+                      "nor adopt a folder; any command that needs the daemon (say, tail, lane-start) " +
+                      "will summon one."
                 : isWorkspaceCtl ? $"daemon not running for workspace {wsCache!.Name} (ctl pipe {pipeName})"
                 : pipeName == Instance.CtlPipe(Concierge.Id) ? $"concierge not running (ctl pipe {pipeName})"
                 : pipeName.EndsWith("-ui") ? $"no Dodona UI on pipe {pipeName}"
@@ -1708,7 +1723,7 @@ static (string? cmd, string root, PathSource rootSource, Dictionary<string, List
     var pos = new List<string>();
     for (int i = 0; i < args.Length; i++)
     {
-        if (args[i] == "--root" && i + 1 < args.Length) { root = args[++i]; rootSource = PathSource.Explicit; continue; }
+        if (args[i] == "--root" && i + 1 < args.Length) { root = args[++i]; rootSource = PathSource.Named; continue; }
         if (args[i].StartsWith("--") && boolFlags.Contains(args[i][2..])) { opts[args[i][2..]] = new List<string> { "true" }; continue; }
         if (args[i].StartsWith("--") && i + 1 < args.Length)
         {
@@ -1720,6 +1735,15 @@ static (string? cmd, string root, PathSource rootSource, Dictionary<string, List
         if (cmd is null) { cmd = args[i]; continue; }
         pos.Add(args[i]);
     }
+    // `--adopt` is what turns a NAMED path into an EXPLICIT one — the difference between
+    // asking about a folder and taking it on (issue #12; see PathSource). Resolved after the
+    // loop on purpose: flags may be written in any order, and `--root <p> --adopt` and
+    // `--adopt --root <p>` must mean the same thing.
+    //
+    // The flag is shared with `repo-init --adopt`, deliberately rather than by accident: it
+    // means the same thing in both places — take this on rather than refusing — and it can
+    // only ever matter for a root no workspace owns, which `repo-init` never has anyway.
+    if (rootSource == PathSource.Named && opts.ContainsKey("adopt")) rootSource = PathSource.Explicit;
     return (cmd, root, rootSource, opts, pos);
 }
 

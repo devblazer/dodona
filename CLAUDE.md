@@ -126,9 +126,15 @@ nothing while looking installed).
 
   **The general trap, which outlives the MassWorks case: "does not summon a daemon" and "does
   not write" are DIFFERENT PROPERTIES, and §3.2's list only ever promised the first.** It reads
-  as though it promised both. `where` is the known instance; assume there are others, and check
-  before pointing any `dodona` command at a path the operator did not hand you. Reading a file
-  with `cat` is always safe; a `dodona` verb is not, whatever the list says.
+  as though it promised both.
+
+  **That sentence used to end "assume there are others". There were, and they were counted**
+  (issue #12): the whole command surface was enumerated, and the adoption turned out not to be
+  a property of `where` at all — `Client` resolves the workspace on its first line, so every
+  verb that talks to a daemon adopted on sight with a typed `--root`, `status` included. **It is
+  closed in code now**: `--root` names a path, `--adopt` takes it on, and §3.2 states both
+  properties per command. What is NOT closed is summoning (issue #13). Reading a file with `cat`
+  is always safe; a `dodona` verb is not, whatever the list says.
 - **Never hung, halted, stuck, or outdated** (standing directive, 2026-08-18). Anything
   that parks behind a question, waits on a human who did not opt into waiting, or goes
   quietly stale is a bug, not a safety feature. The pattern is always the same: make the
@@ -923,21 +929,68 @@ no-summon list beside `stop-daemon`: against a sleeping workspace it says so and
 Three checks in `m0` hold it, each proved red — against the old build they read *"a daemon
 appeared: status started one"* and *"lanes went 10 -> 11"*.
 
-None of these start anything:
+### THERE ARE TWO PROPERTIES, AND THIS SECTION USED TO PROMISE ONLY ONE
+
+**"Does not summon a daemon" and "does not write" are DIFFERENT PROPERTIES** (issue #12,
+2026-08-21). The list below used to be headed *"None of these start anything"* — true, and read
+by everyone as though it also meant *nothing happens*. It did not mean that, and the gap had a
+victim: a session answering *"is Dodona running anything in the operator's other project?"* ran
+`dodona where --root <that project>` and **registered that folder as a workspace**. Had the
+folder held a legacy `.dodona\store.db`, the same call would have MOVED that store out of it and
+written a file into it.
+
+**And it was never a property of `where`.** `Client`'s first statement resolves the workspace, so
+**every** verb that talks to a daemon adopted on sight with a typed `--root` — `status` included,
+which had been put on the no-summon list to make it safe and then reported the workspace it had
+just invented as ASLEEP. Five agents enumerated all 63 verbs plus the 19 `ui` subverbs; `ui dump`,
+`stop-daemon`, `swaps`, `ticket-record` and `land-status` were all the same shape. A per-verb list
+could never have fixed it, because the adoption happened before any per-verb guard ran.
+
+**So adoption is closed at the one place that creates, and it is enforcement rather than a
+list.** A typed `--root` NAMES a path; it no longer adopts one. Adopting takes the word:
 
 ```powershell
-dodona status                # now safe: reports ASLEEP rather than waking the workspace
+dodona <command> --root <path>           # addresses the workspace that owns <path>; REFUSES if none does
+dodona <command> --root <path> --adopt   # ...and creates one. The suites pass this; you rarely should
+```
+
+The refusal names `workspace-create` and `--adopt`, so nothing is stuck. `PathSource` carries the
+reasoning, `workspace:a_named_root_creates_no_workspace_for_a_daemon_command` asserts it through
+`status` on purpose — through the resolution layer, not through `where` — and
+`concierge-resolve` needs the same `--adopt`, because rung 0 attaches any existing absolute path
+it finds in a sentence.
+
+**None of these start a daemon, and none of them adopt a folder:**
+
+```powershell
+dodona version [--json]      # what a binary is, including its commit. Writes NOTHING, on any path
+dodona status                # reports ASLEEP rather than waking the workspace
 dodona where [--json]        # ids, paths, pipe names, and whether a daemon is LIVE
-dodona version [--json]      # what a binary is, including its commit
-dodona ps                    # what is actually running, machine-wide
+dodona ps                    # what is actually running, machine-wide — but it REAPS: it deletes
+                             #   stale shim-lane<N>.json for every registered workspace
 dodona land-status <ticket>  # a land in flight or its outcome (R3.5)
 dodona ticket-record <ticket># the ticket's completion record (R4) — a manager POLLS this
 ```
+
+`version` is the only one that writes nothing whatsoever. Every other verb in the CLI opens the
+registry, and **constructing it creates `<DODONA_HOME>\concierge\registry.db`** if absent — inside
+Dodona's own territory, never in a project, but it is a write and this section no longer implies
+otherwise.
 
 **These still summon, deliberately** — bringing the daemon back is what the caller wants, and the
 shims have been buffering the whole time: `say`, `tail`, `input`, `lane-start`, `tickets`, and the
 rest. Reach for one of those when you mean to wake a workspace, and expect the four warm-up
 processes that come with it.
+
+**THE SUMMON HALF IS STILL A HAND-MAINTAINED LIST, AND THE AUDIT FOUND IT LEAKY — that is issue
+#13, not something this section fixed.** The list is a literal `cmd is "stop-daemon" or "status"
+or "land-status" or "ticket-record"` in `Client`, so a verb is safe only if somebody remembered
+to add it. Known to summon while reading like a question: **`swaps`**, **`policy`** (its own
+daemon handler comment says *"Inspectable without spawning anything"*), **`repo-status`**,
+**`claim-check`**, **`token-status`**, **`repos`**, **`questions`**, **`tickets`**, **`tail`**, and
+**every `concierge-*` verb** (`Cx` has exactly one exemption, `concierge-stop`). Two of them also
+write: `repos` and `token-status` INSERT a `merge_token` row through a method called `TokenRead`.
+Until #13 lands, assume a verb summons unless it is in the block above.
 
 **THE CONTROL PIPE IS SERIAL, SO A SLOW HANDLER FREEZES THE WHOLE DAEMON.** One
 `NamedPipeServerStream` instance, `HandleAsync` awaited inline — so for as long as any command is

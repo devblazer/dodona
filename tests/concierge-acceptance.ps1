@@ -75,7 +75,14 @@ function Dx([string[]]$a) {
     $e = if (Test-Path $errFile) { (Get-Content $errFile -Raw) } else { '' }
     ("$o`n$e").Trim()
 }
+# The ladder, walked READ-ONLY. Rung 0 attaches an unowned path found in the sentence, and
+# issue #12 made that an opt-in: this verb is documented as printing a verdict as JSON, and a
+# query must not be how a folder gets adopted. Resolve-Adopt is the form that means it, and
+# the rung-0 checks below use it deliberately -- through `concierge-resolve` rather than
+# `route`, because route also wakes a daemon and delivers the sentence, which is a different
+# thing to be testing.
 function Resolve-Text([string]$text) { (Dx @('concierge-resolve', $text)) | ConvertFrom-Json }
+function Resolve-Adopt([string]$text) { (Dx @('concierge-resolve', $text, '--adopt')) | ConvertFrom-Json }
 function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$name] = if ($cond) { 'PASS' } else { "FAIL $detail".Trim() } }
 
 $cx = $null
@@ -134,13 +141,36 @@ try {
     $r = Resolve-Text "trace the network timeouts cxws:lighthouse"
     Check 'name_does_not_match_inside_a_word' ($r.name -ne 'work') ($r | ConvertTo-Json -Compress)
 
+    # ---- ASKING WHAT THE LADDER WOULD SAY ADOPTS NOTHING (issue #12) --------------------
+    # THE INCIDENT (2026-08-21, commit 2ef0c54): a session asked whether Dodona was running
+    # anything in the operator's other project and answered it with a command documented as an
+    # observation. That folder became a workspace. `concierge-resolve` is the same shape one
+    # verb along -- DEBUGGING.md sells it as "walk the ladder and print the verdict as JSON" --
+    # and rung 0 attaches any existing absolute path it finds in the sentence.
+    #
+    # COUNT THE WORKSPACES, not just the verdict: a rung-0 that attached and then reported
+    # created=false would print exactly what a refusal prints.
+    $peekDir = Join-Path $fenceRoot 'peek'
+    New-Item -ItemType Directory -Force $peekDir | Out-Null
+    # ConvertFrom-Json emits a JSON ARRAY as ONE pipeline item (CLAUDE.md 0.2), so this must
+    # land in a variable before being counted -- @(cmd | ConvertFrom-Json).Count is always 1.
+    function CxWsCount { $all = Dx @('workspaces', '--json') | ConvertFrom-Json; @($all).Count }
+    $peekBefore = CxWsCount
+    $peek = Resolve-Text "clean up the tests in $peekDir"
+    Check 'resolving_a_path_without_adopt_creates_no_workspace' `
+        ((CxWsCount) -eq $peekBefore -and $peek.created -ne $true) `
+        "before=$peekBefore after=$(CxWsCount) :: $($peek | ConvertTo-Json -Compress)"
+    # A refusal that leaves you with no next step is a new way to be stuck (CLAUDE.md 0.1).
+    Check 'resolving_a_path_without_adopt_says_what_would_happen' `
+        (("$($peek.note)" -replace '\s+', ' ') -match 'would adopt') "note=$($peek.note)"
+
     # ---- rung 0: an explicit path short-circuits everything -----------------------------
     # Explicit information NEVER triggers a search (§4): the operator said where.
-    $r = Resolve-Text "clean up the tests in $fenceRoot\bay"
+    $r = Resolve-Adopt "clean up the tests in $fenceRoot\bay"
     Check 'explicit_path_attaches_outright' ($r.rung -eq 'path' -and $r.created -eq $true) ($r | ConvertTo-Json -Compress)
     Check 'explicit_path_is_announced_with_undo' ((Dx @('concierge-feed')) -match 'workspace-forget') ''
     # ...and a second mention of the same path resolves to what it made, without creating again.
-    $r2 = Resolve-Text "and $fenceRoot\bay needs a readme"
+    $r2 = Resolve-Adopt "and $fenceRoot\bay needs a readme"
     Check 'explicit_path_reuses_its_workspace' ($r2.rung -eq 'path' -and $r2.created -eq $false -and $r2.workspace -eq $r.workspace) ($r2 | ConvertTo-Json -Compress)
     Dx @('workspace-forget', '--workspace', $r.workspace) | Out-Null
 

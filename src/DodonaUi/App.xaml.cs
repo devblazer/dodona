@@ -46,10 +46,13 @@ public partial class App : Application
             using var reg = new Registry();
             var ws = workspace is not null
                 ? WorkspaceResolve.ByNameOrId(reg, workspace)
-                // EXPLICIT: the branch above already sent a bare launch to the shell, so
-                // reaching here with no --workspace means --root was on the command line.
-                // There is no inherited-cwd route into the UI at all (D-L9).
-                : WorkspaceResolve.ForPath(reg, root!, PathSource.Explicit).Ws;
+                // NAMED, not Explicit (issue #12): the branch above already sent a bare launch
+                // to the shell, so reaching here with no --workspace means --root was on the
+                // command line — and opening a window on a folder is not a request to adopt
+                // it. There is no inherited-cwd route into the UI at all (D-L9), so the only
+                // way in is a path somebody typed, and a typed path that no workspace owns now
+                // refuses with the message naming `workspace-create`.
+                : WorkspaceResolve.ForPath(reg, root!, PathSource.Named).Ws;
             if (ws is null)
             {
                 MessageBox.Show($"No workspace \"{workspace}\".", "Dodona",

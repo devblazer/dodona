@@ -36,20 +36,42 @@ briefly believed. The daemon refuses to autostart from a source-tree build outpu
 (`Ver.IsSourceTreeBuildOutput`); the shim does not, because it is deliberately dependency-free
 (§13). So this rule is the only thing standing there.
 
-## 3. `dodona status` is NOT read-only — it SUMMONS a daemon
+## 3. A `dodona` verb has TWO ways of not being read-only, and it needs both
 
-A summoned daemon runs its warm-up and spawns the router, brain and compressor pool: **five
-real `claude -p --model haiku` processes** on a machine the operator believed was idle. It
-happened on 2026-08-19, and the session then spent two hours misdiagnosing its own five leaked
-agents as "machine contention".
+**It can SUMMON a daemon.** A summoned daemon runs its warm-up: the router, the brain and the
+compressor pool, each a real `claude -p --model haiku` lane. That is **two** lanes in a folder
+with no `dodona.json` and **four** in this repo — not the "five" this section used to claim,
+which was copied from a code comment that had never been counted. It happened on 2026-08-19:
+a session ran `status` twice as a health check, then spent two hours misdiagnosing its own
+leaked agents as "machine contention".
 
-Safe to observe with — none of these start anything:
+**It can ADOPT a folder.** Different property, and this section used to promise only the first
+one. On 2026-08-21 a session ran `dodona where --root <the operator's other project>` — listed
+right here as safe — and registered that folder as a workspace. With a legacy `.dodona\store.db`
+in it, the same call moves the store out and writes a file in.
+
+Adoption is closed now: **a typed `--root` names a path, it does not adopt one**, and the
+refusal names what to do instead. It takes `--adopt` to create. Summoning is still a
+hand-maintained list, so it is still on you.
+
+Safe to observe with — these neither start a daemon nor adopt a folder:
 
 ```powershell
+dodona version [--json]   # what a binary is. The ONLY verb that writes nothing at all
+dodona status             # reports ASLEEP; no longer summons
 dodona where [--json]     # ids, paths, pipe names, whether a daemon is LIVE
-dodona version [--json]   # what a binary is, including its commit
-dodona ps                 # what is actually running, machine-wide
+dodona ps                 # what is actually running — but it DELETES stale shim-lane<N>.json
+dodona land-status <n>    # a land in flight or its outcome
+dodona ticket-record <n>  # the completion record
 ```
+
+**Everything else summons — including verbs that read like questions**: `swaps`, `policy`,
+`repos`, `tail`, `repo-status`, `claim-check`, `token-status`, `questions`, `tickets`, and every
+`concierge-*` verb. `repos` and `token-status` also write a row. That is issue #13; until it
+lands, assume a verb summons unless it is in the block above.
+
+**And the rule that outlives all of these lists: `cat` is always safe, a `dodona` verb is not.**
+If you are pointing one at a path the operator did not hand you, read what it does first.
 
 ## 4. No machine-wide mutation while a verification is in flight
 

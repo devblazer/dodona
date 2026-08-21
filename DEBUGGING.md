@@ -15,7 +15,8 @@ works**: it resolves to whichever workspace owns that path.
 **Start here, always:**
 
 ```
-dodona where --root <path>          # or --workspace <name|id|alias>
+dodona where --root <path>          # or --workspace <name|id|alias>. A path no workspace
+                                    #   owns REFUSES; --adopt is what creates one (#12)
 dodona where --workspace work --json
 dodona workspaces                   # every workspace, its members, * = daemon running
 ```
@@ -197,7 +198,9 @@ that cap is what keeps it from becoming the serialization point §12 designed ou
 ```
 dodona concierge                      # run it (start-on-demand does this for you)
 dodona concierge-status               # tiers, the fence, every workspace, open questions
-dodona concierge-resolve <text>       # walk the ladder and print the verdict as JSON
+dodona concierge-resolve <text>       # walk the ladder and print the verdict as JSON.
+                                      #   READ-ONLY: rung 0 will not adopt a path it finds
+                                      #   in <text>. Add --adopt if you mean it to (#12)
 dodona concierge-feed                 # the merged-feed spine: the system's voice at group scope
 dodona concierge-questions            # rung-4 questions still waiting
 dodona concierge-answer <id> <name|new:NAME>    # answer one, and TEACH an alias

@@ -206,7 +206,7 @@ sealed class Concierge
 
             case "resolve":
             {
-                var v = await ResolveAsync(e.GetProperty("text").GetString()!, Opt(e, "from"));
+                var v = await ResolveAsync(e.GetProperty("text").GetString()!, Opt(e, "from"), mayAdopt: Flag(e, "adopt"));
                 w.WriteLine(JsonSerializer.Serialize(new
                 {
                     rung = v.Rung, workspace = v.WorkspaceId, name = v.WorkspaceName,
@@ -411,6 +411,13 @@ sealed class Concierge
     static string? Opt(JsonElement e, string prop) =>
         e.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is { Length: > 0 } s ? s : null;
 
+    /// <summary>A flag the CLI sent as a JSON boolean. Absent reads as FALSE, which is the
+    /// safe direction for every flag that exists to permit something (issue #12): an older
+    /// client that does not know the word gets the read-only behaviour, never the adopting
+    /// one.</summary>
+    static bool Flag(JsonElement e, string prop) =>
+        e.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.True;
+
     static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
 
     // =====================================================================================
@@ -424,7 +431,13 @@ sealed class Concierge
     // in the doc's §2.1.
     // =====================================================================================
 
-    async Task<Verdict> ResolveAsync(string text, string? from)
+    /// <param name="mayAdopt">Whether rung 0 is allowed to ADOPT an unowned path it finds in
+    /// the sentence. True for <c>route</c>, where the operator wrote that path in something
+    /// they want acted on. FALSE for <c>concierge-resolve</c>, which DEBUGGING.md describes as
+    /// "walk the ladder and print the verdict as JSON" — and which, before issue #12, would
+    /// register a folder as a workspace (and move a legacy store out of it) because somebody
+    /// asked it what the ladder would say. A query must not be how a thing comes to exist.</param>
+    async Task<Verdict> ResolveAsync(string text, string? from, bool mayAdopt)
     {
         var sw = Stopwatch.StartNew();
         using var reg = new Registry();
@@ -451,6 +464,12 @@ sealed class Concierge
             // EXPLICIT, and this is the sharp end of D-L9: the operator wrote the path in the
             // sentence, so this creation is a user action in the fullest sense. It is the one
             // creating route that has nothing to do with `--root`.
+            // …unless the caller is only ASKING what the ladder would say (issue #12). Reported
+            // as the verdict it would have reached, with `created` false, so the answer is still
+            // useful and the folder is still the operator's.
+            if (!mayAdopt)
+                return Done(new Verdict("path", null, null, "would-adopt", Created: false,
+                    Note: $"{path} is in no workspace — `route` would adopt it. Nothing was created."));
             try
             {
                 var made = WorkspaceResolve.ForPath(reg, path, PathSource.Explicit);
@@ -627,7 +646,7 @@ sealed class Concierge
     async Task<List<string>> RouteAsync(string text, string? from)
     {
         var lines = new List<string>();
-        var v = await ResolveAsync(text, from);
+        var v = await ResolveAsync(text, from, mayAdopt: true);
 
         if (v.WorkspaceId is null)
         {
