@@ -280,16 +280,40 @@ sealed class LaneRuntime
         }
     }
 
+    /// <summary>THE LANE BRIEFING, REPEATED ON EVERY TURN (docs/LANE-BRIEFING-PLAN.md B2), or
+    /// null for a lane that gets none. Prefixed to what is SENT and to nothing else.
+    ///
+    /// Static for the life of the lane on purpose: the facts in it (own worktree or shared
+    /// checkout, which branch, which delivery mode) do not change while the lane runs, and
+    /// per-turn plumbing to attach CHANGING facts was considered and rejected (plan §6). It is
+    /// set at BOTH `LaneRuntime` construction sites -- the spawn and reconcile's adoption -- for
+    /// the reason `HookTurnEnd` carries in full: a daemon restarts on every publish and hot swap,
+    /// so anything wired only at spawn simply stops happening for every lane the operator already
+    /// had. Fully covered and dead in production is §3's routing ladder exactly.</summary>
+    public string? TurnBriefing { get; set; }
+
+    /// <summary>SEND AND RECORD ARE NOT THE SAME STRING, AND THAT IS THE WHOLE OF B2.
+    ///
+    /// This wrote one string to two destinations: the pane row the operator reads, and the
+    /// agent. So a briefing prefixed naively would land in the operator's feed on every message
+    /// they ever send -- and in the compressor's input as well, since selective compression reads
+    /// panes. What the agent gets is the briefing plus the operator's words; what the pane, the
+    /// feed, the `say` event and the compressor get is the operator's words alone.
+    ///
+    /// Every way into a lane funnels through here -- `input`, `ui type`, `ui compose` + Enter,
+    /// dictation, the router's delivery, `AskAsync` -- so there is no call site that can forget,
+    /// which is the correction `DaemonClient.Send` needed for start-on-demand (CLAUDE.md §3.1).</summary>
     public void Say(string text)
     {
         if (_writer is null || !Connected) throw new InvalidOperationException($"lane {Id} not connected");
         _store.PaneEvent(Id, "user_input", text, null, null);
         _store.Event("say", Id, text);
         _store.LanePresence(Id, "working…");
+        var sent = TurnBriefing is { Length: > 0 } brief ? brief + text : text;
         var msg = JsonSerializer.Serialize(new
         {
             type = "user",
-            message = new { role = "user", content = new object[] { new { type = "text", text } } },
+            message = new { role = "user", content = new object[] { new { type = "text", text = sent } } },
         });
         _writer.WriteLine(msg);
     }

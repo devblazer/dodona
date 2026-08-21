@@ -23,6 +23,10 @@ using System.Text.RegularExpressions;
 //   cwd           — the result event carries this process's OWN working directory. How a check
 //                   sees WHERE an agent really is, rather than where the store says it was
 //                   meant to be (LOCATIONS-PLAN Phase 2).
+//   brief         — the result event carries the LANE BRIEFING this turn arrived with, or
+//                   `(none)`. The only witness to what was really DELIVERED, which is the
+//                   divergence B2 is: the pane records the operator's words, the agent gets the
+//                   briefing as well (docs/LANE-BRIEFING-PLAN.md B2).
 //
 // DODONA_LANE_ROLE=compressor makes it answer in the compressor's fixed JSON schema (§5)
 // instead, deterministically shortening whatever it was given. That keeps selective
@@ -79,6 +83,29 @@ while ((line = Console.ReadLine()) is not null)
         text = d.RootElement.GetProperty("message").GetProperty("content")[0].GetProperty("text").GetString() ?? "";
     }
     catch { continue; }
+
+    // THE BRIEFING IS STRIPPED BEFORE ANYTHING ELSE READS THE TEXT, and that is what keeps every
+    // other check in every suite unchanged: `working on: {text}` and `done: {text}` are what a
+    // dozen assertions and the whole compression suite are written against, and a prefix riding
+    // in on all of them would have rewritten the meaning of all of them. It is also honest -- a
+    // real agent does not echo its own instructions back.
+    //
+    // `[/DISPATCHER]` must match `Dodona.Briefing.TurnEnd`. There is no shared constant because
+    // this project deliberately references nothing; the drift is caught instead by the check that
+    // proves the feature (m1 `the_briefing_reaches_a_ticket_agent`), which reads `(none)` and goes
+    // red the moment the two disagree. The closing marker is REQUIRED, so `RouteInput`'s misroute
+    // retraction -- which is `[DISPATCHER] `-prefixed and has no closing marker -- is left alone.
+    const string BriefEnd = "[/DISPATCHER]";
+    var brief = "";
+    if (text.StartsWith("[DISPATCHER] ", StringComparison.Ordinal))
+    {
+        var end = text.IndexOf(BriefEnd, StringComparison.Ordinal);
+        if (end >= 0)
+        {
+            brief = text[.. end].Trim();
+            text = text[(end + BriefEnd.Length) ..].TrimStart('\r', '\n');
+        }
+    }
 
     if (asRouter)
     {
@@ -499,13 +526,18 @@ while ((line = Console.ReadLine()) is not null)
     // the SHIM's WorkingDirectory and the shim hands its own cwd to the child, so this is the
     // OS's answer about the agent itself, at the far end of that chain.
     var cwdq = Regex.IsMatch(text.Trim(), @"^cwd$");
+    // brief — the result IS the briefing this turn arrived with. Same reasoning as env:NAME one
+    // step further out: what the daemon PREFIXED is observable nowhere else, because the pane
+    // deliberately does not record it and the wire is inside the shim.
+    var briefq = Regex.IsMatch(text.Trim(), @"^brief$");
     var say = Regex.Match(text, @"say\s+(.+)$");
     Emit(new
     {
         type = "result",
         subtype = "success",
         session_id = sessionId,
-        result = cwdq ? Environment.CurrentDirectory
+        result = briefq ? (brief.Length > 0 ? brief : "(none)")
+               : cwdq ? Environment.CurrentDirectory
                : envq.Success ? (Environment.GetEnvironmentVariable(envq.Groups[1].Value) ?? "(unset)")
                : say.Success ? say.Groups[1].Value.Trim()
                : $"done: {text}",

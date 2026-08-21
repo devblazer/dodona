@@ -676,6 +676,11 @@ sealed class Daemon
             var lanePipe = l.Pipe ?? "";
             var rt = new LaneRuntime(l.Id, lanePipe, _store);
             HookTurnEnd(rt, l.Role);
+            // AND THE SECOND OF THE TWO WIRING SITES (B2). A daemon restarts on every publish
+            // and hot swap, so a briefing wired only at the spawn would be absent from every
+            // lane the operator already had -- which is the failure mode `HookTurnEnd` is
+            // directly above this line to avoid, in a second costume.
+            rt.TurnBriefing = BriefingFor(l.Id, l.Role, l.Cwd ?? "");
             // A WORK lane gets the patient retry: it may hold a real agent mid-turn, and a
             // successor is adopting shims the predecessor only just let go of. A UTILITY lane
             // gets one attempt — a brain, router or compressor whose pipe does not answer
@@ -3890,6 +3895,35 @@ sealed class Daemon
         $"You are a lane agent operated by the Dodona orchestrator, working ticket {tid}: \"{title}\".\n" +
         Briefing.Ticket(tid, branch, pr);
 
+    /// <summary>WHICH TICKET A LANE IS WORKING, RESOLVED BY WORKING DIRECTORY rather than by the
+    /// lane link, and extracted so the write gate and the briefing cannot answer it differently.
+    ///
+    /// Not a preference: `ticket-agent` calls `TicketSetLane` AFTER the spawn returns, so at
+    /// spawn time the link does not exist yet, and matching on it silently produced a ticket lane
+    /// with no `--ticket` -- m1's two gate checks red. A ticket lane's cwd IS its worktree (pinned
+    /// by `m3:186-187` and `LaneCwdPrecedenceTests`), so the directory answers it with no ordering
+    /// to get wrong. The lane link is still consulted, for a respawn whose recorded cwd drifted.</summary>
+    Store.TicketRow? TicketOfLane(long laneId, string workDir) =>
+        _store.Tickets().FirstOrDefault(t => t.State == "open" &&
+            (t.LaneId == laneId ||
+             (t.Worktree.Length > 0 && workDir.Length > 0 && Paths.SamePath(t.Worktree, workDir))));
+
+    /// <summary>The per-turn briefing for one lane, or null when the lane gets none (B2).
+    ///
+    /// **WORK LANES ONLY, and the test is the same `role != "work"` `HookTurnEnd` uses**, for the
+    /// same reason rather than a parallel one: a router, brain or compressor session touches no
+    /// git, holds no ticket and runs in the neutral directory, so a block on every one of its
+    /// turns would be tokens spent for ever on a question whose answer is always "none of this
+    /// applies to you" (CLAUDE.md §0.1, quota).</summary>
+    string? BriefingFor(long laneId, string role, string workDir)
+    {
+        if (role != "work") return null;
+        var t = TicketOfLane(laneId, workDir);
+        return Briefing.Turn(t is null
+            ? Briefing.Plain(workDir)
+            : Briefing.Ticket(t.Id, t.Branch, TicketIsPr(t)));
+    }
+
     /// <summary>Is this ticket's REPOSITORY a `delivery: pr` one (R7 / D-R28)? Keyed on the
     /// repository and not on the project, because every other pr refusal in this file is
     /// (`land`, `token-request`, the approval question) -- and a briefing that disagreed with
@@ -4000,9 +4034,7 @@ sealed class Daemon
             // `m3:186-187` and `LaneCwdPrecedenceTests`), so the directory answers it with no
             // ordering to get wrong. The lane link is still consulted, for a respawn whose
             // recorded cwd has drifted.
-            var t = _store.Tickets().FirstOrDefault(t => t.State == "open" &&
-                        (t.LaneId == id ||
-                         (t.Worktree.Length > 0 && Paths.SamePath(t.Worktree, workDir))));
+            var t = TicketOfLane(id, workDir);
             var gate = DeployGate(id, t?.Id ?? 0, t?.Worktree);
             // THE FILE IS WRITTEN FOR EVERY WORK LANE; THE FLAG IS ONLY FOR A REAL CLAUDE.
             // Splitting the two is what gives this a model-free surface: `IsClaude` is false
@@ -4075,6 +4107,7 @@ sealed class Daemon
 
         var rt = new LaneRuntime(id, pipe, _store);
         HookTurnEnd(rt, role);
+        rt.TurnBriefing = BriefingFor(id, role, workDir);
         if (await rt.ConnectAndPumpAsync(attempts: 20))
         {
             _lanes[id] = rt;

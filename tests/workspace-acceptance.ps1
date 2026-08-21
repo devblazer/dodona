@@ -1140,7 +1140,23 @@ PRAGMA user_version = 8;
     function P3Classified() { [int](P3Rows "SELECT COUNT(*) FROM events WHERE kind='classified_project'").Trim() }
     function P3Chosen() { (P3Rows "SELECT detail FROM events WHERE kind='project_chosen' ORDER BY id DESC LIMIT 1").Trim() }
     function P3NewestWorkLane() { (P3Rows "SELECT id FROM lanes WHERE role='work' ORDER BY id DESC LIMIT 1").Trim() }
-    function P3Cwd([string]$lane) { (P3Rows "SELECT cwd FROM lanes WHERE id=$lane").Trim() }
+    # A LANE ID IS NOT ALWAYS THERE, AND A MISSING ONE USED TO TAKE THE WHOLE SUITE DOWN.
+    # An empty `$lane` makes the SQL `... WHERE id=`, python raises OperationalError("incomplete
+    # input"), `Invoke-StoreSql` throws, and the throw tears straight out of the try block: NO
+    # TALLY LINE -- which `dev.ps1` counts as a failed suite and which reports nothing about the
+    # checks that did run -- and **24 shims left alive** for the wrapper to reap, because
+    # `Stop-WorkspaceShims` is in the part of the script that never ran. Measured in a full `dev
+    # gate` wave on 2026-08-21, from a rung whose lane had not appeared yet.
+    #
+    # Six call sites hand this the raw result of `P3NewestWorkLane`; exactly one of them guarded
+    # it, with `-1`. A guard five call sites can forget is not a guard, so it lives here, and it
+    # returns empty rather than throwing: the check that asked then fails on its own terms and
+    # prints what it actually saw, which is a better diagnosis than a stack trace (0.1, and the
+    # same reason `Wait-Until` returns $false instead of throwing).
+    function P3Cwd([string]$lane) {
+        if ($lane -notmatch '^-?\d+$') { return '' }
+        (P3Rows "SELECT cwd FROM lanes WHERE id=$lane").Trim()
+    }
     P3 @("router-start", "--child", $fake) | Out-Null
     Wait-Until { (P3Rows "SELECT COUNT(*) FROM lanes WHERE role='router' AND state='alive'").Trim() -eq '1' } `
         25000 'the ladder workspace has a warm classifier' | Out-Null
@@ -1426,16 +1442,31 @@ PRAGMA user_version = 8;
     # Every rung that places a lane records which evidence decided. "The operator said so" is
     # evidence like any other, and without this row the ONE rung a person actually answered would
     # be the only rung with nothing saying why the lane is where it is.
+    #
+    # WAITED FOR, THEN CAPTURED ONCE. This asserted on `(P3Chosen)` and printed a SECOND
+    # `(P3Chosen)` -- 84c0002's lesson, and it went red in a full wave on 2026-08-21 with a detail
+    # that CONTAINED the string the condition had just failed to find. The row is written on the
+    # daemon's side of the answer and the wait above is satisfied by the LANE appearing, so under
+    # load the two queries straddled it: the condition read the previous rung's row, and the
+    # detail -- one python process start later -- read the new one. A check whose FAIL text
+    # disproves the FAIL is the worst kind of red there is.
+    $chosen = ''
+    Wait-Until {
+        $script:chosen = P3Chosen
+        $script:chosen -match 'rung=answered'
+    } 20000 'the answered rung recording which evidence decided' | Out-Null
     Check 'the_answered_rung_records_that_the_operator_decided' `
-        ((P3Chosen) -match 'rung=answered how=operator') (P3Chosen)
+        ($chosen -match 'rung=answered how=operator') $chosen
     # Two routing rows for one sentence, and both are true: it WAS asked about (tier `ask`, no
     # lane), and it WAS then delivered (tier `answered`, to the lane the answer created).
+    # Captured once for the same reason, and with the columns the detail needs, so the assertion
+    # and the report are one reading of one row.
+    $lastRoute = (P3Rows "SELECT tier, confidence, delivered_lane FROM routing_decisions ORDER BY id DESC LIMIT 1").Trim()
     Check 'the_answered_delivery_joins_the_routing_chain' `
-        ((P3Rows "SELECT tier, confidence FROM routing_decisions ORDER BY id DESC LIMIT 1") -match 'answered\|operator') `
-        (P3Rows "SELECT tier, confidence, delivered_lane FROM routing_decisions ORDER BY id DESC LIMIT 1")
+        ($lastRoute -match 'answered\|operator') $lastRoute
+    $q4row = ((P3Rows "SELECT state, answer FROM questions WHERE id=$q4id") -replace '\s+', ' ').Trim()
     Check 'answering_closes_the_question_row' `
-        ((P3Rows "SELECT state, answer FROM questions WHERE id=$q4id") -match "answered\|$([regex]::Escape($p3.BLeaf))") `
-        ((P3Rows "SELECT state, answer FROM questions WHERE id=$q4id") -replace '\s+', ' ')
+        ($q4row -match "answered\|$([regex]::Escape($p3.BLeaf))") $q4row
 
     Stop-WorkspaceShims $p3.Dir
     DodonaBare @("stop-daemon", "--workspace", $p3.Id) | Out-Null

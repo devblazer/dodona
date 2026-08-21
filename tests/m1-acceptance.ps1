@@ -1025,6 +1025,92 @@ for k, d in db.execute('SELECT kind, detail FROM events ORDER BY id'):
     $refP = (Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='land_refused_pr_mode'").Trim()
     Check 'the_pr_refusal_is_recorded' ($refP -match "ticket $tPid") "[$refP]"
 
+    # ---- 11b. the lane briefing reaches the agent and NOT the operator (LANE-BRIEFING-PLAN B2) ----
+    #
+    # DELIVERED, NOT DISPLAYED, and that divergence IS B2. `LaneRuntime.Say` used to write one
+    # string to two destinations -- the pane row the operator reads, and the agent -- so a briefing
+    # prefixed the obvious way would land in the operator's feed on every message they ever send,
+    # and in the compressor's input with it, because selective compression reads panes.
+    #
+    # THE AGENT IS THE ONLY WITNESS to what was really delivered: the pane deliberately does not
+    # record it and the wire lives inside the shim. That is what the fake agent's `brief` directive
+    # is for, and why it answers `(none)` rather than staying silent -- a check that timed out
+    # could not tell "no briefing" from "no turn".
+    Dodona @("say", "$lanePid", "brief") | Out-Null
+    $briefRow = ''
+    Wait-Until {
+        $script:briefRow = (Invoke-StoreSql $storeDb "SELECT body FROM pane_events WHERE lane_id=$lanePid AND kind='result' AND (body LIKE '%Dodona system%' OR body='(none)') ORDER BY id DESC LIMIT 1").Trim()
+        $script:briefRow -ne ''
+    } 25000 "the pr ticket lane reporting the briefing it was delivered" | Out-Null
+    # Captured ONCE and flattened once, then asserted and reported on the same value -- 84c0002's
+    # lesson, plus CLAUDE.md 0.2: a plain `function f([string]$x)` swallows extra arguments into
+    # `$args`, so `$(Rows "..." -replace ...)` runs the query and silently never replaces. The
+    # flattening is not cosmetic either: the briefing is six lines, and an unflattened FAIL detail
+    # is unreadable at exactly the moment it has to be read.
+    $briefFlat = (($briefRow -replace '\s+', ' ')).Trim()
+    Check 'the_briefing_reaches_a_ticket_agent' `
+        ($briefFlat -match "worktree for ticket $tPid" -and $briefFlat -match "ticket/$tPid" -and $briefFlat -match 'git stash') "[$briefFlat]"
+    # R7 / D-R28 REACHES THE AGENT BEFORE THE REFUSAL DOES. Every other check in section 11 is
+    # about what Dodona STOPS doing in a pr repo; this is the one that says the lane was told,
+    # rather than left to discover it by being refused by `land` or `token-request`.
+    Check 'a_pr_lane_is_told_dodona_will_not_merge' `
+        ($briefFlat -match 'will not merge' -and $briefFlat -match "ticket-record $tPid") "[$briefFlat]"
+
+    # A LANE WITH NO TICKET GETS A DIFFERENT BLOCK, and getting the wrong lane kind's is worse
+    # than getting none: a lane standing in the SHARED checkout, told it has a worktree of its
+    # own, is a lane that will branch in the operator's live tree.
+    #
+    # A FRESH LANE, and not `$plainId`, which is the trap this check walked into while it was
+    # being written: `$plainId` stopped being a plain lane at line ~228, where layer 2 promoted it
+    # into a ticket of its own after the gate refused its write. Its briefing was CORRECT and the
+    # check was wrong -- which is worth the extra lane, because a fixture that drifts under the
+    # feature it is testing produces a red nobody can read.
+    $ground = Dodona @("lane-start", "--title", "GROUND", "--child", "$bin\DodonaFakeAgent.exe")
+    $groundId = if ($ground -match 'lane (\d+)') { $Matches[1] } else { 0 }
+    Dodona @("say", "$groundId", "brief") | Out-Null
+    $groundBriefRow = ''
+    Wait-Until {
+        $script:groundBriefRow = (Invoke-StoreSql $storeDb "SELECT body FROM pane_events WHERE lane_id=$groundId AND kind='result' AND (body LIKE '%Dodona system%' OR body='(none)') ORDER BY id DESC LIMIT 1").Trim()
+        $script:groundBriefRow -ne ''
+    } 25000 "a lane with no ticket reporting the briefing it was delivered" | Out-Null
+    $groundBriefFlat = (($groundBriefRow -replace '\s+', ' ')).Trim()
+    Check 'a_lane_with_no_ticket_is_told_its_checkout_is_shared' `
+        ($groundBriefFlat -match 'SHARED checkout' -and $groundBriefFlat -match 'no ticket' -and $groundBriefFlat -notmatch 'worktree for ticket') "[$groundBriefFlat]"
+
+    # AND A PROMOTED LANE IS RE-BRIEFED (WORK-ISOLATION P2). `$plainId` began in the shared
+    # checkout and layer 2 moved it into a ticket worktree of its own, which respawns it -- so the
+    # briefing has to be rebuilt at the respawn, not carried over from the spawn. The negative is
+    # keyed on 'You have no ticket' and NOT on 'SHARED checkout': PowerShell's -notmatch is
+    # case-INSENSITIVE, and the ticket block's own first bullet says 'The shared checkout ... are
+    # elsewhere' -- so the obvious negative went red against a briefing that was entirely correct.
+    # That is the
+    # whole reason there is ONE builder consumed at every wiring site: a briefing that stayed
+    # plain across a promotion would tell an agent in its own worktree that it must not branch,
+    # which is exactly the ground it just gained.
+    Dodona @("say", "$plainId", "brief") | Out-Null
+    $promotedRow = ''
+    Wait-Until {
+        $script:promotedRow = (Invoke-StoreSql $storeDb "SELECT body FROM pane_events WHERE lane_id=$plainId AND kind='result' AND (body LIKE '%Dodona system%' OR body='(none)') ORDER BY id DESC LIMIT 1").Trim()
+        $script:promotedRow -ne ''
+    } 25000 "the promoted lane reporting the briefing it was delivered" | Out-Null
+    $promotedFlat = (($promotedRow -replace '\s+', ' ')).Trim()
+    Check 'a_promoted_lane_is_re_briefed_as_a_ticket_lane' `
+        ($promotedFlat -match 'worktree for ticket' -and $promotedFlat -notmatch 'You have no ticket') "[$promotedFlat]"
+
+    # AND NONE OF IT IS IN THE OPERATOR'S FEED. One query over both surfaces a person or the
+    # compressor reads back -- the pane row and the `say` event -- because half a leak is a leak.
+    #
+    # VACUOUS AGAINST HEAD BY CONSTRUCTION, and a deliberate control rather than a check nobody
+    # bothered to aim. HEAD has no briefing at all, so nothing can leak there and no code state
+    # makes this red today. What it catches is the ONE implementation of B2 anybody would write
+    # first: `Say` prefixing the string it already passes to both destinations. That version was
+    # built on purpose 2026-08-21 and this check read
+    #     FAIL rows carrying the briefing back to the operator: 9
+    # -- nine rows of Dodona's own boilerplate in the operator's feed, and in the compressor's
+    # input with them, from four `say`s in one suite run.
+    $leaked = (Invoke-StoreSql $storeDb "SELECT (SELECT COUNT(*) FROM pane_events WHERE kind='user_input' AND body LIKE '%Dodona system%') + (SELECT COUNT(*) FROM events WHERE kind='say' AND detail LIKE '%Dodona system%')").Trim()
+    Check 'the_briefing_is_never_in_the_operators_feed' ($leaked -eq '0') "rows carrying the briefing back to the operator: $leaked"
+
     # AND IT IS THE FIELD, NOT THE TICKET. Without this the checks above would read identically
     # if pr mode had simply broken landing for everybody.
     Set-Content "$root\dodona.json" '{ "main": "main", "verify": ["echo verify-ok"] }'

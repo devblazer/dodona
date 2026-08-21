@@ -292,6 +292,13 @@ Three changes did it, and all three are in `tools/dev.ps1` and `tests/_workspace
   cause is NOT established: ruled out by measurement are the leaked shims, the other window
   suites, and m4's build — it needs the full rolling wave to reproduce. `ui-use` being a
   70-second monolith is the real problem; splitting it is unfinished business.
+  **`voice` has now shown the same signature, and it is a SOLO suite, which narrows it.** In one
+  full `dev gate` on 2026-08-21 it took **70.5 s and went red on three checks** — the mic toggle
+  simply did not take within its 20 s wait — and it was **40.3 s and green** alone minutes later,
+  on the same tree, both ways. Solo means nothing ran beside it, so the crowd is not concurrent
+  suites: it is what a full wave leaves behind it (windows, process starts, or the `\\.\pipe\`
+  namespace) still settling when the next suite opens a window. Treat a red window suite inside a
+  wave as a machine reading until it reproduces alone — and do not raise a budget to cover it.
   `DODONA_TEST_CONCURRENCY` overrides; `dev suites --sequential` is the debugging escape hatch.
 - **`dev test unit`** runs the pure logic — the claim algebra, the policy table, repo
   resolution, path canonicalization, the two routing decisions made in code, the progress
@@ -322,6 +329,7 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 | anything that is a pure function (claims, policy, repo resolution, paths, routing verdicts) | `dev test unit` — ~1 s, no daemon |
 | daemon lifetime, reconnect, drain | `dev test m0` |
 | the write gate, the merge token, the land flow, the completion record | `dev test m1` |
+| a lane's system prompt, or the per-turn lane briefing | `dev test unit m1` |
 | routing, presence, the recorded branch touch | `dev test m2` |
 | the UI as a view over the store | `dev test m3` |
 | publish, hot swap, provenance | `dev test m4 publish` |
@@ -499,7 +507,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 |---|---|
 | `unit` | the pure logic: claim algebra, policy table, repo resolution, canonical paths, the code-only routing decisions |
 | `m0` | daemon death mid-turn, and Phase 3's whole invariant: a wrapper that outlives its agent, a lane with no shim record, the lease, reconcile asking the OS |
-| `m1` | the write gate (layer 1), the merge token, and the land: merge main in, verify, fast-forward, dropped-nothing, and that the whole of it runs **off the control pipe**; plus R4's completion record — one per worktree change and not one per turn, and still produced by a lane the daemon ADOPTED rather than spawned |
+| `m1` | the write gate (layer 1), the merge token, and the land: merge main in, verify, fast-forward, dropped-nothing, and that the whole of it runs **off the control pipe**; plus R4's completion record — one per worktree change and not one per turn, and still produced by a lane the daemon ADOPTED rather than spawned; plus B2's lane briefing — the block reaches the AGENT and never the operator's feed, differs by lane kind, and is rebuilt when layer 2 promotes a lane |
 | `m2` | routing, presence, and what a branch touched (recorded, not judged — the backstop is retired) |
 | `m3` | the UI as a view over the store |
 | `m4` | hot swap (runs a REAL build — the slow one) |
@@ -1018,7 +1026,11 @@ and the `token-request` backstop refusing a branch that touched outside its clai
 ticket lane as bounded to its claim, and do not reintroduce any of them.** The operator's
 decision: two agents about to work on the same file is *"often the case, very often the
 case, and if that is problematic it's the manager's job to say something about it."* Files
-are not the unit of work. Claims survive as an annotation and as a derived signal — what a
+are not the unit of work. **And the ticket lane's system prompt no longer says otherwise** — it
+claimed that boundary to every ticket agent on every turn for a day after R3 removed it, which is
+how long a false sentence survives when nothing reads it back. `unit`'s
+`A_ticket_lane_is_not_told_it_is_bounded_by_its_claim` reads it back now.
+Claims survive as an annotation and as a derived signal — what a
 branch actually touched is `git diff`, recorded at `token-request` for a reviewer to read —
 and the guarantee that remains is the tree, which is the one that was doing the work.
 

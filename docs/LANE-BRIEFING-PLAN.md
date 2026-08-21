@@ -1,7 +1,10 @@
 # The lane briefing — telling an agent what Dodona needs, at the moment it needs it
 
-Status: **B1 built 2026-08-21** (one briefing builder, correct per lane kind; the false claim sentence
-deleted). B2 and B3 below are the rest. Written 2026-08-21 from the operator's brief, after reading the two
+Status: **B1 and B2 built 2026-08-21.** B1: one briefing builder, correct per lane kind, consumed by both
+system prompts; the false claim sentence deleted. B2: the same block on every turn of every work lane,
+delivered to the agent and never recorded in the operator's feed. **B3 is not done** — it is a
+read-through of the remaining refusals and it is the one part of this plan nothing enforces, so it stays
+open here rather than being quietly dropped. Written 2026-08-21 from the operator's brief, after reading the two
 system prompts, the input delivery path and the prompt detector in code at `95f397d`.
 
 This is the general answer to a problem `REVIEW-AND-MERGE-PLAN` R7 solved one instance of. Read
@@ -206,3 +209,48 @@ detector exists for — but it is a **behaviour change to a detector**, so it wa
 its own commit and its own red. §5 already said so; this records that the option was live while the
 block was being written and was deliberately not taken. `A_ticket_prompt_still_names_no_folder`
 pins the current answer so the change cannot happen by accident.
+
+**D-B4. THE BRIEFING IS A FIELD ON `LaneRuntime`, SET AT BOTH WIRING SITES, AND `Say` PREFIXES ONLY
+WHAT IT SENDS.** §1 measured the constraint from the code: `Say` writes one string to the pane row
+and to the agent, so the naive prefix puts Dodona's own boilerplate in the operator's feed on every
+message they ever send — and in the compressor's input with it, since compression reads panes. The
+split lives in `Say` and nowhere else, because every way into a lane funnels through it (`input`,
+`ui type`, `ui compose` + Enter, dictation, the router's delivery, `AskAsync`); a prefix applied at
+call sites would be a rule six callers have to remember, which is the correction `DaemonClient.Send`
+already needed for start-on-demand. **Both** `LaneRuntime` construction sites set it — the spawn and
+reconcile's adoption — for the reason `HookTurnEnd` carries in full: a daemon restarts on every
+publish and hot swap, so anything wired only at the spawn stops happening for every lane the operator
+already had.
+
+**D-B5. THE BLOCK IS A SNAPSHOT TAKEN WHEN THE LANE'S SHIM IS ATTACHED, NOT A LIVE READING.** It is
+rebuilt at every spawn, every respawn and every adoption, so a promotion (layer 2) or a `lane-respawn`
+re-briefs correctly — `a_promoted_lane_is_re_briefed_as_a_ticket_lane` pins that, and it is the
+property that makes "one builder consumed everywhere" mean something. What it does **not** do is
+notice a `dodona.json` edited underneath a running lane: a repo switched to `delivery: pr` mid-life
+is still telling its live lanes that Dodona lands their ticket until the next restart. That is §6's
+rejection of per-turn plumbing for changing facts, accepted knowingly — the refusals themselves read
+`Config.For` at the moment of use, so the *guarantee* is never stale, only the *sentence* is.
+
+**D-B6. WORK LANES ONLY, ON THE SAME TEST `HookTurnEnd` USES.** A router, brain or compressor session
+touches no git, holds no ticket and runs in the neutral directory, so a block on every one of its
+turns is tokens spent for ever on a question whose answer is always "none of this applies to you"
+(CLAUDE.md §0.1). It is deliberately the *same* `role != "work"` test rather than a parallel one: two
+ideas of which lanes are work lanes is how the two prompt strings drifted in the first place.
+
+**D-B7. THE FAKE AGENT STRIPS THE BRIEFING, AND REPORTS IT UNDER A NEW `brief` DIRECTIVE.** The agent
+is the **only** witness to what was really delivered — the pane deliberately does not record it and
+the wire lives inside the shim — so B2 is unprovable without one. Stripping first is what keeps every
+other check in every suite unchanged: `working on: {text}` and `done: {text}` are what a dozen
+assertions and the whole compression suite are written against, and a prefix riding in on all of them
+would have silently rewritten what all of them mean. It is also the honest simulation: a real agent
+does not echo its own instructions back. The closing `[/DISPATCHER]` marker is what makes the split
+exact, and it is **required**, so `RouteInput`'s misroute retraction — `[DISPATCHER] `-prefixed, no
+closing marker — is untouched. There is no shared constant (the fake agent references nothing on
+purpose); the drift is caught by `the_briefing_reaches_a_ticket_agent`, which reads `(none)` and goes
+red the moment the two spellings disagree.
+
+**D-B8. `[DISPATCHER]` IS RIDDEN, NOT REPLACED.** Both prompts already declare that channel — spike 3
+measured that a model treats undeclared mid-turn operator instructions as a prompt-injection attempt
+and refuses them — and `RouteInput`'s retraction already uses it. A second convention would have
+meant a second thing to declare in the prompt and a second thing for a model to decide whether to
+trust.

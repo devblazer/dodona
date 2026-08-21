@@ -201,28 +201,33 @@ try {
         $line = @(($j -split "`r?`n") | Where-Object { $_.Trim().StartsWith('[') }) | Select-Object -Last 1
         if (-not $line) { return 0 }
         $rows = $line | ConvertFrom-Json
-        [int]((@($rows) | ForEach-Object { $_.lanes } | Measure-Object -Sum).Sum)
+        # THIS WORKSPACE ONLY, and that is the fix for the intermittent below rather than a
+        # tightening. `dodona ps` is MACHINE-WIDE by design (CLAUDE.md §3.1 -- it is the command
+        # that finds what nothing else can see), so summing every row made this check a reading of
+        # the whole machine. Under a full wave the other suites' daemons and shims come and go
+        # between the two counts, and the difference lands on this check. Every row carries the
+        # instance id it belongs to, so asking only about ours is both immune to the wave and
+        # what the check always MEANT: deleting one record must not change the count by one.
+        [int]((@($rows) | Where-Object { $_.id -eq $ws.Id } | ForEach-Object { $_.lanes } | Measure-Object -Sum).Sum)
     }
     $psWithRecord = PsLanes
     Remove-Item "$wsDir\shim-lane$nLane.json" -Force
-    # OPEN, AND DIAGNOSABLE NEXT TIME (2026-08-19). Measured, exactly: red in three
-    # consecutive FULL twelve-suite waves, then GREEN in the fourth, and green every other
-    # way -- alone 3/3, three-suite wave 1/1. So it IS intermittent, and only the full wave
-    # has ever provoked it. Two facts a future round should not have to re-derive: the
-    # numbers were identical in all three failures (16 lanes with the record, 15 without),
-    # and giving `ps` a second sample 250 ms later (LaneLiveness settleMs, what `stop-all`
-    # uses) did NOT change the result -- so the few-millisecond swap gap of section 0.2 is
-    # not sufficient on its own to explain it.
-    # The remaining hypothesis is the one only a full wave creates: `Instance.LiveLanes`
-    # enumerates the whole `\\.\pipe\` namespace, and a full wave fills that namespace with
-    # every other suite's daemons and shims. An enumeration that comes back incomplete under
-    # that crowd would make `ps` UNDER-count -- the dangerous direction, and the exact
-    # incident LaneLiveness exists for (four live agents invisible to `ps`, holding the
-    # compiler's output, blocking every build).
+    # CLOSED 2026-08-21, AND IT WAS THE FIXTURE (the product was never wrong). The history is
+    # kept because the wrong hypothesis is the expensive part: red in three consecutive FULL
+    # waves and green every other way -- alone 3/3, three-suite wave 1/1 -- with 16 lanes with the
+    # record and 15 without, identically, all three times. That one-sided evidence made
+    # `Instance.LiveLanes` returning an INCOMPLETE enumeration under a crowded `\\.\pipe\`
+    # namespace the sole surviving explanation, which would have been an under-count: the
+    # dangerous direction, and the exact incident LaneLiveness exists for.
     #
-    # So these three readings are taken around the second count instead of after it. A
-    # single reading AFTER the fact was what left the last three rounds guessing: it cannot
-    # distinguish "the pipe was gone while ps looked" from "ps looked and did not see it".
+    # A fourth failure on 2026-08-21 read **21 with the record, 22 without** -- the count went UP,
+    # which no under-count can produce, and which the earlier one-sided sample had hidden. The
+    # cause is that `PsLanes` summed `dodona ps` MACHINE-WIDE while thirteen suites were starting
+    # and stopping their own lanes around it: the check was reading the machine, not the
+    # workspace. `PsLanes` now sums this workspace's rows only, and the three readings below stay
+    # -- they are what turned a fourth round of guessing into one look, and they are still the
+    # only thing that can tell "the pipe was gone while ps looked" from "ps looked and did not
+    # see it" if this ever moves again.
     $pipeBefore = Test-DodonaPipe $nPipe
     $psWithout = PsLanes
     $pipeAfter = Test-DodonaPipe $nPipe
