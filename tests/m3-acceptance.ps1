@@ -154,7 +154,20 @@ try {
 
     # ---- approve unblocks: presence back to idle, receipt announced ----
     Dodona @("approve", "1") | Out-Null
-    Wait-Until { (@((DumpOrNull).slots | Where-Object { $_.title -eq 'WATER' }).blocked) -eq $false } 25000 'approval unblocks the lane' | Out-Null
+    # THE WAIT COVERS ALL THREE CLAUSES THE CHECK ASSERTS, and until 2026-08-21 it covered one.
+    # It waited for `blocked -eq $false` and then asserted the receipt in the feed as well -- two
+    # separate writes, so a dump taken between them saw an unblocked idle lane with no `approved`
+    # row and the check went red. That is exactly what happened in one full `dev gate` while
+    # measuring issue #4 (m3: 36 checks, 1 failed, `approve_unblocks_lane`; green alone minutes
+    # later, twice). Widening the wait is not weakening the check: it asserts the same three
+    # things, it just stops sampling mid-way through them. A wait that names less than what
+    # follows it will always eventually be sampled in the gap.
+    Wait-Until {
+        $s = DumpOrNull
+        ((@($s.slots | Where-Object { $_.title -eq 'WATER' }).blocked) -eq $false) -and
+        ((@($s.slots | Where-Object { $_.title -eq 'WATER' }).presence) -eq 'idle') -and
+        (@($s.feed | Where-Object { $_.body -match 'approved' }).Count -ge 1)
+    } 25000 'approval unblocks the lane and announces the receipt' | Out-Null
     $d = Dump
     $water = $d.slots | Where-Object { $_.title -eq 'WATER' }
     Check 'approve_unblocks_lane' ($water.blocked -eq $false -and $water.presence -eq 'idle' -and

@@ -525,17 +525,26 @@ than no table, because it still gets quoted. `dev suites` and `dev test` print t
 every run, measured on the machine you are actually using. What stays is the mapping from a
 suite to what it covers, which is judgement no command can print.
 
-**Two suites run ALONE, and taking either out of that list will look like it works.**
-`SoloSuites` in `tools/dev.ps1` is the list, and each entry carries its reason in a comment:
+**Three suites run ALONE, and taking one out of that list will look like it works.**
+`SoloSuites` in `tools/dev.ps1` is the list — `unit`, `ui-use`, `voice` — and each entry carries
+its reason in a comment:
 
 - **`unit`** compiles (`dotnet test` builds Dodona into `src\Dodona\bin`), and every other
   suite copies its binaries out of there at startup. Two compilers, one directory.
-- **`m1`** is intermittent beside a parallel wave — measured, green 5/5 alone in 8–9 s, and
-  `gate_denies_outside_claim` failed 3 of 4 times when it ran next to `m4`'s real build,
-  because `dodona gate-hook` returned EMPTY for longer than the check's 20 s retry.
-  **That cause is still not known.** It is not the daemon being slow (that path writes
-  `.dodona-bypass.log`, and the log was empty), and it is not PowerShell failing to deliver
-  stdin to `cmd /c` (probed 60× under load, 60/60 delivered).
+- **`ui-use` and `voice`** are window suites whose failures CASCADE — two missed interactions
+  become six red checks — and both were measured red inside a wave and green alone. The
+  measurements, with dates, are in `tools/dev.ps1` beside the list. Neither is root-caused;
+  the contention is windows and process starts, not CPU.
+- **`m1` was on this list for eight days and came off it on 2026-08-21** (issue #4). Its old
+  entry read: intermittent beside a parallel wave, green 5/5 alone in 8–9 s, with
+  `gate_denies_outside_claim` failing 3 of 4 times next to `m4`'s real build because
+  `dodona gate-hook` returned EMPTY for longer than the check's 20 s retry — cause unknown,
+  and neither the daemon being slow (that path writes `.dodona-bypass.log`, and the log was
+  empty) nor PowerShell failing to deliver stdin to `cmd /c` (probed 60× under load, 60/60
+  delivered). **That cause is still not known, and it is no longer the reason it was.** Every
+  path that could produce it — unreadable stdin, unparseable stdin, no file path — now DENIES
+  and prints a verdict, so `gate-hook` going quiet cannot be a silent allow any more; it can
+  only be a check red on output it can read. See the verdict below the BOM incident.
 
   **A DIFFERENT m1 failure was found and fixed on 2026-08-19, and it was not flaky at
   all — the claim gate was failing OPEN on every run.** Both gate checks were red on
@@ -551,14 +560,54 @@ suite to what it covers, which is judgement no command can print.
   third round of guessing into one look — a *silent* `return 0` would have hidden this
   exactly as long as it hid the other one.
 
-  m1 stays SOLO: the deterministic bug is gone, the intermittent EMPTY-stdin one is not
-  explained, and it is still one of `GateHook`'s remaining fail-open paths.
+  **This paragraph used to end "m1 stays SOLO … and it is still one of `GateHook`'s remaining
+  fail-open paths." That clause was wrong, and settling it was issue #4 (2026-08-21).** §7 and
+  `GateHook`'s own header comment both said the opposite, so somebody read the function end to
+  end and enumerated every `return`. With a lane argument present, **every** exit denies except
+  the one that has positively placed the write inside a worktree — the unparseable-stdin branch
+  in particular calls `GateAllowedUnchecked` **for the trace only** and then returns `GateDeny`,
+  which is what reads like an allow at a glance and is not one.
 
-So: **do not "tidy up" `SoloSuites` because a suite looks fast enough to parallelise.** m1 alone
-costs 8 seconds. A gate that is red one run in four for a reason nobody has diagnosed costs far
-more, because it teaches people to re-run instead of read — which is the same disease as a gate
-that is always green. If you want m1 back in the wave, first find out why the hook goes quiet,
-and put the answer in the commit.
+  **The enumeration found a real one that neither document knew about, which is the argument for
+  enumerating rather than believing either.** `--lane 5 --ticket abc` — a readable lane, an
+  unreadable ticket — returned an unchecked ALLOW and never asked the tree question at all. It
+  was R3's hole one argument along: the `--lane` case was fixed, its `--ticket` sibling was not,
+  because the ticket number was load-bearing while the CLAIM question existed and stopped being
+  load-bearing the moment D-R5 deleted it. `DeployGate` only ever writes a numeric `--ticket`,
+  so nothing reached it — which is precisely why it sat there unread. It now reports the
+  misconfiguration and carries on to the tree check, and
+  `m1:the_gate_still_checks_the_tree_when_the_ticket_argument_is_unreadable` is red without the
+  fix. **`GateHook` has no fail-open path left, and that is now a check rather than a sentence.**
+
+  **m1 rejoined the wave on the same ticket, measured, not argued.** Seven consecutive `dev gate`
+  runs on 2026-08-21 with m1 in the parallel wave: **135 checks, 0 failed, every time**, in
+  38–51 s. Solo it costs 48 s serialized in front of the wave, so removing it buys about 40 s of
+  wall clock. What did NOT change is the unexplained intermittent: it has simply not been seen
+  since, and "not seen in seven runs" is not "explained". If `m1` reddens in a wave again, put it
+  back on the list **with the new measurement**, and read `.dodona-bypass.log` first — R3's
+  byte-count-and-prefix diagnostic is there so the next occurrence is one look rather than a
+  fourth round of guessing.
+
+  **Three of those seven gates went red, never on m1, and you should expect that reading.** One
+  was `m3:approve_unblocks_lane`, where the `Wait-Until` covered one of the three things the check
+  then asserted, so a dump taken between the unblock and its receipt was red — a real bug, fixed
+  in the same commit by widening the wait to everything the check asserts. The others were
+  `workspace` and `m2` under a machine-wide slowdown, every one green alone minutes later. That is
+  issue #3, which says exactly this: read a red inside a wave as a machine reading until it
+  reproduces alone.
+
+  **And the wall clock across those seven runs is the finding worth carrying (issue #1): 258 s to
+  312 s, one machine, one commit, against a 300 s budget** — the whole spread is how busy the
+  machine was (`ui-use` alone ranged 94.7–118.3 s). I7 was breached once. **Do not raise the
+  budget to cover that spread**; m1 rejoining the wave is 40 s of it back, and the rest is #1.
+
+So: **do not "tidy up" `SoloSuites` because a suite looks fast enough to parallelise, and do not
+add to it because a suite looks risky.** Both directions are a measurement, and m1's took four
+full gate runs to make. Note also that "m1 alone costs 8 seconds" was true when it was written
+and is not now — it is **48 s alone**, which is what made removing it worth ~40 s of wall clock
+rather than the ~8 s the old line implied. A gate that is red one run in four for a reason nobody
+has diagnosed costs far more than either number, because it teaches people to re-run instead of
+read — which is the same disease as a gate that is always green.
 
 **Waits are conditions, not sleeps.** `Wait-Until { <condition> } <timeoutMs> '<what>'` in
 `tests/_workspace.ps1` is how every one of them is written now; `Wait-Daemon` is the common
@@ -1055,6 +1104,16 @@ the tree question ran first and refused on doubt; with it gone there is no fail-
 left in `GateHook`, and R3 found and closed a live one while removing it — an unparseable
 `--lane` with no `--ticket` used to hit an early `return 0` and allow the write silently,
 before ever reaching the deny written for exactly that case.
+
+**That sentence was written a day before it was true, and issue #4 is how it became true**
+(2026-08-21). R3 closed the `--lane` hole and left its `--ticket` sibling open: a *readable*
+lane with an unreadable ticket returned an unchecked allow and never asked the tree question.
+Nothing reached it, because `DeployGate` only ever writes a numeric `--ticket` — which is why
+it survived being asserted about in two documents and a code comment. The lesson is §0's,
+stated at its own expense: **a property claimed in prose is not enforcement.** The claim is now
+`m1:the_gate_still_checks_the_tree_when_the_ticket_argument_is_unreadable`, proved red against
+the code that had the hole. If you assert this property again, assert it by enumerating every
+`return` in the function, and leave a check behind.
 
 A project that wants a leash sets `"permissionMode": "acceptEdits"` in `dodona.json` plus
 an `allowedTools` list. Be aware that list is leakier than it looks: `PowerShell(dotnet

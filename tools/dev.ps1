@@ -644,20 +644,51 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 #   unit  is `dotnet test`, which builds Dodona.Tests AND its ProjectReference to Dodona --
 #         straight into src\Dodona\bin. So it runs alone.
 #
-#   m1    is here for a reason that is MEASURED BUT NOT ROOT-CAUSED, and saying so is the
-#         point. Alone it is green 3 runs out of 3 in 8-9 s. Run beside m4's real build it
-#         fails `gate_denies_outside_claim` and takes 30 s, because `dodona gate-hook`
-#         returns EMPTY -- no deny, and no `.dodona-bypass.log` either -- continuously for
-#         more than the 20 s the check now retries for. Empty output with no bypass log can
-#         only be one of GateHook's three SILENT `return 0` paths (unreadable stdin,
-#         unparseable stdin, or no file_path), so the hook is not reaching the daemon at all;
-#         it is not the daemon being slow, which would have written the log. Three hypotheses
-#         were tested and all three were wrong: it is not the fail-open-on-pipe-error path
-#         (no log), and it is not PowerShell failing to deliver stdin to `cmd /c` (probed 60
-#         times under load, 60/60 delivered). Running it alone costs ~8 s of wall clock and
-#         makes the gate deterministic, which is worth more than the 8 s. The real question --
-#         whether layer 1 should fail CLOSED instead of silently open -- is a safety-model
-#         decision for the operator, not something to paper over with a longer retry.
+#   m1    CAME OFF THIS LIST on 2026-08-21 (issue #4), MEASURED. Keeping the history because
+#         the reason it was here is half still true.
+#
+#         It was here because: alone it was green 3/3 in 8-9 s, and beside m4's real build it
+#         failed `gate_denies_outside_claim` 3 times in 4 and took 30 s, because
+#         `dodona gate-hook` returned EMPTY -- no deny, and no `.dodona-bypass.log` either --
+#         for longer than the check's 20 s retry. Three hypotheses were tested and all three
+#         were wrong: not the fail-open-on-pipe-error path (no log), not PowerShell failing to
+#         deliver stdin to `cmd /c` (probed 60 times under load, 60/60 delivered).
+#
+#         THE PART THAT IS NOW FALSE: that comment reasoned "empty output with no bypass log
+#         can only be one of GateHook's three SILENT `return 0` paths (unreadable stdin,
+#         unparseable stdin, or no file_path)". All three of those DENY now, out loud, and R3's
+#         byte-count diagnostic records what they saw. The failure signature this entry was
+#         written about is therefore no longer producible: `gate-hook` cannot go quiet and
+#         allow. Issue #4 also found and fixed the one unchecked allow that was still in there
+#         (an unreadable `--ticket` beside a readable `--lane`), so the safety-model question
+#         this comment ended on -- should layer 1 fail closed -- is answered: it does.
+#
+#         THE PART THAT IS STILL TRUE: the intermittent was never root-caused. It has simply
+#         not been seen since, which is not the same thing.
+#
+#         MEASURED BEFORE REMOVING IT, SEVEN consecutive `dev gate` runs with m1 in the wave:
+#         135 checks / 0 failed EVERY time, at 39.9, 40.1, 38.1, 47.8, 49.3, 48.9 and 51.2 s.
+#         Solo it is 48 s serialized in FRONT of the wave, so removing it buys ~40 s.
+#
+#         READ THE REST OF THAT MEASUREMENT HONESTLY: three of those seven gates went red, and
+#         not once on m1. Run 3 on `m3:approve_unblocks_lane` -- a `Wait-Until` narrower than
+#         the three things the check then asserted, so a dump landed between the unblock and its
+#         receipt; a real bug, fixed in the same commit. Run 4 on `workspace` and `m2`, run 6 on
+#         `m2:an_extended_claim_leaves_nothing_undeclared` (empty detail: the store row was read
+#         before it was written) -- every one of them green alone minutes later. That is issue
+#         #3's picture and #3's rule: read a red inside a wave as a machine reading until it
+#         reproduces alone. m2's is the same shape as m3's and is NOT fixed here; it wants its
+#         own ticket rather than a drive-by.
+#
+#         AND THE WALL CLOCK IS THE REAL FINDING (issue #1). Across those seven runs it moved
+#         258 -> 312 s against a 300 s budget, on one machine, on one commit, purely with how
+#         busy the machine was: ui-use alone ranged 94.7-118.3 s and brain 72.8-92.6 s. I7 was
+#         breached once, at 312.5 s. Putting m1 back on this list would add ~40 s to every one
+#         of those numbers, which is the argument FOR this change and not against it. Do not
+#         raise the budget to cover the spread; that is #1's whole subject. Solo it costs 48 s serialized in front of the wave -- the old "~8 s" in this
+#         comment and in CLAUDE.md had gone stale by 6x as m1 grew to 135 checks, and a stale
+#         number is what CLAUDE.md 1 has a whole section about. If it reddens in a wave again,
+#         put it back HERE WITH THE NEW MEASUREMENT and read `.dodona-bypass.log` first.
 #
 # m4 IS DELIBERATELY NOT ON THIS LIST, and RECOVERY-PHASES P4.3 says it should be ("its
 # internal publish builds the tree's own obj/"). That is half right, and the half it gets
@@ -696,7 +727,7 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 #
 #         The REAL fix is still splitting ui-use -- 64s of monolith is why it dominates the
 #         wall clock at all -- and that remains unfinished business, not this change.
-function SoloSuites { , @('unit', 'm1', 'ui-use', 'voice') }
+function SoloSuites { , @('unit', 'ui-use', 'voice') }
 
 # `voice` joined this list on 2026-08-20, MEASURED rather than assumed. It went into the wave
 # first, on the reasoning that m3 is also a window suite and runs there. The gate then failed on

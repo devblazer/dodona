@@ -336,6 +336,37 @@ try {
     Check 'the_misconfiguration_refusal_says_it_is_not_the_agents_mistake' `
         ($badLaneOut -match 'misconfiguration') "output=[$($badLaneOut.Trim())]"
 
+    # ...AND THE SIBLING ARGUMENT, WHICH WAS STILL A LIVE FAIL-OPEN UNTIL 2026-08-21. Issue #4
+    # asked which of two documents was right about `GateHook` having no fail-open path left. The
+    # answer came out of enumerating every `return` rather than trusting either: `--ticket` that
+    # does not parse returned an unchecked ALLOW while `--lane` right beside it denied, so
+    # `--lane <good> --ticket abc` skipped the tree question entirely. Same shape as the hole R3
+    # closed, one argument along, and it survived R3 because the ticket number stopped mattering
+    # the moment D-R5 deleted the claim question and nobody re-read this branch.
+    #
+    # Driven at the SHARED CHECKOUT, because that is what the bug actually cost: HEAD lets this
+    # write into the operator's live tree and says `gate fail-open` on stderr. The fix carries on
+    # to the tree check, which refuses it. `DeployGate` only ever writes a numeric `--ticket`, so
+    # this is unreachable from Dodona's own deployment -- which is the argument for asserting it,
+    # not against: an unreachable allow is exactly the kind that stays unread for a day.
+    $badTicketHook = "`"$dodona`" gate-hook --lane $plainId --ticket not-a-number --workspace `"$($ws.Id)`""
+    $badTicketOut = ($sharedJson | & cmd /c $badTicketHook 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
+    Check 'the_gate_still_checks_the_tree_when_the_ticket_argument_is_unreadable' `
+        ($badTicketOut -match '"permissionDecision":"deny"') "output=[$($badTicketOut.Trim())]"
+    # ...and it is not doing it by calling the write a fail-open. `GateAllowedUnchecked` writes
+    # `gate fail-open` where the merge backstop looks; nothing is being let through here, so that
+    # phrase must not appear -- while the misconfiguration itself still has to be said out loud,
+    # or a bad `--ticket` becomes the silent degrade CLAUDE.md 0.1 forbids.
+    #
+    # ALL whitespace is stripped, not collapsed. Captured native stderr is wrapped to the console
+    # width (CLAUDE.md 0.2) and the break lands at a column, not at a word boundary, so
+    # `not-a-nu\nmber` is a real outcome that a collapse-to-single-space would not survive.
+    $badTicketFlat = $badTicketOut -replace '\s', ''
+    Check 'the_unreadable_ticket_is_reported_without_claiming_a_fail_open' `
+        (($badTicketFlat -match "--ticket'not-a-number'isnotanumber") -and
+         ($badTicketFlat -notmatch 'gatefail-open')) `
+        "output=[$(($badTicketOut -replace '\s+', ' ').Trim())]"
+
     # ---- 5. agent work: commit in wt1 (the test IS the agent at the git layer) ----
     Set-Content "$wt1\src\water\sim.cs" "// water sim v2"
     git -C $wt1 add -A

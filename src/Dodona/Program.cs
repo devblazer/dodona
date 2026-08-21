@@ -940,8 +940,27 @@ int GateHook()
                         "which tree this write is in. This is a Dodona misconfiguration, not your mistake -- " +
                         "report it; the write is refused rather than allowed unchecked.");
 
+    // AN UNREADABLE `--ticket` IS NOT AN ALLOW EITHER, AND UNTIL 2026-08-21 IT WAS. This line
+    // read `return GateAllowedUnchecked(...)`, so `--lane 5 --ticket abc` returned 0 with the
+    // lane perfectly readable -- the tree question below never ran and the write was permitted
+    // wherever it landed. That is R3's hole one argument along: the `--lane` case two blocks up
+    // was fixed and this sibling was not, because the ticket number was load-bearing while the
+    // CLAIM question existed and stopped being load-bearing the moment D-R5 deleted it. Nothing
+    // gates on the ticket now; it annotates a trace line and nothing more.
+    //
+    // So this says so and CARRIES ON to the question that decides. Not a deny: the lane is
+    // readable, the tree is answerable, and refusing a write we can actually adjudicate would be
+    // punishing an agent for our own bad argument. Not `GateAllowedUnchecked` either -- that
+    // writes `gate fail-open` into the log the merge backstop reads, and nothing is being let
+    // through here.
     if (ticketArg is { Length: > 0 } && ticket <= 0)
-        return GateAllowedUnchecked($"--ticket '{ticketArg}' is not a number (gate misconfigured)", 0, null);
+        try
+        {
+            Console.Error.WriteLine($"dodona gate: --ticket '{ticketArg}' is not a number (Dodona " +
+                                    "misconfiguration, not your mistake -- report it). The tree check still " +
+                                    "runs and still decides this write; only the trace loses the ticket number.");
+        }
+        catch { }
 
     string input;
     try { input = Console.In.ReadToEnd(); }
@@ -1068,6 +1087,15 @@ int GateHook()
     // the opposite of what deleting a refusal usually means, and it is the property to preserve
     // if anyone adds a second question here again: A NEW QUESTION MUST NOT REINTRODUCE A
     // FAIL-OPEN, because there is no longer an ordering argument to excuse one.
+    //
+    // AND THAT SENTENCE WAS WRITTEN BEFORE IT WAS TRUE -- wrong by exactly one line for a day.
+    // The unreadable-`--ticket` branch above still returned an unchecked allow, with the lane
+    // readable and the tree answerable. Fixed 2026-08-21 while settling issue #4, which existed
+    // because a line in CLAUDE.md disagreed with this very comment; the disagreement turned out
+    // to be the CODE's fault, not the doc's. The lesson is the one CLAUDE.md 0.3 already
+    // carries: a property asserted in a comment is not enforcement. If you assert it again,
+    // assert it by ENUMERATING every return, and leave a check behind --
+    // `m1:the_gate_still_checks_the_tree_when_the_ticket_argument_is_unreadable` is this one's.
     //
     // `claim-check` itself still exists as a daemon command -- it is a useful read, and
     // `workspace`'s drift check uses it -- but nothing gates on it.
