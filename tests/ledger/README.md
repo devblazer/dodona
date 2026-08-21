@@ -363,6 +363,24 @@ PROVEN: all 3 check(s) fail under w3-verify-01.patch, so they have teeth.
 
 That is the paired red the plan's 5.3 asks for, in both languages, under one checked-in defect.
 
+**`w3-verify-02.patch`** -- `FakeRecognizer.Start()` raises `Ready` only in the `hang` case,
+i.e. exactly backwards. This is the half nothing else could reach: a check whose subject is a
+type in a **net8.0-windows PRODUCTION assembly**. Proved against `e093cd7`, the seam commit:
+
+```
+== prove: 'Dodona.Ui.Tests.RecognizerArrivalTests.The_fake_recogniser_raises_Ready_exactly_once_from_Start' must FAIL against HEAD ==
+mutant applied to HEAD: src/DodonaUi/Recognizer.cs
+
+  PROVEN   Dodona.Ui.Tests.RecognizerArrivalTests.The_fake_recogniser_raises_Ready_exactly_once_from_Start: FAIL -- 1 of 1 case not passed
+
+PROVEN: the check fails under w3-verify-02.patch, so it has teeth.
+```
+
+The defect is chosen to be the drift plan 3.2 argues a compiler cannot see: `IRecognizer`'s shape
+is unchanged, so `dev build` is silent, and the only thing that can notice is a check that
+actually SUBSCRIBES. It is also the live failure the three-state mic glyph exists for -- a window
+that is on and deaf must never look like a window that is on.
+
 ### The finding: `m2:tier0_message_delivered` does not test tier 0
 
 `tier0_message_delivered` was listed `expects-red` on the first run of that mutant and came back
@@ -399,17 +417,20 @@ is how the line-ending bill gets paid twice, and this one buys nothing.
 
 ### What is NOT done
 
-- **`w3-verify-02.patch` is ADDED AND PROVED IN THE FOLLOWING COMMIT, not this one, and that
-  order is forced.** It reddens a check in `tests\Dodona.Ui.Tests`, which does not compile against a HEAD
-  whose `DodonaUi.csproj` has no `InternalsVisibleTo`. `dev prove` said so exactly:
+- **`w3-verify-02.patch` could not be proved in the same commit as the seam, and that order is
+  forced rather than tidy.** Run first against `372e18d`, it reddened nothing, because a check in
+  `tests\Dodona.Ui.Tests` does not COMPILE against a HEAD whose `DodonaUi.csproj` has no
+  `InternalsVisibleTo`:
 
   ```
   RecognizerArrivalTests.cs(27,21): error CS0122: 'FakeRecognizer' is inaccessible due to its protection level
   BLOCKED: HEAD does not build (tests\Dodona.Ui.Tests\Dodona.Ui.Tests.csproj), so it cannot be used as a baseline
   ```
 
-  That is the plan's delta 5 reason 1 happening in the flesh, and the plan's own answer to it is
-  *"the seam commit landing first"*. So the seam lands, and the proof is run against it.
+  That is delta 5's reason 1 happening in the flesh, and the plan's own answer to it is *"the seam
+  commit landing first"*. **Every slice that introduces a new destination TYPE inherits this**: the
+  seam commit lands, then the slice is proved against it. A mutant is judged against HEAD, so
+  anything the check needs in order to compile has to already BE at HEAD.
 - **`ui-unit` is deliberately NOT in `AllSuites`.** It is reachable as `dev test ui-unit` and as a
   `ui-unit:` proof pair. Putting it in the default set widens `dev gate` and `dev suites`, which
   is W4's call when it has something to assert there.

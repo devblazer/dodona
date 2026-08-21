@@ -1,0 +1,35 @@
+# W3's second verification mutant, and the ONLY thing it is for is the half of `dev prove
+# --with` that nothing else could reach: a check whose subject lives in a net8.0-windows
+# PRODUCTION assembly.
+#
+# defect: FakeRecognizer.Start() raises Ready only in the `hang` case, i.e. exactly backwards.
+# defect: The arrival contract IRecognizer's own doc comment states is broken silently.
+#
+# WHY THIS PARTICULAR DEFECT. The plan's 3.2 argues that a double drifts in a way the compiler
+# cannot see, and names this class's arrival behaviour as the case it can still close with a
+# contract test. A one-operator flip is that drift in miniature: the interface is unchanged, so
+# `dev build` is silent, and the only thing that can notice is a check that actually SUBSCRIBES.
+# It is also the live failure the three-state mic glyph exists for -- a window that is on and
+# deaf must never look like a window that is on.
+#
+# expects-red: ui-unit:Dodona.Ui.Tests.RecognizerArrivalTests.The_fake_recogniser_raises_Ready_exactly_once_from_Start
+#
+# NO expects-green, and the omission is deliberate rather than an oversight. tests\Dodona.Ui.Tests
+# holds exactly one fact today (W3.0 stands the project up EMPTY BUT REAL), so there is no
+# neighbour in this project to declare as a survivor. The control that proves the over-broad
+# detector works at all is on w3-verify-01.patch, which carries two. Naming a `unit:` check here
+# would have bought nothing and cost a whole net8.0 compile, which is the thing delta 4 splits
+# the two project prefixes to avoid.
+diff --git a/src/DodonaUi/Recognizer.cs b/src/DodonaUi/Recognizer.cs
+index 1183188..2f07ba2 100644
+--- a/src/DodonaUi/Recognizer.cs
++++ b/src/DodonaUi/Recognizer.cs
+@@ -108,7 +108,7 @@ sealed class FakeRecognizer : IRecognizer
+         // Listening on the line after Start(); now it waits for this event, so a fake that stayed
+         // silent would leave every suite in `starting` and redden all eighteen voice checks. The
+         // fake opens nothing, so it has nothing to wait for and nothing to lie about.
+-        if (!_hang) Ready?.Invoke();
++        if (_hang) Ready?.Invoke();
+     }
+ 
+     public void Stop() { }
