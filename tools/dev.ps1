@@ -2154,7 +2154,7 @@ function Ledger-BranchLeaves($ifStmt, $node) {
 # the exemption is DERIVED -- a name whose registration site is in _workspace.ps1 --
 # rather than a hand-maintained list that could go stale.
 function Ledger-HarnessNames($sites) {
-    $names = @{}
+    $names = Ledger-NewSet
     foreach ($s in @($sites | Where-Object { -not $_.Dynamic -and $_.Suite -eq '_harness' })) { $names[$s.Check] = $true }
     return $names
 }
@@ -2217,7 +2217,7 @@ function Ledger-DupProblems($sites) {
 # there a method by that name in that project", which a text scan answers on a tree that
 # has never been built -- which is the property dev.ps1 exists for.
 function Ledger-TestMethods([string]$projectDir) {
-    $found = @{}
+    $found = Ledger-NewSet          # C# is case-sensitive; Foo and foo are different methods
     if (-not (Test-Path $projectDir)) { return $found }
     $keywords = @('return', 'new', 'await', 'if', 'while', 'for', 'foreach', 'switch', 'using', 'lock', 'catch', 'throw')
     foreach ($f in (Get-ChildItem $projectDir -Recurse -Filter '*.cs' -ErrorAction SilentlyContinue)) {
@@ -2291,7 +2291,10 @@ function Ledger-Static {
                 if ($f[0] -eq 'check') { continue }
                 $old += $f[0]
             }
-            $now = @{}
+            # Ordinal: `A_x` and `a_x` are different rows and the baseline now genuinely
+            # holds both. A case-insensitive key here would let one be DELETED while the
+            # other covers for it -- a removal this rung exists to refuse, passing silently.
+            $now = Ledger-NewSet
             foreach ($r in $baseline.Rows) { $now[$r.check] = $true }
             $gone = @($old | Where-Object { -not $now.ContainsKey($_) })
             if ($gone.Count -gt 0) {
@@ -2303,17 +2306,22 @@ function Ledger-Static {
         else {
             $out.Readings += "baseline.tsv: $(@($baseline.Rows).Count) rows, NOT YET COMMITTED -- the integrity compare has nothing to compare against until it is"
         }
-        $seen = @{}
+        # THE THIRD SITE THAT KEYS A NAME, and it must use the same key as the other two or the
+        # tool contradicts itself: the capture writes a row and this rung then calls it a repeat.
+        # That is exactly what happened -- Ledger-Key was applied to the capture and the
+        # integrity rung, and this one still built its own case-insensitive key, so the very
+        # baseline the fixed capture produced was rejected by the static rung on the next run.
+        $seen = Ledger-NewSet
         $harness = Ledger-HarnessNames $sites
         foreach ($r in $baseline.Rows) {
-            $key = if ($harness.ContainsKey($r.check)) { "$($r.suite)/$($r.check)" } else { $r.check }
+            $key = Ledger-Key $r.suite $r.check $harness
             if ($seen.ContainsKey($key)) { $out.Problems += "baseline.tsv:$($r._line) repeats the key '$key'" }
             $seen[$key] = $true
         }
     }
 
     # ---- wires.tsv ----
-    $wireIds = @{}
+    $wireIds = Ledger-NewSet
     if ($wires.Present) {
         foreach ($w in $wires.Rows) {
             if ($wireIds.ContainsKey($w.wire_id)) { $out.Problems += "wires.tsv:$($w._line) repeats wire id '$($w.wire_id)'" }
@@ -2346,7 +2354,7 @@ function Ledger-Static {
     $reasons = @('process-fact', 'git-ref-mutation', 'real-window', 'timing', 'absence-of-process', 'wire-shape', 'harness-hygiene', 'no-seam-yet')
     $movesDir = Join-Path $dir 'moves'
     $unitMethods = $null; $uiMethods = $null
-    $claimed = @{}
+    $claimed = Ledger-NewSet
     if (Test-Path $movesDir) {
         foreach ($file in (Get-ChildItem $movesDir -Filter '*.tsv' -ErrorAction SilentlyContinue | Sort-Object Name)) {
             $slice = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
@@ -2471,7 +2479,7 @@ function Ledger-Live($static) {
     $trx = "$repo\tests\unit-output\unit.trx"
     if (Test-Path $trx) {
         $xml = [xml](Get-Content $trx -Raw)
-        $methods = @{}
+        $methods = Ledger-NewSet    # fully-qualified C# names; case is significant
         $failed = @()
         foreach ($r in @($xml.TestRun.Results.UnitTestResult)) {
             if ($null -eq $r) { continue }
