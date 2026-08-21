@@ -924,6 +924,115 @@ for k, d in db.execute('SELECT kind, detail FROM events ORDER BY id'):
     Check 'the_waiting_form_prints_the_start_and_the_outcome' `
         ($DODONA_EXIT -eq 0 -and $landWaited -match "landing ticket $t9id" -and $landWaited -match "landed ticket $t9id") $landWaited
 
+    # ---- 11d. R7 / D-R28: a `delivery: pr` repository is not Dodona's to merge ------------
+    #
+    # M5-DELIVERY-PLAN 3 owns the field; this is the whole of what R7 promises kept as
+    # assertions: Dodona never merges, never grants a merge token, and never deletes a branch.
+    #
+    # THE PROVABLE HALF IS THE REFUSAL, AND THAT IS DELIBERATE RATHER THAN A GAP. No suite here
+    # may touch a network or mock a forge into the daemon (17), so what is asserted is what
+    # Dodona STOPS doing -- which is also the half that can go wrong SILENTLY, by merging a
+    # repository whose owner said not to. The forge half is the project's own ceremony and Dodona
+    # does not perform it (D-R29).
+    #
+    # The flip is a dodona.json rewrite, exactly as 10b's red-verify section does it: Config.For
+    # re-reads per call, so there is no daemon restart and no second fixture.
+    Set-Content "$root\dodona.json" '{ "main": "main", "verify": ["echo verify-ok"], "delivery": "pr" }'
+    $tP = Dodona @("ticket-create", "--title", "PRMODE", "--claim", "path:src/prmode/x.cs")
+    $tPid = if ($tP -match 'ticket (\d+) ') { $Matches[1] } else { 0 }
+    $wtP = "$root\.dodona\wt\t$tPid"
+    # Isolation is what Dodona still owes a pr repository -- it is the first of the four things
+    # M5 1 says the project cannot provide for itself. A pr repo that got no worktree would have
+    # had its ceremony respected and its reason for using Dodona removed.
+    # VACUOUS AGAINST HEAD BY CONSTRUCTION, and kept on purpose for the same reason m2's
+    # `stopping_a_deliberate_ticket_lane_leaves_the_ticket_alone` is kept: HEAD has no delivery
+    # field at all, so nothing about a pr repo can differ there and no code state makes it red
+    # today. What it catches is later -- the day somebody reads "Dodona gets out of the way" as
+    # permission to take this away too.
+    Check 'a_pr_repo_still_gets_its_worktree' ([bool]$tPid -and (Test-Path $wtP)) "$tP wt=$wtP"
+    New-Item -ItemType Directory -Force "$wtP\src\prmode" | Out-Null
+    Set-Content "$wtP\src\prmode\x.cs" "// pr mode"
+    git -C $wtP add -A
+    git -C $wtP -c user.email=t@t -c user.name=t commit -q -m "pr mode work"
+
+    # R4's RECORD IS UNCHANGED AND R6's ASK IS GONE, which is the split R7 turns on. The record
+    # is back-end agnostic by design (7: same assembly, same send-back, different back end) and
+    # is worth MORE here, not less -- it is what a human reviewer reads first, and it is the PR
+    # description. The approval question is the opposite: `yes` there means Store.TicketApprove,
+    # whose only job is to unblock `token-request`, and that command refuses outright in pr mode.
+    # A question offering a merge Dodona will never perform is the affordance that promises what
+    # it cannot do.
+    $laneP = Dodona @("ticket-agent", "$tPid", "--child", "$bin\DodonaFakeAgent.exe")
+    $lanePid = if ($laneP -match 'lane (\d+)') { $Matches[1] } else { 0 }
+    $recBefore = [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='completion_record'").Trim())
+    Dodona @("say", "$lanePid", "say pushed the branch and opened the PR") | Out-Null
+    Wait-Until { [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='completion_record'").Trim()) -gt $recBefore } `
+        25000 "the pr-mode ticket's completion record" | Out-Null
+    $recPraw = Dodona @("ticket-record", "$tPid")
+    $recP = try { $recPraw | ConvertFrom-Json } catch { $null }
+    # VACUOUS AGAINST HEAD BY CONSTRUCTION, and kept on purpose for the same reason m2's
+    # `stopping_a_deliberate_ticket_lane_leaves_the_ticket_alone` is kept: HEAD has no delivery
+    # field at all, so nothing about a pr repo can differ there and no code state makes it red
+    # today. What it catches is later -- the day somebody reads "Dodona gets out of the way" as
+    # permission to take this away too.
+    Check 'a_pr_repo_still_assembles_the_completion_record' `
+        ($null -ne $recP -and $recP.ticket -eq [int]$tPid -and (@($recP.changed) -contains 'src/prmode/x.cs')) $recPraw
+    # Captured once, then asserted and reported -- 84c0002's lesson, where a check asserted on one
+    # query and printed a second one, and its red named a string the red itself contained.
+    $askRows = (Invoke-StoreSql $storeDb "SELECT id, state FROM questions WHERE kind='land' AND subject='$tPid'").Trim()
+    Check 'a_pr_repo_raises_no_approval_question' ($askRows -eq '') "land questions for ticket ${tPid}: [$askRows]"
+    $askSkip = (Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='land_ask_skipped_pr_mode'").Trim()
+    Check 'the_missing_question_says_why_rather_than_being_silent' `
+        ($askSkip -match "ticket $tPid" -and $askSkip -match 'delivery: pr') "[$askSkip]"
+
+    # NO MERGE TOKEN. Not "a token that is never used" -- a granted one leaves a holder and a
+    # lease fencing every other ticket in the repository for an operation that never happens.
+    $reqP = Dodona @("token-request", "$tPid")
+    Check 'a_pr_repo_grants_no_merge_token' `
+        ($DODONA_EXIT -eq 1 -and $reqP -match 'delivery: pr' -and $reqP -notmatch 'granted') $reqP
+    Check 'the_token_refusal_rewrites_rather_than_walls' `
+        ($reqP -match 'open a PR' -and $reqP -match "ticket-record $tPid") $reqP
+    # AND APPROVAL DOES NOT UNLOCK IT. The refusal is about the REPOSITORY, not this ticket's
+    # approval state, and it has to land ahead of the approval gate -- otherwise an on-approval
+    # ticket is sent to `dodona approve` to unlock a token it can never be given.
+    Dodona @("approve", "$tPid") | Out-Null
+    $reqP2 = Dodona @("token-request", "$tPid")
+    Check 'approving_a_pr_ticket_still_grants_no_token' `
+        ($DODONA_EXIT -eq 1 -and $reqP2 -match 'delivery: pr' -and $reqP2 -notmatch 'granted') $reqP2
+    $tokP = Dodona @("token-status")
+    Check 'no_token_records_the_pr_ticket_as_its_holder' ($tokP -notmatch "holder=$tPid\b") $tokP
+
+    # NO LOCAL MERGE. main's sha is the check that tells this apart from a land that merely
+    # reported a refusal, which is the same distinction 10b turns on.
+    $mainBeforePr = (git -C $root rev-parse main)
+    $landP = Dodona @("land", "$tPid")
+    $mainAfterPr = (git -C $root rev-parse main)
+    Check 'a_pr_repo_performs_no_local_merge' ($DODONA_EXIT -eq 1 -and $landP -match 'delivery: pr') $landP
+    Check 'the_refused_land_leaves_main_unchanged' ($mainBeforePr -eq $mainAfterPr) "before=$mainBeforePr after=$mainAfterPr"
+    # THE BRANCH AND THE WORKTREE SURVIVE. In pr mode the branch is what the project pushes and
+    # the worktree is where the agent is still standing; a land that refused but pruned anyway
+    # would be the worst of both.
+    $branchP = (git -C $root branch --list "ticket/$tPid" | Out-String).Trim()
+    $wtPstillThere = Test-Path $wtP
+    Check 'the_refused_land_keeps_the_branch_and_the_worktree' `
+        ($branchP -ne '' -and $wtPstillThere) "branch=[$branchP] wt=$wtP exists=$wtPstillThere"
+    # THE REFUSAL IS IN THE CHEAP HALF, and that is the structural part of the guarantee rather
+    # than a detail: LandGate returning early makes LandFlow -- the merge, the ff-only, the
+    # prune, the branch delete -- unreachable for a pr repo. `land_started` is written by
+    # LandBegin only AFTER the gate passes, so its absence is that unreachability, asserted.
+    $startedP = (Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='land_started' AND detail = 'ticket $tPid'").Trim()
+    Check 'the_land_never_got_past_the_cheap_gate' ($startedP -eq '0') "land_started rows for ticket ${tPid}: $startedP"
+    $refP = (Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='land_refused_pr_mode'").Trim()
+    Check 'the_pr_refusal_is_recorded' ($refP -match "ticket $tPid") "[$refP]"
+
+    # AND IT IS THE FIELD, NOT THE TICKET. Without this the checks above would read identically
+    # if pr mode had simply broken landing for everybody.
+    Set-Content "$root\dodona.json" '{ "main": "main", "verify": ["echo verify-ok"] }'
+    Dodona @("token-request", "$tPid") | Out-Null
+    $landBack = Dodona @("land", "$tPid")
+    Check 'the_same_ticket_lands_once_the_repository_is_local_merge_again' `
+        ($DODONA_EXIT -eq 0 -and $landBack -match "landed ticket $tPid") $landBack
+
     # ---- 12. the causal chain is in the store (§12) ----
     $events = (python -c "
 import sqlite3

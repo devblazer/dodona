@@ -916,6 +916,20 @@ all of it is `docs/M5-DELIVERY-PLAN.md` (the authority; design §7.1/§7.2 are s
 points there). Read it before touching any of this; the traps below are the short version, and
 each one is a way to lose someone's work silently.
 
+**THE FIELD EXISTS NOW, AND WHAT IT DOES IS REFUSE** (`REVIEW-AND-MERGE-PLAN` R7, D-R28, built
+2026-08-21). In a `"delivery": "pr"` repository Dodona **never merges, never grants a merge token,
+never deletes a branch and raises no approval question** — it supplies the worktree and gets out
+of the way, and the forge's merge button is the human gate. Everything upstream is untouched: the
+completion record is still assembled and still readable (`dodona ticket-record <ticket>` — which
+IS the PR description, D-R29), and the manager still reviews it and can still send work back.
+Three things to know before you rely on it. **An unrecognised value reads as `pr`, not as
+`local-merge`** (D-R31): only the absent key and the exact word `local-merge` permit merging,
+because a typo that refuses a land is recoverable and one that advances a ref is not. **Dodona
+does not touch a forge at all** — no push, no PR, no observer; that is the project's ceremony and
+M5.5's remaining work. And **the recorded branch can go stale**: Dodona still names `ticket/N`, so
+a lane that cuts its own branch the project's way leaves the record pointing at the old one. That
+is a gap rather than a hazard only because nothing destructive reads it in pr mode.
+
 **And this is not either/or with `/ship`.** That skill's landing step is the fallback for a
 project with no process of its own — it exists so a session can cope with a worktree at all,
 and with a repo that never defined one. Where a project *does* define one, that process

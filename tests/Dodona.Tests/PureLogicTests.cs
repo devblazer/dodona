@@ -1507,3 +1507,53 @@ public class AskTests
         }
     }
 }
+
+/// <summary>
+/// R7 / D-R28: which delivery lifecycle a repository is on. `Config.DeliveryIsPr` is the single
+/// fold behind every pr-mode refusal — the land, the merge token, the approval ask and the branch
+/// deletion all ask it and nothing else — so it is worth pinning here rather than only through a
+/// suite that has to start a daemon to reach one of them.
+///
+/// The asymmetry is the point, and it is what these cases are actually about: only the absent key
+/// and the exact word `local-merge` permit merging. Wrong towards `pr` refuses a land, which is
+/// loud and recoverable; wrong towards `local-merge` advances a ref in a repository whose owner
+/// said not to, which is the one irreversible act in this system.
+/// </summary>
+public class DeliveryTests
+{
+    [Theory]
+    [InlineData("local-merge")]
+    [InlineData("LOCAL-MERGE")]
+    [InlineData("  local-merge  ")]
+    [InlineData(null)]
+    public void Only_the_absent_key_and_the_exact_word_permit_merging(string? delivery) =>
+        Assert.False(Config.DeliveryIsPr(delivery));
+
+    /// <summary>`"PR"` is somebody spelling it in caps, and it must mean what they meant.</summary>
+    [Theory]
+    [InlineData("pr")]
+    [InlineData("PR")]
+    [InlineData("  pr  ")]
+    public void Pr_is_pr_however_it_is_cased(string delivery) =>
+        Assert.True(Config.DeliveryIsPr(delivery));
+
+    /// <summary>A TYPO LEANS TOWARDS REFUSING, and this is the case the direction was chosen for.
+    /// `Config.Load` reads a non-string value through `ToString()` for the same reason, so
+    /// `"delivery": true` arrives here as "True" and lands in this row rather than reading as
+    /// local-merge by way of a fallback.</summary>
+    [Theory]
+    [InlineData("locl-merge")]
+    [InlineData("local merge")]
+    [InlineData("localmerge")]
+    [InlineData("")]
+    [InlineData("True")]
+    public void Anything_unrecognised_reads_as_pr_rather_than_as_permission_to_merge(string delivery) =>
+        Assert.True(Config.DeliveryIsPr(delivery));
+
+    /// <summary>A repository with no dodona.json at all is `local-merge`, which is every suite in
+    /// this repo and the operator's own machine. If this ever flips, Dodona stops landing anything
+    /// anywhere.</summary>
+    [Fact]
+    public void A_config_with_nothing_set_is_local_merge() =>
+        Assert.False(new Config("main", Array.Empty<string>()).IsPr);
+}

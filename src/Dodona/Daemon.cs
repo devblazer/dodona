@@ -62,9 +62,36 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
                      // degrades that project to no judgement, which every caller already
                      // handles (the brain is an improver, never a gate) and which announces
                      // itself out loud rather than silently.
-                     int MaxBrains = 6)
+                     int MaxBrains = 6,
+                     // WHICH LIFECYCLE THIS REPOSITORY'S OWN PROCESS OWNS (M5-DELIVERY-PLAN §3,
+                     // which is the authority for the field and the ceremony around it;
+                     // REVIEW-AND-MERGE-PLAN §7 and D-R28). Two values and one spelling of each:
+                     // "local-merge" (the default, today's behaviour) and "pr".
+                     string Delivery = "local-merge")
 {
     public PolicyRule[] Rules => Policy ?? Dodona.Policy.Default;
+
+    /// <summary>Is this a repository whose own CLAUDE.md and skills own the merge?
+    ///
+    /// `local-merge` is everything Dodona has always done: it names the branch, holds the merge
+    /// token, performs the ff-only land and prunes. `pr` means the project owns all of that —
+    /// Dodona never merges, never grants a merge token and never deletes a branch. It supplies
+    /// the isolation and gets out of the way, and the forge's merge button is the human gate
+    /// (REVIEW-AND-MERGE-PLAN §7; D-R10 is untouched, and this puts the manager further from a
+    /// yes rather than closer to one).
+    ///
+    /// THE FOLD IS DELIBERATELY ASYMMETRIC, AND WHICH WAY IT LEANS IS THE WHOLE SAFETY ARGUMENT.
+    /// Only the absent key and the exact word `local-merge` permit merging; every other value —
+    /// `"PR"`, a typo, `true`, an empty string — reads as `pr`. Wrong in that direction refuses a
+    /// land: loud, and entirely recoverable by fixing one word. Wrong in the other direction
+    /// advances a ref in a repository whose owner said not to, which is the single irreversible
+    /// act in this system (P0.1's reasoning, one field over). Nothing existing can break on the
+    /// strict reading, because no repository carries this key at all yet.</summary>
+    public bool IsPr => DeliveryIsPr(Delivery);
+
+    /// <summary>The fold, separately so it can be tested without a file on disk.</summary>
+    public static bool DeliveryIsPr(string? delivery) =>
+        !string.Equals((delivery ?? "local-merge").Trim(), "local-merge", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>What a lane may run without asking, beyond edits (§2.9 made concrete —
     /// found by dogfooding: acceptEdits covers edits but not shell, headless mode
@@ -107,6 +134,13 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
                 r.TryGetProperty("effort", out var eq) ? eq.GetString() ?? "high" : "high",
                 r.TryGetProperty("why", out var yq) ? yq.GetString() ?? "" : "")).ToArray();
 
+        // Read RAW, and `ToString()` rather than a fallback for a non-string, so that
+        // `"delivery": true` cannot come out as "local-merge" by way of Str()'s default. The
+        // fold lives in `IsPr`, with the reasoning for its direction.
+        var delivery = d.RootElement.TryGetProperty("delivery", out var dv)
+            ? (dv.ValueKind == JsonValueKind.String ? dv.GetString() ?? "" : dv.ToString())
+            : "local-merge";
+
         return new Config(main, verify, agent,
             Str("model", "opus"), Str("effort", "high"),
             Str("routerModel", "haiku"), Str("routerEffort", "low"),
@@ -117,7 +151,7 @@ sealed record Config(string Main, string[] Verify, string Agent = "claude",
             Str("autoPublishProject", ""),
             !(d.RootElement.TryGetProperty("brain", out var br) && br.ValueKind == JsonValueKind.False),
             Str("brainModel", "haiku"), Str("brainEffort", "low"),
-            Num("maxBrains", 6));
+            Num("maxBrains", 6), delivery);
     }
 }
 
@@ -1650,7 +1684,10 @@ sealed class Daemon
                     var open = _store.Tickets().Count(t => t.State == "open" &&
                         (t.RepoPath.Length > 0 ? t.RepoPath.Equals(key, StringComparison.OrdinalIgnoreCase)
                                                : t.Repo.Equals(r.Name, StringComparison.OrdinalIgnoreCase)));
-                    w.WriteLine($"{r.Name,-14} main={cfg.Main,-8} open-tickets={open}  token={(tok.Holder?.ToString() ?? "free"),-6} verify={cfg.Verify.Length} step(s)  {r.Path}");
+                    // `delivery=pr` is printed only when it is true: it changes what half of
+                    // this line MEANS (a token nobody can hold, a land nobody will run), so a
+                    // reading that did not mention it would be the misleading one.
+                    w.WriteLine($"{r.Name,-14} main={cfg.Main,-8} open-tickets={open}  token={(tok.Holder?.ToString() ?? "free"),-6} verify={cfg.Verify.Length} step(s){(cfg.IsPr ? "  delivery=pr" : "")}  {r.Path}");
                 }
                 break;
             }
@@ -1662,6 +1699,31 @@ sealed class Daemon
                 var lease = e.TryGetProperty("lease", out var ls) ? ls.GetInt32() : 120;
                 var t = _store.Ticket(tid);
                 if (t is null || t.State != "open") { w.WriteLine($"error: ticket {tid} not open"); break; }
+
+                // R7 / D-R28: A `delivery: pr` REPOSITORY HAS NO MERGE TOKEN TO GIVE. Dodona does
+                // not merge there, so the token would be serialising access to an operation that
+                // never happens — and granting one is not harmless bookkeeping: a holder plus a
+                // lease fences every other ticket in that repository for nothing.
+                //
+                // AHEAD OF THE APPROVAL GATE ON PURPOSE. Otherwise an `on-approval` ticket is sent
+                // to `dodona approve` first, to unlock a token it can never be given — a refusal
+                // that instructs you to do something useless, which is the shape this codebase has
+                // paid for repeatedly. The repository is resolved here as a READ; the refusal for
+                // an UNRESOLVABLE one stays below where it was, so no existing refusal changes
+                // order.
+                //
+                // DENY WITH A REWRITE, NEVER A WALL (M5-DELIVERY-PLAN §1): the project's own skill
+                // is mid-flow when this fires, and a bare refusal strands it.
+                if (RepoOf(t) is { } prRepo && Config.For(_primary, prRepo.Path).IsPr)
+                {
+                    _store.Event("token_refused_pr_mode", null, $"ticket {tid}: {prRepo.Name} is delivery: pr");
+                    w.WriteLine($"refused: {(t.Repo == "." ? "this repository" : t.Repo)} is delivery: pr — Dodona does not merge here, so there is no merge token");
+                    w.WriteLine($"         push {(t.Branch.Length > 0 ? t.Branch : "your branch")} and open a PR; the forge's merge button is the gate");
+                    w.WriteLine($"         what the work did is already assembled: dodona ticket-record {tid}");
+                    w.WriteLine("##exit 1");
+                    break;
+                }
+
                 if (t.MergeMode == "on-approval" && !t.Approved)
                 {
                     _store.Event("token_refused_unapproved", null, $"ticket {tid}");
@@ -3162,6 +3224,26 @@ sealed class Daemon
         var fresh = _store.Ticket(tid);
         if (fresh is null || fresh.State != "open" || fresh.Approved) return 0;
 
+        // R7 / D-R28: IN A `delivery: pr` REPOSITORY THERE IS NOTHING HERE TO APPROVE, so nothing
+        // is asked. `yes` means `Store.TicketApprove`, whose entire purpose is to unblock
+        // `token-request` — and that command refuses outright in pr mode, so the question would be
+        // offering a merge it cannot deliver. This method's own rule already decides it: nothing
+        // to ask is a STATE, and a question nobody can act on is worse than no question.
+        //
+        // AND NOTHING REPLACES IT, WHICH IS THE PART WORTH DEFENDING (D-R29). The record is still
+        // written and still readable (`dodona ticket-record`), the manager still reviews it and a
+        // send-back still reaches the lane's own pane — none of that is approval machinery. What
+        // goes is the one surface that existed only because Dodona held the merge. Announcing a
+        // "ready for its PR" line instead was written and removed: `AskToLand` is called once by
+        // the record and again by the review's `finally`, so it would be two pane lines per turn
+        // for a decision Dodona is not part of — D-R18's never-stuck fix turning into never-quiet.
+        if (RepoOf(fresh) is { } prRepo && Config.For(_primary, prRepo.Path).IsPr)
+        {
+            _store.Event("land_ask_skipped_pr_mode", laneId,
+                $"ticket {tid}: {prRepo.Name} is delivery: pr — the forge's merge button is the gate, so there is no approval to ask for");
+            return 0;
+        }
+
         var (id, opened) = _store.QuestionUpsert(Ask.KindLand, tid.ToString(),
                                                  LandAskText(fresh, recordJson), Ask.LandCandidates(tid));
         if (!opened) return id;
@@ -3596,9 +3678,20 @@ sealed class Daemon
             var (wc, wOut) = Git.Run(repoPath, "worktree", "remove", "--force", t.Worktree);
             if (wc == 0)
             {
-                if (t.Branch.Length > 0) Git.Run(repoPath, "branch", "-D", t.Branch);
-                _store.Event("worktree_pruned", null, $"ticket {t.Id} abandoned: {why}");
-                lines.Add($"abandoned ticket {t.Id}: worktree pruned, branch {t.Branch} deleted, claims released");
+                // R7 / D-R28: DODONA NEVER DELETES A BRANCH IN A `delivery: pr` REPOSITORY, and
+                // this is the site that matters — the land is the other one, and pr mode makes it
+                // unreachable. Here the branch may already be pushed with a PR open on it, and an
+                // abandon undoes DODONA'S ticket, not the project's work. The worktree still goes
+                // (it is Dodona's, and a checkout of an old commit left behind for ever is what
+                // the prune exists to prevent); the branch stays, and the receipt says so rather
+                // than quietly reporting a deletion that did not happen.
+                var prKeepsBranch = Config.For(_primary, repoPath).IsPr && t.Branch.Length > 0;
+                if (t.Branch.Length > 0 && !prKeepsBranch) Git.Run(repoPath, "branch", "-D", t.Branch);
+                _store.Event(prKeepsBranch ? "branch_kept_pr_mode" : "worktree_pruned", null, $"ticket {t.Id} abandoned: {why}");
+                if (prKeepsBranch) _store.Event("worktree_pruned", null, $"ticket {t.Id} abandoned: {why}");
+                lines.Add($"abandoned ticket {t.Id}: worktree pruned, " +
+                          (prKeepsBranch ? $"branch {t.Branch} KEPT (delivery: pr — it may have a PR open on it)" : $"branch {t.Branch} deleted") +
+                          ", claims released");
             }
             else
             {
@@ -6111,6 +6204,21 @@ sealed class Daemon
         var repoPath = repo.Path;
         var cfg = Config.For(_primary, repoPath);
         var where = t.Repo == "." ? "project root" : $"repository {t.Repo}";
+
+        // R7 / D-R28: DODONA DOES NOT MERGE A `delivery: pr` REPOSITORY, AND THIS IS WHERE THAT
+        // IS TRUE. Refusing in the cheap half makes `LandFlow` unreachable for such a repo, so
+        // the guarantee is structural rather than a set of conditionals sprinkled down the flow:
+        // nothing merges main in, nothing fast-forwards, no worktree is pruned and no branch is
+        // deleted, because none of that code runs. It sits ahead of the token check so the answer
+        // is "there is no merge here" rather than "you do not hold a token" — which would send
+        // someone to `token-request`, which refuses for this same reason.
+        if (cfg.IsPr)
+        {
+            _store.Event("land_refused_pr_mode", null, $"ticket {tid}: {where} is delivery: pr");
+            Announce(t, $"ticket {tid} is not Dodona's to land: {where} is delivery: pr — push {t.Branch} and open a PR; {cfg.Main} is untouched");
+            return $"refused: {where} is delivery: pr — Dodona does not merge here. Push {t.Branch} and open a PR " +
+                   $"(dodona ticket-record {tid} is what it did); {cfg.Main} is unchanged and {t.Branch} is kept.";
+        }
 
         var tokenId = TokenIdOf(t);
         var tok = _store.TokenRead(tokenId);

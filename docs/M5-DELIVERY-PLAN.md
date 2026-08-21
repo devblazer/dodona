@@ -334,7 +334,7 @@ expected cost when it starts. Suites stay model-free regardless (§17).
 | **M5.2** | `dodona ask` / `answer`, generalized `waiting on you`, staleness escalation | Turns nine strand points into badges; the largest usability gain per line |
 | **M5.3** | Branch lock; `Bash` matcher on the gate with rewrites | Makes the silent cases loud and the loud cases self-correcting |
 | **M5.4** | Ticket groups; repo-qualified claims; sibling worktree layout; the `install` hook | Makes the real workflow expressible at all |
-| **M5.5** | `delivery: pr`; detached worktree at `origin/main`; learned branch; member states; patch-id prune guard | Stops Dodona doing what the project owns |
+| **M5.5** | `delivery: pr`; detached worktree at `origin/main`; learned branch; member states; patch-id prune guard | Stops Dodona doing what the project owns. **PARTLY BUILT, 2026-08-21, out of order** — `REVIEW-AND-MERGE-PLAN` R7 shipped the **field and the refusals** (no merge, no merge token, no branch deletion, no approval question) on their own, ahead of M5.3 and M5.4, on this table's own principle that each step be independently shippable; D-R28 carries the dependency argument. **Still M5.5's:** the detached worktree at `origin/main`, the learned branch, member states and the patch-id prune guard. Dodona still names and records `ticket/N`, so a lane that cuts the project's own branch leaves that record stale — harmless today only because nothing destructive reads it in pr mode. |
 | **M5.6** | The observer; wake-on-event; registry watch; ordered members | The buttery part — ships advance themselves |
 | **M5.7** | Release slot; standing ship claim; preflight | Removes the last two ways two lanes can collide |
 

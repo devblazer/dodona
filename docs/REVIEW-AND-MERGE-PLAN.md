@@ -1,8 +1,10 @@
 # Review and merge — the ordinary developer flow, with a manager as the reviewer
 
-Status: **R1, R2, R3, R3.5, R4, R5, R6 and R8 BUILT** (R8 on 2026-08-21); **R7 planned**. R8 is
+Status: **R1–R8 BUILT** (R6 and R8 on 2026-08-21, R7 the same day — every row of §8 is in). R8 is
 D-R23/D-R24, the operator's two amendments to D-R12, plus D-R25/D-R26/D-R27 decided while
-building them. Written 2026-08-20 from the operator's brief, after tracing the land
+building them. R7 is the delivery mode, and it is the **refusal** half of `M5-DELIVERY-PLAN`'s
+M5.5 shipped on its own — D-R28 says what that does and does not include, and it is the first
+thing to read before assuming pr mode is finished. Written 2026-08-20 from the operator's brief, after tracing the land
 path in code and measuring what the manager is actually told today.
 
 The authority for how a ticket's work gets reviewed and lands on main. It **supersedes
@@ -513,6 +515,81 @@ enforceable rather than requested:
 - **A refused request still spends the round.** Otherwise a reviewer could retry after every
   refusal and have its unbounded loop back for the price of one bad path.
 
+### BUILT 2026-08-21 — R7, and the four decisions it could not be written without
+
+**D-R28. R7 IS THE REFUSAL, AND IT SHIPS ALONE — NOT BEHIND M5.3 AND M5.4.** Two current plans
+size this phase differently and both were live. This document's Appendix A is narrow: add the
+field to `Config`, branch the land on it. `M5-DELIVERY-PLAN` §14 puts `delivery: pr` at **M5.5**,
+behind M5.3's branch lock and M5.4's ticket groups and sibling worktree layout. **The narrow one
+is what was built**, on M5 §14's own stated principle applied to itself — *each step independently
+shippable* — because a phase that can only land behind three others has not been scoped, it has
+been sequenced.
+
+It genuinely stands alone, and that is a claim about dependencies rather than a preference:
+
+- **The branch lock (M5.3)** stops `checkout <existing-branch>` walking a worktree off its branch.
+  That hazard is identical in both delivery modes and is live in `local-merge` today; pr mode
+  neither creates it nor depends on its fix.
+- **Ticket groups and the sibling layout (M5.4)** make a *two-repo* ticket expressible. A one-repo
+  ticket in a pr repo works now, and every refusal here keys on the **repository** (`Config.For`)
+  rather than on the ticket — so it is already the right shape for one member of a group when
+  groups arrive.
+- **What is NOT built, and must not be mistaken for built:** the detached worktree at
+  `origin/main` and the learned branch (M5 §7.1), the Bash gate's rewrites (M5 §7.2), the observer
+  (M5 §10), and any contact with a forge at all. Dodona still names `ticket/N` and still records
+  it, so a lane that cuts its own branch the project's way leaves that record stale. **Nothing
+  destructive reads it in pr mode** — the land is unreachable and the one remaining branch
+  deletion is switched off (D-R30's neighbour, in `AbandonTicket`) — which is why the stale record
+  is a gap and not a hazard. It is M5.5's to close.
+
+**And the half that ships is the half a suite can prove.** §17 forbids a suite that touches the
+network, and mocking a forge into the daemon to get one would be testing the mock. So R7 is the
+refusal — no merge, no merge token, no branch deletion, no approval question — at 18 checks
+across `m1` and `m2`, **14 of them seen red**. The other four are the *stays unchanged* controls
+(a pr repo still gets its worktree, still assembles the record, still promotes a refused write,
+still prunes on abandon); they are VACUOUS against HEAD by construction, because HEAD has no such
+field, and they are kept and labelled for the same reason `m2`'s
+`stopping_a_deliberate_ticket_lane_leaves_the_ticket_alone` is kept.
+
+**D-R29. THE RECORD BECOMES THE PR DESCRIPTION BY BEING READABLE, NOT BY DODONA FORMATTING ONE.**
+§7 says the record *becomes* the PR description and the review *becomes* PR review comments, and
+that reads like a renderer — a `ticket-record --pr` emitting a body. **Rejected.** A PR body's
+shape is ceremony: the title convention, the checklist, the issue-closing keyword, the template
+the repo already has. M5 §1 assigns ceremony to the project, so an opinionated Dodona-rendered
+body would be Dodona doing precisely what R7 exists to stop doing. What R7 owes is that the
+material **exists and can be fetched at the moment it is wanted**, and it does: `dodona
+ticket-record <ticket>` returns the whole record as JSON, the review is in `manager_review`, and
+the pr-mode token refusal **names that command in its rewrite**, so the agent meets it exactly
+when it is about to write the PR. The agent writes the description its project's way, out of
+facts Dodona assembled.
+
+**D-R30. A `pr` REPOSITORY RAISES NO APPROVAL QUESTION, AND NOTHING REPLACES IT.** R6's ask exists
+because Dodona holds the merge: `yes` is `Store.TicketApprove`, whose only job is to unblock
+`token-request` — and that command refuses outright in pr mode. So the question would be
+offering a merge Dodona will never perform, and `AskToLand`'s own rule already decides it:
+*nothing to ask is a state, and a question nobody can act on is worse than no question.* **D-R10
+is untouched, in the safest possible direction** — the forge's merge button is further from the
+manager than the operator's `approve` ever was, and there is still no path from a review to
+`TicketApprove`.
+
+A *"ready for its PR"* pane announcement in its place was written and then removed. `AskToLand`
+is called twice per finished turn — once by the record, once by the review's `finally` — so it
+would have been two pane lines per turn about a decision Dodona is not part of: D-R18's
+never-stuck fix turning into never-quiet. Nothing a person needs is lost. The record is still
+assembled and still readable, the manager still reviews it, and a send-back still lands in the
+lane's own pane exactly as in `local-merge`. What goes is only the surface that existed because
+Dodona held the merge.
+
+**D-R31. AN UNRECOGNISED `delivery` VALUE READS AS `pr`, NOT AS `local-merge`.** Only the absent
+key and the exact word `local-merge` — trimmed and case-folded — permit merging. `"PR"`, a typo,
+`true` and an empty string all read as `pr`. **The fold is asymmetric on purpose, and which way
+it leans is the whole safety argument.** Wrong towards `pr` refuses a land: loud, immediate, and
+repaired by correcting one word. Wrong towards `local-merge` advances a ref in a repository whose
+owner said not to, which is the single irreversible act in this system (P0.1's reasoning, one
+field over). Nothing existing can break on the strict reading, because at `ee3464f` no repository
+carries the key at all. `Config.Load` reads a non-string through `ToString()` for the same reason
+— so `"delivery": true` cannot arrive as `local-merge` by way of `Str()`'s fallback.
+
 ## 6. Where the human still is
 
 Unchanged, and deliberately: `approve` gates `token-request`, and this repo stays
@@ -528,8 +605,9 @@ consequences worth stating:
 
 ## 7. PR-mode repositories get the same thing
 
-For a repository whose `dodona.json` says `"delivery": "pr"` (CLAUDE.md §5.2,
-`M5-DELIVERY-PLAN.md`), §3's local merge is not Dodona's to perform. The same record becomes the
+**BUILT 2026-08-21 as R7 — the refusal half of it; read D-R28 for the line between what is in
+and what is still M5.5's.** For a repository whose `dodona.json` says `"delivery": "pr"`
+(CLAUDE.md §5.2, `M5-DELIVERY-PLAN.md`), §3's local merge is not Dodona's to perform. The same record becomes the
 **PR description**, and the manager's review becomes **PR review comments** — same assembly, same
 send-back, different back end, and the forge's own merge button replaces D-R2. The write-up is worth
 more there, not less: it is what a human reviewer reads first.
@@ -545,14 +623,14 @@ more there, not less: it is what a human reviewer reads first.
 | **R4 — BUILT** | D-R8's record, assembled at completion. Gated on the worktree having changed (D-R13). The verify result is **reported, never run** — see D-R15, which is the decision this phase could not be written without. | `m1`: a finished ticket produces exactly one record carrying diffstat, verify result, drop-check and the agent's report; a chatty lane produces no second one; and **an adopted lane still produces one after a daemon restart** — the wiring lives in one place called from both the spawn and reconcile, which is where §3's dead-routing-ladder failure would otherwise reappear. 13 new checks, all seen red; `m0` gains the no-summon assertion for the read verb. |
 | **R5 — BUILT** | D-R9/D-R10/D-R12: the manager reads it, may send back, bounded at three, and **cannot approve**. Triggered by the record existing rather than by a third `OnResult` consumer, and fired after `_recordLocks` is released — see D-R16/D-R17/D-R18. | `brain`: a send-back reaches the lane as input; a manager "approval" grants **nothing** (unapproved, no `ticket_approved`, `token-request` still refuses); the cheap tier escalates when unsure; and **three send-backs is the bound with a daemon restart in the middle of them**, because the count lives in the store. `m1` asserts the other side of D-R17: with autostart off no judgement agent is started at all. 7 new checks, all seen red. |
 | **R6 — BUILT** | D-R11: the write-up renders in the approval ask (absorbs `WORK-ISOLATION` P5). Raised by the RECORD, never by the review — see D-R19, the decision the phase turns on. | `ui-use`: the ask renders at a live window with no review having run, carries what code knows, offers no path, and answering it takes the ticket from *token refused* to *token granted*. `brain`: the manager's note is in the row, the bound says so, and a verdict — `approve` included — never answers it. `m1`: the unapproved refusal names the question. 12 checks, all seen red. |
-| **R7** | §7: PR-mode assembles a PR description and review comments instead. | `publish`/`workspace`: a `"delivery": "pr"` repo performs no local merge. |
+| **R7 — BUILT** | §7 as a **refusal**: `"delivery": "pr"` means Dodona never merges, never grants a merge token, never deletes a branch and raises no approval question. D-R28 (scope), D-R29 (the record is the description by being readable), D-R30 (no ask, and nothing replaces it), D-R31 (an unrecognised value reads as `pr`). | `m1`, not `publish`/`workspace` as this row first guessed: the land, the token and the record all live in m1's fixture, and a dodona.json rewrite flips the mode with no daemon restart (`Config.For` re-reads per call), so it needed no second fixture. `m1`: a pr repo grants no token even once approved, its land leaves main's sha unchanged and keeps branch and worktree, `land_started` is never written — and the SAME ticket lands once the repo is `local-merge` again, which is what stops the whole section reading as "landing is broken". `m2`: the other branch deletion, on abandon, is switched off while the worktree prune stays. 18 checks, 14 seen red; the 4 vacuous ones are the stays-unchanged controls and say so. |
 | **R8 — BUILT** | D-R23/D-R24: the reviewer may REQUEST named files when something concerns it — narrow, once, and recorded — and a send-back on `verify: red` does not spend a round. Both amend D-R12. Three decisions came out of building them: D-R25 (the exempt round is its own event kind), D-R26 (one exemption per verify RESULT, which is the terminator D-R24 lacks), D-R27 (the details round is shared by both tiers and bounded by the record's own `changed` list). | `brain`: a review that asks for a file gets that file and no more, asks only once, and its request is in the `manager_review` row; a send-back with `verify: red` in the record leaves the send-back count unchanged, and one with `not-run` still counts. **The exemption must be proved from the RECORD, never from the model's stated reason** — a fake manager claiming red must earn no exemption, and that is the check most worth writing first. |
 
 **R1–R3 are the correction and come first**: R1 makes concurrent landing work at all, R2 makes
 agent-resolved conflicts safe, and R3 removes the machinery that was standing in for R1. **R3.5
 comes next and before R4** (D-R14): R4 assembles its record on the land path, so building it first
 means building it inside a call that freezes the daemon and then moving it. R4–R6 are the review.
-R7 is the foreign-repo case and can wait.
+R7 is the foreign-repo case and could wait — it waited, and then landed narrow (D-R28).
 
 **AND R3 LEFT A PROMISE R5 HAS TO KEEP — KEPT, 2026-08-20.** R3 retired the file reservations on
 the operator's reasoning that *"if that is problematic in some way, it's the manager's job to say
@@ -967,12 +1045,29 @@ plan shipped without one and handing it off meant re-deriving everything (`a403f
   producer of that event and a hand-inserted one would prove the suite's idea of the record
   rather than the land's. 6 new checks, all seen red.
 
-### R7 — PR mode
+### R7 — PR mode (BUILT 2026-08-21; D-R28 is the scope, and read it before extending this)
 
-- **`"delivery": "pr" | "local-merge"` DOES NOT EXIST YET.** Verified: no `Delivery` member anywhere
-  in `src/`. `M5-DELIVERY-PLAN.md` owns that field and the PR ceremony; this phase adds the field to
-  **`Config`** and branches `LandOp` on it. Do not invent a second spelling of it — read that plan
-  first.
+- **`Config.Delivery`**, with **`Config.IsPr`** and the static **`Config.DeliveryIsPr`** beside it
+  (`Daemon.cs`). One spelling, owned by `M5-DELIVERY-PLAN.md` §3: `"pr" | "local-merge"`, default
+  `local-merge`. The fold is asymmetric — D-R31.
+- **`LandGate`** (`Daemon.cs`) refuses a pr repo, ahead of the token check. That is the whole
+  structural guarantee: `LandFlow` is the only code that merges main in, fast-forwards, prunes a
+  worktree or deletes a branch, and the cheap half returning early makes all of it unreachable —
+  so it is one refusal rather than four conditionals sprinkled down a flow. `land_refused_pr_mode`,
+  and `land_started` is consequently never written.
+- **`case "token-request"`** refuses **ahead of the approval gate**, or an `on-approval` ticket is
+  sent to `dodona approve` to unlock a token it can never be given. `token_refused_pr_mode`. The
+  repository is resolved at the top of the handler as a read; the refusal for an *unresolvable*
+  one stays where it was, so no existing refusal changed order.
+- **`AskToLand`** returns 0 for a pr repo and records `land_ask_skipped_pr_mode` — D-R30.
+- **`AbandonTicket`** keeps the branch and still prunes the worktree, and the receipt says `KEPT`.
+  This is the second and more dangerous of the two branch deletions: the branch may already be
+  pushed with a PR open on it, and an abandon undoes *Dodona's* ticket, not the project's work.
+- **`case "repos"`** prints `delivery=pr` when it is true and nothing when it is not: it changes
+  what half that line MEANS (a token nobody can hold, a land nobody will run).
+- **Unchanged on purpose, and asserted:** `ticket-create`'s worktree, R4's completion record, R5's
+  manager review and its send-back. §7's *same assembly, same send-back, different back end* is a
+  property to preserve, not a thing to rebuild.
 
 ### How to work on it
 

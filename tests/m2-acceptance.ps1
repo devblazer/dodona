@@ -233,6 +233,59 @@ for r in db.execute('SELECT tier, delivered_lane, retargeted FROM routing_decisi
     $branchGone = ($pBranch -ne '') -and ((git -C $root branch --list $pBranch | Out-String).Trim() -eq '')
     Check 'the_undo_prunes_the_worktree_and_the_branch' ($wtGone -and $branchGone) `
         "wt=[$pWtPath] gone=$wtGone branch=[$pBranch] gone=$branchGone"
+    # ---- R7 / D-R28: THE OTHER PLACE A BRANCH DIES, AND IN pr MODE IT DOES NOT --------------
+    #
+    # The land is the first place Dodona deletes a branch, and pr mode makes it unreachable (m1
+    # asserts that). THIS is the second and the dangerous one: an abandon undoes DODONA'S ticket,
+    # not the project's work, and in a `delivery: pr` repository that branch may already be pushed
+    # with a PR open on it. So the worktree still goes -- it is Dodona's, and a checkout of an old
+    # commit left behind for ever is what the prune exists to prevent -- and the branch stays.
+    #
+    # The repository has no dodona.json in this fixture, so writing one IS the flip; Config.For
+    # re-reads per call, so no daemon restart is involved. It is removed again afterwards.
+    Set-Content "$root\dodona.json" '{ "main": "main", "delivery": "pr" }'
+    $prPromoted = Dodona @("lane-start", "--title", "PRENGINE", "--child", $fake)
+    $prLane = if ($prPromoted -match 'lane (\d+)') { $Matches[1] } else { 0 }
+    $prFile = "$root\src\prengine\p.cs"
+    $prHook = "`"$dodona`" gate-hook --lane $prLane --workspace `"$($ws.Id)`""
+    $prJson = @{ tool_name = 'Write'; tool_input = @{ file_path = $prFile } } | ConvertTo-Json -Compress
+    $ErrorActionPreference = 'Continue'
+    $prErr = Join-Path $out 'promote-pr.err'
+    ($prJson | & cmd /c $prHook 2> $prErr) | Out-Null
+    $ErrorActionPreference = 'Stop'
+    $prWt = ''
+    Wait-Until {
+        $script:prWt = (Invoke-StoreSql $storeDb "SELECT cwd FROM lanes WHERE id = $prLane").Trim()
+        $script:prWt -match 'wt[\\/]+t\d+'
+    } 20000 'the pr-mode promoted lane is respawned into its ticket worktree' | Out-Null
+    $prTicket = (Invoke-StoreSql $storeDb "SELECT id FROM tickets WHERE lane_id = $prLane AND state = 'open'").Trim()
+    $prBranch = if ($prTicket -match '^\d+$') { (Invoke-StoreSql $storeDb "SELECT branch FROM tickets WHERE id = $prTicket").Trim() } else { '' }
+    # VACUOUS AGAINST HEAD BY CONSTRUCTION, and kept on purpose for the same reason m2's
+    # `stopping_a_deliberate_ticket_lane_leaves_the_ticket_alone` is kept: HEAD has no delivery
+    # field at all, so nothing about a pr repo can differ there and no code state makes it red
+    # today. What it catches is later -- the day somebody reads "Dodona gets out of the way" as
+    # permission to take this away too.
+    Check 'a_pr_repo_still_promotes_a_refused_write' `
+        ($prTicket -match '^\d+$' -and $prBranch -ne '') "ticket=[$prTicket] branch=[$prBranch] cwd=[$prWt]"
+    $prStop = Dodona @("lane-stop", $prLane)
+    # Captured once, then asserted and reported: 84c0002's lesson about a check whose red named
+    # the string the red itself contained.
+    $prBranchAfter = if ($prBranch -ne '') { (git -C $root branch --list $prBranch | Out-String).Trim() } else { '' }
+    $prWtGone = ($prWt -match 'wt[\\/]+t\d+') -and (-not (Test-Path $prWt))
+    Check 'abandoning_a_pr_ticket_keeps_its_branch' ($prBranchAfter -ne '') `
+        "branch=[$prBranch] after=[$prBranchAfter] stop=[$prStop]"
+    # VACUOUS AGAINST HEAD BY CONSTRUCTION, and kept on purpose for the same reason m2's
+    # `stopping_a_deliberate_ticket_lane_leaves_the_ticket_alone` is kept: HEAD has no delivery
+    # field at all, so nothing about a pr repo can differ there and no code state makes it red
+    # today. What it catches is later -- the day somebody reads "Dodona gets out of the way" as
+    # permission to take this away too.
+    Check 'abandoning_a_pr_ticket_still_prunes_the_worktree' $prWtGone "wt=[$prWt] gone=$prWtGone"
+    # The receipt has to SAY the branch was kept. An undo that silently reports a deletion it did
+    # not perform is D-9's announcement lying, one mode over.
+    Check 'the_undo_says_the_branch_was_kept_rather_than_reporting_a_deletion' `
+        ($prStop -match 'KEPT' -and $prStop -notmatch 'deleted') $prStop
+    Remove-Item "$root\dodona.json" -Force -ErrorAction SilentlyContinue
+
     # ...and a ticket the OPERATOR created is not collateral. Ticket 1 was made by ticket-create,
     # so stopping ITS lane must leave it alone -- section 11's "nothing is deleted" is about their
     # work, and only a PROMOTED ticket is Dodona's to withdraw.
