@@ -640,14 +640,23 @@ produced **gibberish**, so the seam was used for what it was built for and the e
 replaced. Deepgram is measured end to end at the socket (`state=listening engine=deepgram`, one
 live socket, nothing configured — the credential is the one the `claude` CLI already holds).
 
-**What the operator reports, 2026-08-21, verbatim:** *"I've tested the dictation a bit — well,
-before a lot of the changes — it seemed to work."* So the line this paragraph carried for weeks —
-*nobody has spoken to it* — is retired: somebody has, and it worked. What is NOT established is a
-word-error rate, or that it still works at HEAD, since "a lot of the changes" have landed since.
-Treat dictation as **working, unmeasured, and unconfirmed at the current build**. Sixty seconds of
-talking settles the third of those, and it is the cheapest verification in this repo — but no
-suite can do it, because every suite runs with `DODONA_UI_MIC=off` and must keep doing so
-(opening the operator's microphone is §4's incident in a new costume).
+**What the operator reports, 2026-08-21, verbatim — TWICE, and the second one is what settles
+it.** First: *"I've tested the dictation a bit — well, before a lot of the changes — it seemed to
+work."* Then, asked again after R8 had landed and published: *"I did test the diction. It worked
+fine."* Both of the lines this paragraph used to carry are now retired. Somebody has spoken to it;
+it works; and it works **at the current build**, because the second test came after the changes the
+first one was hedged against.
+
+Treat dictation as **working at the current build, unmeasured**. Exactly one thing is still not
+established, and it is worth naming precisely so nobody re-opens the settled part: there is **no
+word-error rate**. Nobody has scored the engine against `tests\assets\recordings`, so "it worked
+fine" is a person's judgement and not a number — good enough to stop treating dictation as
+unproven, and not good enough to support any claim that one engine is more accurate than another.
+
+**No suite can close either gap, and none may try.** Every suite runs with `DODONA_UI_MIC=off` and
+must keep doing so — opening the operator's microphone is §4's incident in a new costume — so this
+evidence lives in prose by necessity, which is precisely the case §0 says to write down where the
+next session will read it.
 
 `ui dump` gained an `input` key (`text`, `lines`, `height`, `fit`, `sized`, `remembered`,
 `hint`) — `lines` is LOGICAL lines, not wrapped rows; `fit` is the default height and

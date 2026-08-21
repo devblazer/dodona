@@ -17,21 +17,25 @@ because that needs a voice and the build was unattended. Written after Phase A o
   **every** arming rather than cached (D-E15).
 - **279 checks green** (`unit` 261, `voice` 22 — of which 11 are new), with **no microphone and no
   network**, plus the full gate. Every new check has been seen red; §7 records each red verbatim.
-- ~~**Nobody has spoken to it.**~~ **Somebody has — the operator, reported 2026-08-21:** *"I've
-  tested the dictation a bit — well, before a lot of the changes — it seemed to work."* That
-  retires the line this plan carried from the day it was written, and it is the answer this
-  document was waiting for: the route works in a human's hands, not only at the socket.
+- ~~**Nobody has spoken to it.**~~ ~~**Somebody has, but not at HEAD.**~~ **Somebody has, at the
+  current build — the operator, twice.** Reported 2026-08-21: *"I've tested the dictation a bit —
+  well, before a lot of the changes — it seemed to work."* And again the same day, after R8 had
+  landed and published, when the outstanding caveat was put to them: *"I did test the diction. It
+  worked fine."* The route works in a human's hands, not only at the socket, and the "before a lot
+  of the changes" hedge is spent — the second test came after them.
 
-  **Three things it is not.** It is not a word-error rate, so §6's spike is answered in kind
-  rather than in numbers — which is enough for the decision it was blocking (the engine is
-  chosen) and not enough for anyone claiming accuracy. It is not a check at HEAD: "before a lot of
-  the changes" is the operator's own caveat, so the confirmed build is an earlier one. And it is
-  not something a suite can hold — every suite runs `DODONA_UI_MIC=off` and must keep doing so, so
-  this evidence lives in a document by necessity, which is exactly the kind of claim CLAUDE.md §0
-  says to write down where the next session will read it.
+  **ONE thing it is still not, and only one.** It is not a word-error rate. §6's spike is answered
+  in kind rather than in numbers, which is enough for the decision it was blocking — **the engine
+  is chosen** — and not enough for anyone claiming accuracy, or claiming one engine beats another.
+  Nothing has been scored against `tests\assets\recordings`, which is what a number would take.
 
-  Standing status, and use these words rather than "working" or "unverified" alone: **working,
-  unmeasured, unconfirmed at the current build.**
+  It remains something **no suite can hold**: every suite runs `DODONA_UI_MIC=off` and must keep
+  doing so, so this evidence lives in a document by necessity — exactly the kind of claim
+  CLAUDE.md §0 says to write down where the next session will read it. That is why the status
+  below is worded rather than measured, and why the wording is worth keeping exact.
+
+  Standing status, and use these words rather than "working" or "unverified" alone: **working at
+  the current build, unmeasured.**
 
 **Read `VOICE-INPUT-PLAN.md` first.** This document replaces exactly one file of it and assumes
 everything else stands. It also supersedes that plan's **D-V5** and closes **D-V8**; §9 records

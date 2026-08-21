@@ -10,10 +10,11 @@ check carries and §12 for the decisions taken while building it.
 
 **SUPERSEDED ON BOTH BULLETS BELOW — read `VOICE-ENGINE-PLAN.md` first.** That plan closed D-V8
 (SAPI shipped, the operator spoke to it, it produced gibberish, and Deepgram replaced it) and
-recorded the operator's own hands-on test, 2026-08-21: dictation **works** in a human's hands,
-unmeasured, and unconfirmed at the current build. The two bullets are kept as written because they
-are the state this plan shipped in and the reasoning still reads true; they are no longer the
-status.
+recorded the operator's own hands-on tests, 2026-08-21 — including a second one, after R8 landed,
+that retires the "unconfirmed at the current build" caveat the first one carried. Dictation
+**works at the current build**, in a human's hands; what is still missing is a word-error rate and
+nothing else. The two bullets are kept as written because they are the state this plan shipped in
+and the reasoning still reads true; they are no longer the status.
 
 **Two things are NOT done, and neither is a detail:**
 
@@ -23,7 +24,8 @@ status.
   the seam being real rather than a stub. Nothing in any suite depends on it — every suite runs
   with `DODONA_UI_MIC=off`, which refuses to construct it at all. **Do not describe dictation as
   working end to end until someone has spoken to it.** The next step is §6's spike, and it is
-  sixty seconds of talking before it is anything else.
+  sixty seconds of talking before it is anything else. *(Both halves are now spent: `SapiRecognizer`
+  was replaced by Deepgram, and the talking has been done — twice — see the note above.)*
 
 **A note on the name, because it changes what gets built.** "Text to speech" is the machine
 talking; what the rest of the sentence describes — *listening*, a toggle, Enter still sending —
