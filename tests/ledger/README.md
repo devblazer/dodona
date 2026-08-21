@@ -462,3 +462,29 @@ is how the line-ending bill gets paid twice, and this one buys nothing.
   `baseline.tsv` row and is not counted by `dev ledger`; the baseline is frozen, and teaching the
   census about a second project is W4's, in the commit that gives it rows to count.
 - **`--rehash` is still not implemented** (unchanged from W2).
+
+## The wire owners have not been audited, and every one looked at so far was wrong
+
+`wires.tsv` names, for each of the 52 wires, the single check that would fail most loudly if that
+wire were cut. Those owners were carried from the six survey files. **They were not independently
+verified against the code**, and three have now been found defective -- all three found by
+accident, while doing something else:
+
+| wire | owner | what is wrong |
+|---|---|---|
+| **E7** | `m2:tier0_message_delivered` | **Under-proves.** It asserts only that the text ARRIVED in the target lane, which the focus fallback also achieves. Run under a mutant that removed the instant path it came back **VACUOUS** -- green with the wire cut. Its sibling `tier0_prefix_routes` asserts the RUNG (`-> SKY (tier 0)`). **Owner re-pointed to it.** Found by W3's mutant. |
+| **F1** | `the_newline_survived_to_the_agent` | **Over-claims.** Reads `pane_events`, so it proves UI to daemon only, while its own comment claims "all the way to the agent's stdin". Must be strengthened to assert the agent's own echo before it owns the row. Found while building the register. |
+| **F2** | `ui-grid:enter_still_sends` | **Structurally cannot prove it.** `ui key enter` calls `InputKey` directly and never goes through the `PreviewKeyDown` handler, so swapping the handler registration breaks the real app with every suite green. Issue #16. Found while merging the register. |
+
+**Three for three.** Nobody has looked at the other 49.
+
+That is not an argument that the register is bad -- it is the argument for the mechanism the plan
+already specifies. An owner is a CLAIM about what a check proves, and this repo's standing rule is
+that a claim in prose is not enforcement. The `Wire` block (W7) and `owner_body_sha` exist to make
+an owner's body reviewable and its silent narrowing detectable; until they land, every owner is
+prose.
+
+**So the rule for anyone moving checks: prove the owner before you rely on it.** A slice's mutant
+should redden the wire's owner, and an owner that stays green under a defect in its own wire is a
+finding, not a nuisance -- write it down and re-point the row. `dev prove --with` makes that
+mechanical, and it is exactly how E7 was caught.
