@@ -42,8 +42,9 @@ dodona ps                                                                  # wha
 **Through `dev`, never by invoking a `.ps1` directly.** That is not a style preference: the
 wrapper is what makes a suite which crashed, hung or printed no tally a FAILURE instead of a
 blank line, and it is what runs them five at a time. Invoking the scripts by hand gives back
-exactly the blindness this step exists to remove — `ui-use` spent its whole life dying in its
-own `finally` and reporting nothing, and nobody saw it, because the tally was never required.
+exactly the blindness this step exists to remove — `ui-use` (since split into the four `ui-*`
+suites) spent its whole life dying in its own `finally` and reporting nothing, and nobody saw
+it, because the tally was never required.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit        # ~1 s, while you edit
@@ -67,8 +68,10 @@ said "~95 s all in / about 70 s of suites" until then, and a number that stale g
 it is what made `dev gate` sound like a thing to reach for casually. Re-measure rather than
 trust either figure; `dev gate` prints its own timings.
 
-Exit code 0, or fix before proceeding. UI affordances need a check in `ui-use` (driven via UI
-Automation), not only a `ui dump` assertion — dumps prove the UI *reports* correctly while the
+Exit code 0, or fix before proceeding. UI affordances need a check in one of the four UI
+suites — `ui-grid` (the box, the panes, the tiles), `ui-shell` (N workspaces in one window),
+`ui-ask` (the overlay that asks) or `ui-wake` (a window over a sleeping workspace), driven via
+UI Automation — not only a `ui dump` assertion — dumps prove the UI *reports* correctly while the
 first thing a person tries can still be a dead end.
 
 If a fresh failure is in the **test**, fix the test and say so; known test traps are in

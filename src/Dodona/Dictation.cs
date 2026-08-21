@@ -17,7 +17,7 @@ namespace Dodona;
 ///    <see cref="Decide"/> could return that a caller could route to a submit, so the
 ///    decision layer physically cannot ask for one. <c>Dictation_never_submits</c> asserts
 ///    that by reflection, so adding such a member goes red before anyone wires it up.
-/// 2. <c>MainWindow.OnHeard</c> contains no reference to <c>SubmitInput</c>, and a `ui-use`
+/// 2. <c>MainWindow.OnHeard</c> contains no reference to <c>SubmitInput</c>, and a `voice`
 ///    check speaks the word "enter" at a live window and demands the feed did not move.
 ///
 /// The words "enter", "send", "submit" and "go" are therefore ORDINARY TEXT. They are not on

@@ -51,7 +51,10 @@ function Abort([string]$why, [string]$fix) {
 function AllSuites {
     # 'unit' first: it is the cheapest thing that can fail, so a full run finds a broken
     # claim algebra in under a second instead of four minutes in.
-    'unit', 'm0', 'm1', 'm2', 'm3', 'm4', 'workspace', 'ui-use', 'voice', 'compression', 'brain', 'concierge', 'publish'
+    'unit', 'm0', 'm1', 'm2', 'm3', 'm4', 'workspace', 'voice', 'compression', 'brain', 'concierge', 'publish',
+    # `ui-use` was one 1221-line, 130-check, 88.8 s suite that had to run alone. Split at its
+    # four fixture boundaries 2026-08-21 (issue #2); see SoloSuites below for the measurement.
+    'ui-grid', 'ui-shell', 'ui-ask', 'ui-wake'
 }
 
 # ---------------------------------------------------------------- blockers
@@ -690,6 +693,44 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 #         number is what CLAUDE.md 1 has a whole section about. If it reddens in a wave again,
 #         put it back HERE WITH THE NEW MEASUREMENT and read `.dodona-bypass.log` first.
 #
+#         IT REDDENED, ONCE IN FIVE, AND IT IS STILL NOT ON THIS LIST -- the measurement, and
+#         the reason for departing from the line directly above it, both recorded here because
+#         a decision taken silently is one the next session re-argues. 2026-08-21, the ui-use
+#         split (issue #2), five consecutive `dev gate` runs on a clean machine:
+#
+#             m1 in the wave   0 failed / RED on 2 / 0 / 0 / 0 failed, at 46.7, 70.4, 44.5,
+#                              43.8 and 44.4 s. Alone, minutes later: 135 checks, 0 failed,
+#                              38.6 s.
+#             the two reds     `say_answers_during_a_land` (error: lane 2 not connected) and
+#                              `a_promoted_lane_is_re_briefed_as_a_ticket_lane` (detail []),
+#                              both downstream of a wait that ran out under load. Neither is
+#                              an assertion that is wrong; both are the machine reading.
+#
+#         WHY NOT MOVE IT ANYWAY. Because it is not m1's turn -- it is issue #3's, and treating
+#         one instance of a general phenomenon as an m1 fact is exactly the wrong conclusion
+#         CLAUDE.md 3.2 records somebody drawing from their own leaked shims. In the SAME five
+#         runs `m4` produced NO TALLY LINE once (below) and was green alone; CLAUDE.md's own
+#         entry above records three of seven gates red at the previous commit, never on m1.
+#         Moving m1 here costs ~44 s serialized, which is the entire wall-clock win of the
+#         split, to buy nothing that would have made either of those two runs green.
+#
+#         WHAT WOULD CHANGE THIS: m1 red in a wave TWICE in five, or red on a wave where
+#         nothing else was. Then it is m1, and it comes back here with that measurement.
+#
+# m4 PRODUCED NO TALLY LINE ONCE IN THOSE FIVE GATES, AND IS NOT ON THIS LIST EITHER. Run 4,
+#         2026-08-21: exit 2, stdout completely EMPTY, 25.3 s, and five processes left alive in
+#         its sandbox (a `dodona` daemon, a DodonaFakeAgent and three DodonaShim) -- so it died
+#         somewhere its `finally` never reached, which is why the cleanup never ran. Alone,
+#         minutes later: 43 checks, 0 failed, 27.2 s; and green in the four other gates at 39.2,
+#         30.8, 33.8 and 32.4 s.
+#
+#         WORTH KNOWING WHICHEVER WAY #3 GOES: this is a DIFFERENT signature from a red check.
+#         The suite vanished rather than failed, and the only reason anybody knows is P4.4 --
+#         `Run-Suite` treating a missing tally as a FAILURE. Before P4.4 this run would have
+#         been a silent green. m4 is the one suite in the wave that runs a REAL build, and the
+#         wave got denser when ui-use became four suites, so it is a plausible new pressure and
+#         is recorded as such rather than as a diagnosis. It has not been reproduced.
+#
 # m4 IS DELIBERATELY NOT ON THIS LIST, and RECOVERY-PHASES P4.3 says it should be ("its
 # internal publish builds the tree's own obj/"). That is half right, and the half it gets
 # wrong is the half that matters: publish passes -p:BaseOutputPath=<temp>\ per project
@@ -704,30 +745,41 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 # shim-info, neutral cwd); Instance.Scoped() hashes that home into the concierge and shell
 # ids, so two suites cannot collide on a pipe; every root is a GUID temp directory; and every
 # UI launch carries --test-window, so it renders off-screen and never takes focus.
-# ui-use JOINED THIS LIST 2026-08-19, MEASURED, after Phase 2 made `workspace` heavier.
-#         Phase 2 gave workspace several more live lanes and two `--project` daemon
-#         restarts. In the same wave the gate went: ui-use 177.6s with 4 FAILED inside the
-#         concurrent run, and 64.4s with 0 failed alone, on a machine with nothing leaked
-#         (the gate's own pre-run count said none). The whole run inflated with it -- m4
-#         110s against a 36s baseline, brain 107s against 37s -- so this is contention, not
-#         a suite that got slower.
 #
-#         The four reds were grid-tile counts and a close-button interaction, i.e. missed
-#         UI interactions, and CLAUDE.md 3 records that ui-use's failures CASCADE: two
-#         missed interactions become six red checks. That is the same signature as the
-#         5->3 concurrency drop (69e8003), and the root cause named there is windows and
-#         process starts, which is exactly what Phase 2 added.
+# ui-use IS NOT ON THIS LIST BECAUSE ui-use NO LONGER EXISTS. Split 2026-08-21 (issue #2)
+#         into `ui-grid`, `ui-shell`, `ui-ask` and `ui-wake`, at the four fixture boundaries
+#         it already had -- each section already stood up its own daemon and its own window.
+#         ALL FOUR RUN IN THE WAVE, and that is a measurement, not a preference.
 #
-#         WHY SOLO RATHER THAN DROPPING CONCURRENCY TO 2: this isolates the one sensitive
-#         suite instead of slowing all twelve, and ui-use is the suite whose failures are
-#         least readable when they cascade. Raising the I7 budget instead would have been
-#         the wrong fix twice over -- it does not make a red check green, and a gate that
-#         is red one run in three teaches people to re-run instead of read, which
-#         CLAUDE.md 0.3 calls the same disease as a gate that is always green.
+#         WHY IT WAS HERE: it joined on 2026-08-19 after Phase 2 made `workspace` heavier. In
+#         one wave the gate gave ui-use 177.6s with 4 FAILED, and 64.4s with 0 failed alone,
+#         on a machine with nothing leaked. The four reds were grid-tile counts and a
+#         close-button interaction -- missed UI interactions -- and its failures CASCADE: two
+#         missed interactions become six red checks, one problem arriving looking like six.
+#         Solo isolated the one sensitive suite instead of slowing all twelve.
 #
-#         The REAL fix is still splitting ui-use -- 64s of monolith is why it dominates the
-#         wall clock at all -- and that remains unfinished business, not this change.
-function SoloSuites { , @('unit', 'ui-use', 'voice') }
+#         WHAT THE SPLIT MEASURED. Three full `dev gate` runs, clean machine (`live app
+#         before: 0`, no leaked test processes), 2026-08-21, all sixteen suites:
+#
+#             whole gate   216.4s / 232.6s / 232.9s   vs 257.4s and 272.2s with the monolith
+#             ui-grid       59.8 /  48.3 /  59.6      vs ui-use 87.5-105.7s, 18s of variance
+#             ui-ask        30.2 /  31.0 /  29.1         on a completely idle machine
+#             ui-shell      20.1 /  18.5 /  21.8
+#             ui-wake       22.0 /  21.4 /  21.9
+#
+#         Zero red checks in any of the four across those three runs. That is the thing that
+#         had to be true before they could stay in the wave, and it is what to re-measure
+#         before moving any of them.
+#
+#         PUTTING THE FOUR PIECES HERE INSTEAD WOULD BE SLOWER THAN THE MONOLITH WAS, and it
+#         is the trap this whole change turns on: four solo pieces are four fixture setups
+#         where there was one, and each one copies the whole build into its own DODONA_HOME.
+#         Measured directly rather than argued -- `dev test ui-grid ui-shell ui-ask ui-wake
+#         --sequential`: 62.5 + 18.7 + 31.4 + 21.7 = 134.3s, against 88.8s for ui-use alone.
+#         Splitting a suite only pays if the pieces run CONCURRENTLY. If one of them ever has
+#         to come back here, it costs far more than its share of the monolith did, and the
+#         other three should stay in the wave rather than follow it out of sympathy.
+function SoloSuites { , @('unit', 'voice') }
 
 # `voice` joined this list on 2026-08-20, MEASURED rather than assumed. It went into the wave
 # first, on the reasoning that m3 is also a window suite and runs there. The gate then failed on
@@ -751,7 +803,8 @@ function SoloSuites { , @('unit', 'ui-use', 'voice') }
 # Measured 2026-08-19, each suite alone: ui-use 42.5, m4 28.4, publish ~30, brain 23.4,
 # m3 16.6, workspace 13.8, compression 11.7, concierge 11.1, m1 7.7, m2 7.7, m0 7.0.
 function SuiteOrderHint {
-    , @('ui-use', 'publish', 'm4', 'brain', 'voice', 'm3', 'workspace', 'compression', 'concierge', 'm1', 'm2', 'm0')
+    , @('brain', 'workspace', 'ui-grid', 'ui-ask', 'publish', 'm4', 'voice', 'm1', 'ui-shell', 'ui-wake',
+        'm3', 'compression', 'concierge', 'm2', 'm0')
 }
 
 # HOW MANY AT ONCE. THREE. The number is measured, and it was 5 until 5 was shown to be wrong.
@@ -785,12 +838,19 @@ function SuiteOrderHint {
 # people learn to re-run instead of read, which is the same disease as a gate that is always
 # green -- so the slower honest number wins.
 #
-# THE ROOT CAUSE IS NOT ESTABLISHED, and this comment says so rather than implying otherwise.
-# What is known: ui-use is reliable with two companions and unreliable with four, and it is the
-# only suite in the set that drives a real window through UI Automation for over a minute. The
-# durable fix is to stop it being a 70-second monolith -- it is four suites wearing one name
-# (typing/lanes, the input box, the self-dividing grid, the multi-workspace shell). Splitting it
-# is how this stops being a scheduling parameter, and that is Phase 4's unfinished business.
+# THE ROOT CAUSE IS STILL NOT ESTABLISHED, and this comment says so rather than implying
+# otherwise. What was known: ui-use was reliable with two companions and unreliable with four,
+# and it was the only suite in the set driving a real window through UI Automation for over a
+# minute.
+#
+# THE MONOLITH IS GONE (2026-08-21, issue #2) and THREE IS STILL THE NUMBER. It really was four
+# suites wearing one name, and it is now four suites: ui-grid, ui-shell, ui-ask, ui-wake. Three
+# full gates with all four in the wave were green in all four, 216.4-232.9s against 257.4-272.2s
+# before -- so the split bought wall clock and stopped one 89-second suite setting the pace.
+# What it did NOT do is explain the contention: in one of those three runs `m1` went red on two
+# checks inside the wave and green alone minutes later (135 checks, 0 failed, 38.6s), which is
+# the same signature one suite along. Do not read the split as a fix for that; it is issue #3,
+# it is still open, and a denser wave is if anything more likely to provoke it.
 #
 # DODONA_TEST_CONCURRENCY overrides it, for a machine unlike this one -- and 1 is the same
 # thing as `dev suites --sequential`.

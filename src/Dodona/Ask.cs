@@ -112,7 +112,7 @@ public static class Ask
     /// (LOCATIONS-PLAN P3.A). Takes project NAMES, not paths, and that is the whole shape of it:
     ///
     /// * **No paths, ever.** CLAUDE.md §3.1 has no folder UI, and a routing question names
-    ///   projects rather than offering somewhere to navigate. `ui-use`'s
+    ///   projects rather than offering somewhere to navigate. `ui-ask`'s
     ///   `the_ask_offers_no_filesystem_navigation` asserts that no choice VALUE carries a
     ///   separator or a drive letter, and this must keep satisfying it.
     /// * **Names, so the daemon does the resolving.** The answer comes back as a name and the
@@ -171,7 +171,7 @@ public static class Ask
     /// records the row `withdrawn` rather than `answered`, which is the difference between "the
     /// operator said not yet" and "the operator said land it" when somebody reads the row back.
     ///
-    /// **No path, no folder, no drive letter** (CLAUDE.md §3.1, and `ui-use`'s
+    /// **No path, no folder, no drive letter** (CLAUDE.md §3.1, and `ui-ask`'s
     /// `the_ask_offers_no_filesystem_navigation` asserts it on the choice values): this is a
     /// question about a TICKET, which the system already knows by number, not about a place.
     ///

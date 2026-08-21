@@ -661,7 +661,7 @@ public partial class MainWindow : Window
     // docs/VOICE-INPUT-PLAN.md Phase A. The operator's constraint, verbatim: "Send will still
     // need an enter." OnHeard below calls ComposeInput and InputKey; it does NOT reference
     // SubmitInput, and it could not usefully be made to — Dictation.Decide cannot return a value
-    // that means send (Dictation's class note). `ui-use:spoken_send_words_do_not_submit` speaks
+    // that means send (Dictation's class note). `voice:spoken_send_words_do_not_submit` speaks
     // the word at a live window and demands the feed did not move.
 
     IRecognizer? _mic;

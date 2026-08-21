@@ -445,7 +445,8 @@ tickets; sequential work in the same area shares one.
   it. A seventh live lane appeared only as a NAME in the tray — agent running, badge
   unseeable, and it could have been blocked on you with no visible signal. Now every live
   lane has a tile, expanded or a chip, and a collapsed chip still carries its badge and its
-  blocked glyph. `tests/ui-use-acceptance.ps1` asserts exactly that.
+  blocked glyph. `tests/ui-grid-acceptance.ps1` asserts exactly that (it was `ui-use` until
+  that suite was split into four, 2026-08-21).
 - **Dispatcher pane fixed in the right column**, outside the grid, always in the same
   place. Right, not bottom: conversation history is vertical, the panes stay squarer, and
   the column is the natural home for the decision feed and the tray.

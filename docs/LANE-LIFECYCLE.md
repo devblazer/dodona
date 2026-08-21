@@ -136,8 +136,9 @@ Proposed mechanics (a proposal, not a decision):
 
 **Test it the way the dead end was caught.** This is a timing behaviour, so a dump taken
 after everything settles will pass while the live experience is wrong.
-`tests/ui-use-acceptance.ps1` should assert *during* a long turn that the badge is
-absent, and only after the result that it appears.
+`tests/ui-grid-acceptance.ps1` should assert *during* a long turn that the badge is
+absent, and only after the result that it appears. *(Built: `badge_defers_while_agent_works`
+and `badge_flushes_at_turn_end`. It was `ui-use` until that suite was split, 2026-08-21.)*
 
 ---
 

@@ -218,7 +218,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | `build` | Builds. Only *real* compile errors reach you; a locked output is named, never mistaken for one. |
 | `test <suite>...` | One or more named suites, run concurrently. `--sequential` for one at a time. **IT DOES NOT BUILD — run `dev build` first or you are testing the PREVIOUS binary.** Suites copy their binaries out of `src\...\bin\Release\...` (`Use-TestBinaries`), and only `prove`, `gate` and `suites` compile. Measured 2026-08-19: a defect was deleted from `Daemon.cs`, `dev test m0` said **26 checks, 0 failed**, and `dev build` + the same command said 1 failed. That is a false green from the tool itself — `LOCATIONS-PLAN.md` P1.5 carries the fix. |
 | `test unit` | The pure logic — no daemon, no store, no window. **~1 second**; run it while you edit. |
-| `suites` | All thirteen, **three at a time** (69e8003 lowered it from five; `ui-use` went intermittently red at five). Measured on this machine 2026-08-19: **93 s** at 69e8003 and **100 s** with Phase 3's fifteen extra checks, not the 54–72 s this row claimed — the range predates both the concurrency change and Phase 3's eleven extra m0 checks. Still a gate before committing rather than the twenty-minute event the table claimed before that. |
+| `suites` | All sixteen, **three at a time** (69e8003 lowered it from five; `ui-use` went intermittently red at five). Measured on this machine 2026-08-19: **93 s** at 69e8003 and **100 s** with Phase 3's fifteen extra checks, not the 54–72 s this row claimed — the range predates both the concurrency change and Phase 3's eleven extra m0 checks. Still a gate before committing rather than the twenty-minute event the table claimed before that. |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. Three verdicts: PROVEN, VACUOUS (it passes against HEAD — rewrite it), MISSING (it never ran). |
 | `prove <suite>:<check> ...` | The same, for MANY checks: grouped by suite and **one run per suite**, because a suite run prints every check it ran. Phase 3 ran m0 eleven times to read eleven lines of one run's output — 46 minutes for what is 40 seconds. Reach for this form by default. |
 | `lint` | The repo lint (I8): control bytes, dangling `tests\*.ps1` references in docs, mixed line endings. Sub-second, tracked files only. Asserted by `gate`; run it directly after any scripted edit. |
@@ -290,8 +290,11 @@ Three changes did it, and all three are in `tools/dev.ps1` and `tests/_workspace
   become six red checks. Three is green and repeatable (93.1 s and 93.3 s, all twelve, twice).
   The contention is windows and process starts, not CPU (22 cores, never bound), and the root
   cause is NOT established: ruled out by measurement are the leaked shims, the other window
-  suites, and m4's build — it needs the full rolling wave to reproduce. `ui-use` being a
-  70-second monolith is the real problem; splitting it is unfinished business.
+  suites, and m4's build — it needs the full rolling wave to reproduce. **`ui-use` was split on
+  2026-08-21** (issue #2) into `ui-grid`, `ui-shell`, `ui-ask` and `ui-wake`, all four of which
+  run in the wave — so the 70-second monolith is no longer the pace-setter. It did not root-cause
+  the contention: one of the three gates that measured the split had `m1` red on two checks in
+  the wave and green alone minutes later.
   **`voice` has now shown the same signature, and it is a SOLO suite, which narrows it.** In one
   full `dev gate` on 2026-08-21 it took **70.5 s and went red on three checks** — the mic toggle
   simply did not take within its 20 s wait — and it was **40.3 s and green** alone minutes later,
@@ -334,7 +337,10 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 | the UI as a view over the store | `dev test m3` |
 | publish, hot swap, provenance | `dev test m4 publish` |
 | workspaces, members, repo exclusivity | `dev test workspace` |
-| anything a person clicks or types | `dev test ui-use` |
+| the box, the panes, the tiles — anything a person clicks or types in ONE workspace | `dev test ui-grid` |
+| one window over N workspaces: bands, the merged feed, boot-to-zero | `dev test ui-shell` |
+| the overlay that ASKS — repo-init, the merge approval, the router's held sentence | `dev test ui-ask` |
+| a window over a SLEEPING workspace, and the five lane-tile actions | `dev test ui-wake` |
 | dictation: the box, the mic toggle, spoken words | `dev test voice` — ~13 s, opens no microphone |
 | compression | `dev test compression` |
 | the dispatcher brain, the routing ladder, the manager's review of finished work | `dev test brain` |
@@ -344,7 +350,7 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 - **While iterating**: `dev test unit` for anything that is a function (~1 s), then the one or
   two suites your change actually touches. Anything that must start a daemon has a ~7 second
   floor, and that is the honest target.
-- **Before you MERGE to main**: `dev gate`, once — all thirteen plus the ten assertions, about
+- **Before you MERGE to main**: `dev gate`, once — all sixteen plus the ten assertions, about
   80 s of suites and ~15 s of its own two builds. This is the only moment the full set is
   required, and skipping it is how a stale test survives for months (two did).
 - **Three consecutive failed verification attempts**: stop and report. Do not grind.
@@ -354,7 +360,8 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 
 **A suite that does not print `<N> checks, <M> failed` is now a FAILURE, not a shrug.** This
 is not bookkeeping. `m0` had never printed a tally in its life, so `dev.ps1` could not detect
-an m0 failure at all; and `ui-use` was dying inside its own `finally` on a stray stderr line
+an m0 failure at all; and `ui-use` (since split into the four `ui-*` suites, and the `finally`
+went with it into all four) was dying inside its own `finally` on a stray stderr line
 (§0.2's `NativeCommandError` trap) — 74 checks computed, discarded, and reported as `no tally
 line`, which counted as nothing. Both were green-looking and both were blind.
 
@@ -510,7 +517,7 @@ the design doc records the revision.
 
 ## 3. Verify with the suites, not by looking
 
-Thirteen model-free suites, all fake agents, all free. **Run them through `dev test`, never by
+Sixteen model-free suites, all fake agents, all free. **Run them through `dev test`, never by
 invoking the `.ps1` directly** — the wrapper is what enforces that a suite which crashed, hung
 or never reported is a FAILURE rather than a blank line (P4.4), and it is what runs them five
 at a time:
@@ -529,7 +536,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 | `m3` | the UI as a view over the store |
 | `m4` | hot swap (runs a REAL build — the slow one) |
 | `workspace` | identity, repo-exclusivity, multi-repo |
-| `ui-use` | the UI driven like a person |
+| `ui-grid` | the UI driven like a person: the dispatcher box and how it grows, the panes, the model/effort policy, the attention badges, and the close / collapse / expand controls on a tile |
+| `ui-shell` | one window over N workspaces (§3.1): boot-to-zero, the bare launch, a second awake workspace as a band, clicking a band, the feed as a labelled union, and a live shell hot-swapping |
+| `ui-ask` | the window ASKS, and it is not a dialog: one component, two render modes, one answer path, over all three question kinds real code produces — `repo-init`, the finished ticket's merge approval (R6), and the router's held sentence |
+| `ui-wake` | the WINDOW OVER A SLEEPING WORKSPACE — the mirror of "a daemon outlives its window" — plus the five lane-tile actions, which had no `ui` verb at all until they were added there |
 | `compression` | selective compression (§5) |
 | `brain` | the dispatcher brain, its routing ladder, the no-second-brain-beside-a-live-one guard, and the manager who reviews finished ticket work: it may send it back, it is bounded at three, and it can never approve. It may also ask to READ a named changed file — once per review, refused if it is not in the record's own list — and a send-back on a `verify: red` record spends no round, decided from the RECORD and never from what the reviewer says its reason was |
 | `concierge` | the group-scope ladder, the fence, the review-behind |
@@ -542,16 +552,23 @@ than no table, because it still gets quoted. `dev suites` and `dev test` print t
 every run, measured on the machine you are actually using. What stays is the mapping from a
 suite to what it covers, which is judgement no command can print.
 
-**Three suites run ALONE, and taking one out of that list will look like it works.**
-`SoloSuites` in `tools/dev.ps1` is the list — `unit`, `ui-use`, `voice` — and each entry carries
+**Two suites run ALONE, and taking one out of that list will look like it works.**
+`SoloSuites` in `tools/dev.ps1` is the list — `unit`, `voice` — and each entry carries
 its reason in a comment:
 
 - **`unit`** compiles (`dotnet test` builds Dodona into `src\Dodona\bin`), and every other
   suite copies its binaries out of there at startup. Two compilers, one directory.
-- **`ui-use` and `voice`** are window suites whose failures CASCADE — two missed interactions
-  become six red checks — and both were measured red inside a wave and green alone. The
-  measurements, with dates, are in `tools/dev.ps1` beside the list. Neither is root-caused;
-  the contention is windows and process starts, not CPU.
+- **`voice`** is a window suite whose failures CASCADE — two missed interactions become six red
+  checks — measured red inside a wave and green alone. The measurement, with its date, is in
+  `tools/dev.ps1` beside the list. It is not root-caused; the contention is windows and process
+  starts, not CPU.
+- **`ui-use` came off this list on 2026-08-21 by ceasing to exist** (issue #2). It was the other
+  cascading window suite; it is now `ui-grid`, `ui-shell`, `ui-ask` and `ui-wake`, and all four
+  run in the wave. Three full gates measured them green 3/3 there, with the whole run at
+  216.4–232.9 s against 257.4–272.2 s before. **The trap that decision turns on:** four solo
+  pieces would be four fixture setups where there was one, and measured sequentially they cost
+  **134.3 s against the monolith's 88.8 s**. A split only pays if the pieces run concurrently —
+  so if one of them ever has to go solo, do not move the other three with it.
 - **`m1` was on this list for eight days and came off it on 2026-08-21** (issue #4). Its old
   entry read: intermittent beside a parallel wave, green 5/5 alone in 8–9 s, with
   `gate_denies_outside_claim` failing 3 of 4 times next to `m4`'s real build because
@@ -618,6 +635,14 @@ its reason in a comment:
   machine was (`ui-use` alone ranged 94.7–118.3 s). I7 was breached once. **Do not raise the
   budget to cover that spread**; m1 rejoining the wave is 40 s of it back, and the rest is #1.
 
+  **m1 reddened in a wave once in five on 2026-08-21 and was left there anyway** — the
+  measurement and the reasons are in `tools/dev.ps1` beside `SoloSuites`, because the line
+  above says to put it back *with the new measurement* and a decision taken silently is one the
+  next session re-argues. Short version: green alone (135/0, 38.6 s), the two reds were waits
+  running out under load, `m4` produced no tally line once in the same five runs, and moving m1
+  solo costs ~44 s — the entire wall-clock win of the `ui-use` split — to fix neither. It comes
+  back to the list if it goes red twice in five, or red in a wave where nothing else did.
+
 So: **do not "tidy up" `SoloSuites` because a suite looks fast enough to parallelise, and do not
 add to it because a suite looks risky.** Both directions are a measurement, and m1's took four
 full gate runs to make. Note also that "m1 alone costs 8 seconds" was true when it was written
@@ -662,9 +687,10 @@ And **a silent degrade is a bug** (§0.1's standing directive covers "quietly st
 only evidence of two dead days was a status-line suffix nobody reads. The fallback now
 announces itself once per daemon and writes a `routing_unrouted` event.
 
-`ui-use` is the one that matters most for UI work: dumps and screenshots prove the UI
-*reports* correctly while the first thing a person tries is still a dead end. If you add
-an interactive affordance, add a check there — not only a dump assertion.
+The four `ui-*` suites are the ones that matter most for UI work: dumps and screenshots prove
+the UI *reports* correctly while the first thing a person tries is still a dead end. If you add
+an interactive affordance, add a check in whichever of `ui-grid` / `ui-shell` / `ui-ask` /
+`ui-wake` owns that surface — not only a dump assertion.
 
 For visual work, use the capture loop rather than describing pixels:
 
@@ -745,7 +771,7 @@ Two WPF facts this cost, both now in code comments: `MinLines`/`MaxLines` are **
 once `TextWrapping` is on (the default height is a measured `MinHeight`, and `ui dump`'s
 `fit=28` is what caught it), and §0.2's trap is load-bearing here — with `AcceptsReturn` the
 TextBox class handler eats Enter before an instance `KeyDown`, so the handler is
-`PreviewKeyDown` and `tests/ui-use-acceptance.ps1` now proves Enter still sends.
+`PreviewKeyDown` and `tests/ui-grid-acceptance.ps1` now proves Enter still sends.
 
 Poses are deterministic fixtures (`full`, `badges`, `blocked`, `feed`, `collapsed`,
 `tray`, `overlay`, `long`, `two`, `twelve`, `bands`, `merged-feed`, `boot-zero`, `ask`,
@@ -763,9 +789,9 @@ lands in, and sends the same daemon command `dodona answer` / `dodona concierge-
   be permanently untestable — which is why `PickerWindow` and `StartLaneWindow` have no coverage
   at all, and why D-L4 rejected one.
 - **Never let it become a folder picker** (§3.1). The choices are names the system already knows;
-  `ui-use:the_ask_offers_no_filesystem_navigation` goes red if a path appears in one.
+  `ui-ask:the_ask_offers_no_filesystem_navigation` goes red if a path appears in one.
 - **With one project there is nothing to ask, so no overlay may appear.** The operator's own
-  machine is a one-project workspace, and two `ui-use` checks pin it.
+  machine is a one-project workspace, and two `ui-grid` checks pin it.
 - **A FINISHED TICKET ASKS TO BE MERGED, and that question is the one place a merge can be
   approved from besides `dodona approve`** (`docs/REVIEW-AND-MERGE-PLAN.md` R6). When a ticket
   turn ends with the worktree moved, the ask carries what the manager wrote for you — *"4 files,

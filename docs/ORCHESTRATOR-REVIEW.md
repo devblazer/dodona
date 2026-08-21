@@ -455,10 +455,12 @@ with no repository at all, and `repo-init` creates one when a ticket first needs
 Every suite through M4 asserted on `dodona ui dump` and screenshots, and all of them
 passed while the **first thing a person did with the UI hit a dead end**. Dumps prove the
 UI reports correctly; they cannot prove it is usable, because they never exercise the path
-a person takes. `tests/ui-use-acceptance.ps1` now drives the real window through UI
-Automation — focus the box, set the text, press Enter — and asserts what the operator
+a person takes. `tests/ui-grid-acceptance.ps1` and its three siblings — `ui-shell`, `ui-ask`
+and `ui-wake`, one file called `ui-use` until 2026-08-21 — now drive the real window through UI
+Automation — focus the box, set the text, press Enter — and assert what the operator
 actually gets, including that the status line never tells a GUI user to run a CLI command.
-**Any new interactive affordance needs a check in that file, not only a dump assertion.**
+**Any new interactive affordance needs a check in one of those four files, not only a dump
+assertion.**
 
 ### One honest cost note
 

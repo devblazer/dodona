@@ -69,7 +69,8 @@ static class DaemonClient
     /// It matters most in the state where nothing else is running at all: boot-to-zero
     /// (§4) is a window with no workspace awake, and typing is how the operator gets out of
     /// it. An input box that needed a concierge someone had remembered to start would make
-    /// that state a dead end — which is precisely the failure `ui-use` exists to catch.
+    /// that state a dead end — which is precisely the failure the `ui-*` suites exist to
+    /// catch (`ui-shell` owns boot-to-zero; `ui-use` was split into four on 2026-08-21).
     /// </summary>
     public static string? EnsureConcierge(int timeoutMs = 20000)
     {
@@ -150,7 +151,8 @@ static class DaemonClient
     ///
     /// It survived because no check ever ran the UI against a dead daemon, and because none of the
     /// five lane actions had a `ui` verb at all — they were unreachable, not merely untested.
-    /// Both are fixed alongside this (`ui lane`, and ui-use's revives_* checks).
+    /// Both are fixed alongside this (`ui lane`, and m3's revives_* checks -- this line said
+    /// ui-use's, and those checks have always been m3's).
     ///
     /// Consequence: this method can no longer report "daemon not running" as an outcome. Every
     /// failure it returns now names something a person can act on.

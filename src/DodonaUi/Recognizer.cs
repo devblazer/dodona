@@ -132,7 +132,7 @@ static class Recognizers
     ///
     /// It earns its place in production code rather than behind a test flag for the reason
     /// §5 gives about `ui heard`: the state it produces must be the state a real failure
-    /// produces, or the check proves nothing about the real one. `ui-use:no_modal_when_the_mic_fails`
+    /// produces, or the check proves nothing about the real one. `voice:no_modal_when_the_mic_fails`
     /// is what it exists for, and D-V3 is what that check defends — a modal a test window
     /// cannot produce would be a permanent blind spot, which is why PickerWindow and
     /// StartLaneWindow have no coverage at all.
