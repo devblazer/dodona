@@ -1057,6 +1057,105 @@ public class LaneProjectGuardTests
             Alpha));
     }
 
+    // -------------------------------------------------- the lane briefing (LANE-BRIEFING-PLAN B1)
+
+    /// <summary>**THE DEFECT R3 LEFT BEHIND, AS ONE ASSERTION.** Until this landed, every ticket
+    /// agent was told on every turn that "a PreToolUse gate denies writes outside [your claim];
+    /// if denied, stay within the claim or ask your operator for an extension". R3 / D-R5 retired
+    /// that refusal on 2026-08-20 and `claim-extend`'s with it, so the sentence described a
+    /// boundary that is not there and offered an extension to a thing that refuses nothing.
+    /// CLAUDE.md 7 states the rule this broke in terms: do not describe a ticket lane as bounded
+    /// to its claim.</summary>
+    [Fact]
+    public void A_ticket_lane_is_not_told_it_is_bounded_by_its_claim()
+    {
+        var p = Daemon.TicketSystemPrompt(7, "FOAM", "ticket/7", pr: false);
+        Assert.DoesNotContain("claim", p, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("extension", p, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("PreToolUse", p, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>TRAP T1, FROM THE OTHER SIDE. A ticket prompt names no folder and `Projects.Named`
+    /// must keep returning null for it -- the M5.1 detector does not compare ticket lanes today,
+    /// and giving one a directory sentence is a behaviour change to a safety detector rather than
+    /// a wording change (LANE-BRIEFING-PLAN 5). The plain prompt is the control directly above:
+    /// it still names its folder, so this pair fails in opposite directions if the block drifts.</summary>
+    [Fact]
+    public void A_ticket_prompt_still_names_no_folder()
+    {
+        var p = Daemon.TicketSystemPrompt(7, "FOAM", "ticket/7", pr: false);
+        Assert.Null(Projects.Named(p));
+        var args = Daemon.ClaudeArgs(new Config("main", Array.Empty<string>()), "opus", "high", p, acceptEdits: true);
+        Assert.Null(Projects.PromptDirMismatch(args, Alpha));
+    }
+
+    /// <summary>The git rules the plain lane already had, now reaching the lane that has a branch
+    /// and a worktree -- which had none of them at all. `git stash` is the one hazard that is
+    /// identical in both kinds (one shared ref for the whole repository, CLAUDE.md 5.2), and the
+    /// checkout rule differs: a plain lane must not change the branch at all, a ticket lane must
+    /// not check out one that ALREADY EXISTS -- which succeeds silently when it is free
+    /// elsewhere.</summary>
+    [Fact]
+    public void Both_lane_kinds_are_told_about_stash_and_checkout()
+    {
+        var plain = Briefing.Plain(Beta);
+        var ticket = Briefing.Ticket(7, "ticket/7", pr: false);
+        Assert.Contains("git stash", plain);
+        Assert.Contains("git stash", ticket);
+        Assert.Contains("git checkout", plain);
+        Assert.Contains("SHARED checkout", plain);
+        Assert.Contains("ALREADY EXISTS", ticket);
+        Assert.Contains("`ticket/7`", ticket);
+        // The plain lane has no branch of its own, so it is never told to cut one.
+        Assert.DoesNotContain("ALREADY EXISTS", plain);
+    }
+
+    /// <summary>R7 / D-R28 reaches the agent BEFORE the refusal does. A lane in a `delivery: pr`
+    /// repository currently learns the mode only by being refused -- by `land`, by
+    /// `token-request`, or by an approval question that never comes.</summary>
+    [Theory]
+    [InlineData(true, "will not merge")]
+    [InlineData(false, "Dodona lands this ticket")]
+    public void The_delivery_mode_is_in_the_ticket_briefing(bool pr, string expected) =>
+        Assert.Contains(expected, Briefing.Ticket(7, "ticket/7", pr));
+
+    /// <summary>**GROWTH IS A REGRESSION, SO IT IS ASSERTED RATHER THAN REMEMBERED.** B2 repeats
+    /// this block on every turn of every work lane for as long as the lane lives, so length here
+    /// is a bill that compounds (CLAUDE.md 0.1). Repeated boilerplate that gets long gets skimmed,
+    /// which rebuilds the problem the briefing exists to solve.</summary>
+    [Fact]
+    public void The_briefing_stays_inside_its_bound()
+    {
+        foreach (var b in new[]
+                 {
+                     Briefing.Plain(Beta),
+                     Briefing.Ticket(7, "ticket/7", pr: false),
+                     Briefing.Ticket(7, "ticket/7", pr: true),
+                     Briefing.Ticket(7, "", pr: false),          // a ticket with no recorded branch
+                 })
+        {
+            var lines = b.Split('\n');
+            Assert.Equal(Briefing.Head, lines[0]);
+            Assert.Equal(Briefing.MaxBullets, lines.Length - 1);
+            Assert.All(lines[1..], l => Assert.StartsWith("- ", l));
+            Assert.True(b.Length <= Briefing.MaxChars, $"briefing is {b.Length} chars, bound is {Briefing.MaxChars}: {b}");
+        }
+    }
+
+    /// <summary>The per-turn wrapper (B2): labeled with the channel both prompts already declare,
+    /// CLOSED so whoever reads it next can tell where it stops, and followed by a blank line so
+    /// the operator's own words start clean. The closing marker is what `DodonaFakeAgent` splits
+    /// on -- if these two ever disagree, m1's `the_briefing_reaches_a_ticket_agent` goes red,
+    /// which is the drift being caught by the check that proves the feature.</summary>
+    [Fact]
+    public void The_per_turn_briefing_is_labeled_closed_and_separated()
+    {
+        var turn = Briefing.Turn(Briefing.Ticket(7, "ticket/7", pr: false));
+        Assert.StartsWith(Briefing.TurnLead + Briefing.Head, turn);
+        Assert.Contains(Briefing.TurnEnd, turn);
+        Assert.EndsWith(Briefing.TurnEnd + "\n\n", turn);
+    }
+
     // ---------------------------------------------------------------- T2
 
     /// <summary>The permission mode in the argv is THIS config's, not the daemon's field. This

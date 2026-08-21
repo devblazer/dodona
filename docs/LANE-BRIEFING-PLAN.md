@@ -1,6 +1,7 @@
 # The lane briefing — telling an agent what Dodona needs, at the moment it needs it
 
-Status: **plan, not built.** Written 2026-08-21 from the operator's brief, after reading the two
+Status: **B1 built 2026-08-21** (one briefing builder, correct per lane kind; the false claim sentence
+deleted). B2 and B3 below are the rest. Written 2026-08-21 from the operator's brief, after reading the two
 system prompts, the input delivery path and the prompt detector in code at `95f397d`.
 
 This is the general answer to a problem `REVIEW-AND-MERGE-PLAN` R7 solved one instance of. Read
@@ -172,3 +173,36 @@ None of this makes an agent unable to forget. What it changes is that the agent 
 turn, in a block short enough to be read — and that when it acts against Dodona anyway, the answer
 explains the situation instead of failing quietly. That is the standard the rest of this system is
 already held to. It is not a guarantee, and it must never be counted as one.
+
+## 8. Decisions taken while building
+
+**D-B1. THE CLAIM IS GONE FROM THE TICKET PROMPT ENTIRELY, NOT REWORDED.** The false sentence had
+to go either way — R3 / D-R5 retired the refusal it described, and CLAUDE.md §7 forbids describing
+a ticket lane as bounded to its claim. What was open was whether the prompt should still mention
+the claim truthfully, as *what you said you would touch*. It does not, for three reasons and one
+budget. A claim is **not** a boundary and naming one in a block about what the ground is invites it
+to be read as one, which is the exact failure being fixed rather than a smaller version of it. The
+agent already has its ticket title and its task, so the claim tells it nothing it can act on. And
+the one consumer that genuinely needs the claim — the **reviewer** — reads it out of the completion
+record (D-R7), where it is a derived signal beside the diff rather than a sentence in a prompt. The
+budget is §3's: five bullets, and a sixth spent on a non-boundary is the worst of them. `claims` is
+therefore no longer a parameter of `TicketSystemPrompt`, which also removes two `TicketClaims`
+lookups from spawn paths that did nothing else with them.
+
+**D-B2. THE BOUND IS FIVE BULLETS UNDER ONE FRAMING LINE, AND 1050 CHARACTERS, ASSERTED IN `unit`.**
+§2 says growth is a regression; that is worth nothing as a sentence in a plan, because the way this
+block gets long is one reasonable addition at a time. `Briefing.MaxBullets` and `Briefing.MaxChars`
+are the enforcement, and `The_briefing_stays_inside_its_bound` walks all four shapes. The header
+line is not a sixth bullet: it frames what follows and it is the marker every check keys on, so it
+is counted separately and pinned by the same test. The character number is **measured, not chosen**
+— the longest of the four shapes is 975 characters, so the slack is about half a bullet. Anything
+that needs more has to say so in a commit instead of absorbing it.
+
+**D-B3. THE TICKET BLOCK STILL NAMES NO FOLDER, AND THAT IS A DECISION RATHER THAN AN OMISSION.**
+`Projects.PromptDirMismatch` is the M5.1 detector and it only compares lanes whose prompt names a
+directory, so a ticket prompt naming its worktree would put ticket lanes inside a safety detector
+that has never covered them. That may well be worth doing — it is the same class of mistake the
+detector exists for — but it is a **behaviour change to a detector**, so it wants its own decision,
+its own commit and its own red. §5 already said so; this records that the option was live while the
+block was being written and was deliberately not taken. `A_ticket_prompt_still_names_no_folder`
+pins the current answer so the change cannot happen by accident.

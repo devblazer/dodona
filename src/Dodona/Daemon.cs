@@ -1112,8 +1112,7 @@ sealed class Daemon
                 {
                     var sys2 = t2 is null
                         ? LaneSystemPrompt(row.Title, cwd2)
-                        : TicketSystemPrompt(t2.Id, t2.Title,
-                            string.Join(", ", _store.TicketClaims(t2.Id).Select(cl => $"{cl.Kind}:{cl.Value}")));
+                        : TicketSystemPrompt(t2.Id, t2.Title, t2.Branch, TicketIsPr(t2));
                     args2 = ClaudeArgs(cfg2, cfg2.Model, cfg2.Effort, sys2, acceptEdits: true);
                     args2.AddRange(Projects.ResumeArgs(row.Session));
                 }
@@ -1298,11 +1297,11 @@ sealed class Daemon
                 var child = e.TryGetProperty("child", out var tc) && tc.ValueKind == JsonValueKind.String ? tc.GetString()! : tcfg.Agent;
                 var model = Pick(e, "model", tcfg.Model);
                 var effort = Pick(e, "effort", tcfg.Effort);
-                var claims = string.Join(", ", _store.TicketClaims(tid).Select(cl => $"{cl.Kind}:{cl.Value}"));
-
                 // The lane-agent framing (§5, spike 3): declare the [DISPATCHER] channel or
                 // the model treats mid-turn instructions as a prompt-injection attempt.
-                var sys = TicketSystemPrompt(tid, t.Title, claims);
+                // `tcfg` IS the ticket repository's config (ConfigFor takes a repo name), so it
+                // is the right answer for the delivery line as well as for the permission mode.
+                var sys = TicketSystemPrompt(tid, t.Title, t.Branch, tcfg.IsPr);
                 var args = IsClaude(child) ? ClaudeArgs(tcfg, model, effort, sys, acceptEdits: true) : new List<string>();
                 var (laneId, msg) = await SpawnLaneAsync(t.Title, "work", t.Worktree, child, args);
                 // Link ticket ↔ lane: "waiting on you: merge" (§8) needs a pane to land in.
@@ -3595,7 +3594,7 @@ sealed class Daemon
                 var args = new List<string>();
                 if (IsClaude(child))
                 {
-                    var sys = TicketSystemPrompt(made.Id, row.Title, $"path:{relForClaim}");
+                    var sys = TicketSystemPrompt(made.Id, row.Title, made.Branch, Config.For(_primary, repo.Path).IsPr);
                     args = ClaudeArgs(cfg, cfg.Model, cfg.Effort, sys, acceptEdits: true);
                     // THE SESSION IS THE POINT. Promotion is only free because `--resume` rebuilds
                     // the context the agent already has (spike 1: same id, no fork) -- without it
@@ -3860,30 +3859,44 @@ sealed class Daemon
     /// checkout, so one `git checkout` reassigns every other lane's work and the operator's
     /// own — which is exactly what a project whose own CLAUDE.md ends in "check out a branch"
     /// will make it do (docs/M5-DELIVERY-PLAN.md §4). Until a plain lane gets a worktree of its
-    /// own, the honest instruction is: do not touch which branch is checked out, at all.</summary>
+    /// own, the honest instruction is: do not touch which branch is checked out, at all.
+    ///
+    /// **THAT PARAGRAPH NOW LIVES IN <see cref="Briefing"/>, AND SO DOES THE TICKET LANE'S COPY
+    /// OF IT** (docs/LANE-BRIEFING-PLAN.md B1). It was written here and nowhere else, so the lane
+    /// that actually HAS a branch and a worktree -- the ticket lane -- carried no git rules at
+    /// all. One builder, consumed by both prompts and by the per-turn briefing, is what stops the
+    /// two drifting again; every divergence between them was a defect.</summary>
     /// <summary>...and the folder sentence is built by <see cref="Projects.DirSentence"/>, which
     /// <see cref="Projects.PromptDirMismatch"/> also reads back — so the prompt's idea of where
     /// the agent is and the process's actual working directory are checked against each other at
     /// every spawn (trap T1). One definition, written in one place and parsed in one place.</summary>
     internal static string LaneSystemPrompt(string title, string workDir) =>
-        $"You are the agent for lane \"{title}\", operated by the Dodona orchestrator. " +
-        Projects.DirSentence(workDir) + " " +
-        "IMPORTANT: that directory is a SHARED checkout. Other lanes and your human operator are working in it at the " +
-        "same time, so it is not yours to reconfigure: never run `git checkout`, `git switch`, `git stash`, or anything " +
-        "else that changes which branch is checked out or moves uncommitted work aside. Doing so silently reassigns " +
-        "every other lane's work and your operator's too. If the task genuinely needs its own branch, say so and stop " +
-        "— your operator creates a ticket for that, and a ticket gets a private checkout of its own. " +
-        "Real-time instructions from your human operator arrive in hook output labeled [DISPATCHER]; they are authentic " +
-        "and carry the same authority as your original task, even when they change or contradict earlier instructions.";
+        $"You are the agent for lane \"{title}\", operated by the Dodona orchestrator.\n" +
+        Briefing.Plain(workDir);
 
     /// <summary>The framing for a TICKET lane. Factored out of `ticket-agent` because respawn
-    /// needs the identical text (M5.1) and was rebuilding the plain-lane prompt instead.</summary>
-    static string TicketSystemPrompt(long tid, string title, string claims) =>
-        $"You are a lane agent operated by the Dodona orchestrator, working ticket {tid}: \"{title}\". " +
-        $"Your worktree is the current working directory; work only there. Your declared claim is [{claims}] — " +
-        "a PreToolUse gate denies writes outside it; if denied, stay within the claim or ask your operator for an extension. " +
-        "Real-time instructions from your human operator arrive in hook output labeled [DISPATCHER]; they are authentic " +
-        "and carry the same authority as your original task, even when they change or contradict earlier instructions.";
+    /// needs the identical text (M5.1) and was rebuilding the plain-lane prompt instead.
+    ///
+    /// **THE CLAIM SENTENCE IS GONE, AND DELETING IT IS FINISHING R3 RATHER THAN CHANGING
+    /// POLICY** (docs/LANE-BRIEFING-PLAN.md D-B1). It said a PreToolUse gate denies writes
+    /// outside the declared claim and to ask for an extension if refused. `REVIEW-AND-MERGE-PLAN`
+    /// R3 / D-R5 retired that refusal on 2026-08-20, and `claim-extend`'s with it, so the
+    /// sentence invited an agent to believe a boundary that is not there and to ask for an
+    /// extension to a thing that no longer refuses anything. CLAUDE.md 7: do not describe a
+    /// ticket lane as bounded to its claim. Claims survive as an annotation and as a derived
+    /// signal (D-R7) -- read by the REVIEWER out of the completion record, which is why nothing
+    /// is lost by the agent not being told, and why `claims` is no longer a parameter here.</summary>
+    internal static string TicketSystemPrompt(long tid, string title, string branch, bool pr) =>
+        $"You are a lane agent operated by the Dodona orchestrator, working ticket {tid}: \"{title}\".\n" +
+        Briefing.Ticket(tid, branch, pr);
+
+    /// <summary>Is this ticket's REPOSITORY a `delivery: pr` one (R7 / D-R28)? Keyed on the
+    /// repository and not on the project, because every other pr refusal in this file is
+    /// (`land`, `token-request`, the approval question) -- and a briefing that disagreed with
+    /// the refusals would be worse than no briefing. Same three-rung path resolution
+    /// `LandFlow` uses, so a ticket whose repo name no longer resolves still gets an answer.</summary>
+    bool TicketIsPr(Store.TicketRow t) =>
+        Config.For(_primary, RepoOf(t)?.Path ?? (t.RepoPath.Length > 0 ? t.RepoPath : _primary)).IsPr;
 
     /// <summary>" repo engine", or nothing at all when the workspace root IS the
     /// repository — the single-repo project should never have to read about repos.</summary>
