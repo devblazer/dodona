@@ -169,8 +169,17 @@ try {
     Dodona @("approve", "4") | Out-Null
     $back = Dodona @("token-request", "4")
     Check 'an_out_of_claim_branch_is_no_longer_refused_the_token' ($DODONA_EXIT -eq 0 -and $back -match 'granted ticket 4') $back
-    $touchedWs = ($(Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='branch_touched'") -replace '\s+', ' ')
-    Check 'the_touch_record_uses_workspace_paths' ($touchedWs -match 'engine/other/sneaky\.cs') $touchedWs
+    # The third site of issue #10's defect, found by sweeping for it rather than by waiting for it
+    # to go red: `branch_touched` is written by the daemon AFTER `token-request` has answered, so
+    # an unguarded read returns an empty string under load -- failing the assertion and printing
+    # nothing, because the detail IS the value it failed on. The other two are in m2.
+    $touchedWs = ''
+    $touchedWsOk = Wait-Until {
+        $script:touchedWs = ((Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='branch_touched'") -replace '\s+', ' ').Trim()
+        $script:touchedWs -ne ''
+    } 20000 'the branch_touched row for the out-of-claim branch'
+    Check 'the_touch_record_uses_workspace_paths' ($touchedWs -match 'engine/other/sneaky\.cs') `
+        "row-arrived=$touchedWsOk detail=[$touchedWs]"
     Dodona @("token-release", "4") | Out-Null
 
     # ---- CLAIMS ARE PER REPOSITORY: the same claim string, twice, in two repos (Phase 0b) ----
@@ -1087,6 +1096,19 @@ PRAGMA user_version = 8;
     StartDaemonFor $oneId | Out-Null
     function One([string[]]$a) { DodonaBare ($a + @('--workspace', $oneId)) }
     function OneRows([string]$sql) { Invoke-StoreSql $oneW.store $sql }
+    # THE BASELINE MUST NOT BE TAKEN WHILE THE DAEMON IS STILL WRITING ITS STARTUP ROWS, and it
+    # was. Measured 2026-08-21 on an IDLE machine at 0974e53: this check went red with
+    # `daemon_start, reconcile_done, repo_path_unresolved, lane_project_unresolved,
+    # lane_projects_stamped` all landing after the baseline -- the daemon's own startup, sampled
+    # as though a typed sentence had written it. `StartDaemonFor` waits for the ctl pipe, which
+    # the daemon opens AFTER `reconcile_done` (Daemon.cs:958 vs :912), so ordinarily that is
+    # enough; but `Wait-Until` returns $false on timeout rather than throwing, so a slow start
+    # silently drops through here and the next read is early.
+    #
+    # Waiting on the LAST startup row is the fix, not widening $oneAllowed below -- that list is a
+    # statement about the operator's machine and its comment says so.
+    $oneStarted = Wait-Until { ([int](OneRows "SELECT COUNT(*) FROM events WHERE kind='reconcile_done'").Trim()) -ge 1 } `
+        30000 'the one-project daemon to finish starting before the baseline is taken'
     $oneMax = [int](OneRows "SELECT COALESCE(MAX(id),0) FROM events").Trim()
     One @("input", "make the header quite a lot taller") | Out-Null
     Wait-Until { ([int](OneRows "SELECT COUNT(*) FROM lanes WHERE role='work'").Trim()) -eq 1 } `
@@ -1111,9 +1133,11 @@ PRAGMA user_version = 8;
     $oneUnexpected = @($oneKinds | Where-Object { $oneAllowed -notcontains $_ })
     # `-ge 1` FIRST, deliberately: an empty set contains no unexpected kind either, so without it
     # this passes against a window that never opened -- the vacuous shape `dev prove` exists for.
+    # `daemon-started=` is in the detail because it is the first thing to read when this goes red:
+    # False means the baseline was taken early and the kinds below are a startup, not a sentence.
     Check 'a_one_project_workspace_writes_no_project_ladder_event' `
         ($oneKinds.Count -ge 1 -and $oneUnexpected.Count -eq 0) `
-        "kinds=[$($oneKinds -join ',')] outside the allowed set=[$($oneUnexpected -join ',')]"
+        "daemon-started=$oneStarted kinds=[$($oneKinds -join ',')] outside the allowed set=[$($oneUnexpected -join ',')]"
     # ...and it asks nothing. One project is one answer, so there is no question to open -- the
     # `questions` table must be untouched, which is also what `ui-use`'s
     # `a_one_project_workspace_is_never_asked_anything` asserts from the window's side.

@@ -69,16 +69,34 @@ try {
     Dodona @("approve", "1") | Out-Null
     $req = Dodona @("token-request", "1")
     Check 'an_out_of_claim_branch_is_granted_the_token' ($DODONA_EXIT -eq 0 -and $req -match 'granted ticket 1') $req
-    $touched = (Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='branch_touched'")
-    $touchedFlat = ($touched -replace '\s+', ' ')
-    Check 'the_branch_touch_is_recorded_for_the_reviewer' ($touchedFlat -match 'src/water/sim\.cs') $touchedFlat
+    # WAIT FOR THE ROW, THEN READ IT ONCE (issue #10). The daemon writes `branch_touched` AFTER
+    # `token-request` has already answered, so an unguarded read here comes back empty under load
+    # -- which fails the assertion AND leaves the FAIL detail blank, because the detail IS that
+    # value. A failure with nothing in it is what teaches people to re-run instead of read, and
+    # re-running instead of reading is how a real failure eventually gets waved through as flaky.
+    #
+    # The wait's own verdict goes in the detail, because a row that NEVER arrives would otherwise
+    # still report blank -- the wait would move the diagnosis into its timeout line and leave the
+    # check saying nothing, which is the same complaint one step along.
+    $touchedFlat = ''
+    $touchedOk = Wait-Until {
+        $script:touchedFlat = ((Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='branch_touched'") -replace '\s+', ' ').Trim()
+        $script:touchedFlat -ne ''
+    } 20000 'the branch_touched row for the granted token'
+    Check 'the_branch_touch_is_recorded_for_the_reviewer' ($touchedFlat -match 'src/water/sim\.cs') `
+        "row-arrived=$touchedOk detail=[$touchedFlat]"
     Check 'the_record_singles_out_the_undeclared_path' `
-        ($touchedFlat -match 'undeclared:.*src/sky/box\.cs') $touchedFlat
+        ($touchedFlat -match 'undeclared:.*src/sky/box\.cs') "row-arrived=$touchedOk detail=[$touchedFlat]"
     Dodona @("token-release", "1") | Out-Null
 
     # An extension still works and is still worth having -- it is an annotation now rather than a
     # lock, so after it there is nothing left undeclared to single out.
     Dodona @("claim-extend", "1", "--claim", "path:src/sky/box.cs") | Out-Null
+    # How many touch rows existed BEFORE this request, so the wait below can hold out for a NEW
+    # one. Waiting merely for "not empty" would be satisfied instantly by the row the checks above
+    # just read -- the stale-row trap, which would assert the previous token's answer against this
+    # token's question and go red for a reason that has nothing to do with either.
+    $touchedBefore = [int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='branch_touched'").Trim())
     $req = Dodona @("token-request", "1")
     Check 'the_token_is_granted_after_an_extend_too' ($req -match 'granted ticket 1') $req
     # THE LATEST record only, and it must EXIST. Written first as a bare `-notmatch` over every
@@ -87,9 +105,20 @@ try {
     # assertion that is satisfied by absent data is the check-that-cannot-fail trap (CLAUDE.md
     # 0.3), and it is easy to write by accident precisely here, where the new evidence is a row
     # that used not to exist. So: the row is present, names the path, and no longer flags it.
-    $touched2 = ($(Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='branch_touched' ORDER BY id DESC LIMIT 1") -replace '\s+', ' ')
+    #
+    # AND IT IS WAITED FOR RATHER THAN SAMPLED (issue #10, the ticket this check IS). The wait is
+    # on the row COUNT rising, deliberately not on the content this then asserts -- a wait that
+    # already checks the assertion is tautological, and would turn a real product failure into a
+    # 20-second timeout instead of an immediate red carrying the value it read.
+    $touched2 = ''
+    $touched2Ok = Wait-Until {
+        if ([int]((Invoke-StoreSql $storeDb "SELECT COUNT(*) FROM events WHERE kind='branch_touched'").Trim()) -le $touchedBefore) { return $false }
+        $script:touched2 = ((Invoke-StoreSql $storeDb "SELECT detail FROM events WHERE kind='branch_touched' ORDER BY id DESC LIMIT 1") -replace '\s+', ' ').Trim()
+        $true
+    } 20000 'the branch_touched row for the extended claim'
     Check 'an_extended_claim_leaves_nothing_undeclared' `
-        (($touched2 -match 'src/sky/box\.cs') -and ($touched2 -notmatch 'undeclared:')) $touched2
+        (($touched2 -match 'src/sky/box\.cs') -and ($touched2 -notmatch 'undeclared:')) `
+        "new-row-arrived=$touched2Ok before=$touchedBefore detail=[$touched2]"
     Dodona @("token-release", "1") | Out-Null
 
     # ---- presence derived from tool events, in code ----
