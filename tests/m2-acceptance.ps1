@@ -130,7 +130,7 @@ try {
     Check 'presence_shows_tool' ($status -match 'presence=write: box.cs') $status
     Start-Sleep -Seconds 2
     $status = Dodona @("status")
-    Check 'presence_idle_after_result' ($status -match 'presence=idle') $status
+    Check 'presence_idle_after_result_in_status' ($status -match 'presence=idle') $status
 
     # ---- presence must not LIE while the agent thinks ----
     #

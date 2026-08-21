@@ -267,7 +267,7 @@ try {
 
     # ---- rung 4: ask, with candidates -- and TEACH --------------------------------------
     $r = Resolve-Text "sort out the beacon rotation gearbox"
-    Check 'double_uncertainty_asks_the_operator' ($r.rung -eq 'ask' -and $null -ne $r.question) ($r | ConvertTo-Json -Compress)
+    Check 'group_double_uncertainty_asks_the_operator' ($r.rung -eq 'ask' -and $null -ne $r.question) ($r | ConvertTo-Json -Compress)
     Check 'question_lands_in_the_merged_feed' ((Dx @('concierge-feed')) -match 'not sure which workspace') ''
     Check 'question_offers_candidates_and_new' ((Dx @('concierge-feed')) -match 'or new\?') ''
     $q = Dx @('concierge-questions')
