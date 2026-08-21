@@ -98,4 +98,21 @@
     <Compile Include="..\Dodona\Ver.cs" Link="Ver.cs" />
   </ItemGroup>
 
+  <!-- The window's pure-logic tests (tests\Dodona.Ui.Tests, net8.0-windows) reach
+       FakeRecognizer, Poses and the rest. Those are `class` with no modifier, i.e. internal, and
+       they stay that way for the same reason Dodona.csproj gives: what counts as this
+       assembly's API is a design decision, and it does not get widened because a test wants in.
+       This grants the one assembly access instead.
+
+       The grant is what makes W3.0's project possible at all, and the two types it is really
+       for are the two DOUBLES that live in this assembly and nowhere else. The double ledger's
+       reflection rung has to be able to SEE them, and a rung that enumerates a population
+       containing neither is a rung that is green because the set is empty
+       (docs/TEST-ARCHITECTURE-PLAN.md 3.2). -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Dodona.Ui.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

@@ -288,3 +288,132 @@ A full green gate is the honest source for the real freeze, but it takes ~5 minu
 demonstrate this at all -- the drop is silent, so a green gate looks identical either way. The
 fixture is what makes the failure visible, and it is the reason this is a fix rather than a
 number nobody questioned.
+
+## W3 -- `dev prove --with <patch>`, and `tests/Dodona.Ui.Tests`
+
+`dev prove` judges a check against HEAD, which works while the check is NEW: HEAD lacks your
+fix, so a check with teeth fails there. A pure MOVE has no fix in it -- the same assertion, one
+layer down -- so HEAD passes it and **every moved check reports VACUOUS by construction**. The
+instrument for a move is a DEFECT, not an absence, and `--with` is how you supply one:
+
+```
+dev prove --with tests\mutants\<slice>-NN.patch [<suite>:<check> ...]
+```
+
+With no check named, the patch's own `# expects-red:` lines are the list, so the defect and the
+checks it must redden live in one reviewable file rather than in a command somebody retypes.
+`# expects-green:` names a neighbour that must SURVIVE it -- the over-broad-mutant detector, and
+it fails the proof, because a mutant that reddens half the suite proves nothing about the one
+check it was aimed at.
+
+`unit` and `ui-unit` are now proof targets. Each names a project (`tests\Dodona.Tests`,
+`tests\Dodona.Ui.Tests`), each is added to the HEAD build **only when its own prefix appears**
+in the pairs, and each runs `Run-Unit -Root $wt` -- against the throwaway worktree of HEAD, never
+the working tree. That is reason 3 of `dev prove`'s own unit refusal answered; the refusal itself
+stays for the BARE form, where a HEAD without your new symbol still yields a compile error rather
+than a red.
+
+### THE TRX `testName` FORMATS, READ OFF THIS MACHINE
+
+Both were parsed out of `tests\unit-output\unit.trx` and `ui-unit.trx` after a green
+`dev test unit ui-unit` at `372e18d` + this work item. Quoted verbatim, between pipes so the
+bounds are unambiguous:
+
+```
+[Fact]    |Dodona.Ui.Tests.RecognizerArrivalTests.The_fake_recogniser_raises_Ready_exactly_once_from_Start|
+[Fact]    |Dodona.Tests.SpeechStreamTests.Dodonas_own_keyterms_all_survive_the_budget|
+[Theory]  |Dodona.Tests.ClaimsTests.Parse_maps_the_four_spellings(spec: "subtree:src/Water", kind: "subtree", value: "src/water")|
+[Theory]  |Dodona.Tests.RoutingInCodeTests.A_colon_with_no_space_is_not_a_target(text: "see http://example.com for the spec")|
+```
+
+So a `[Fact]` is the bare fully-qualified name and a `[Theory]` row is that name with a
+parenthesised argument list appended -- `name: value`, comma-separated, string values in C#
+literal form (quoted, so a value may contain `:`, `/`, `(` and spaces). This CONFIRMS what W2
+recorded from the same file; it was scheduled as a W3 finding by the plan (5.2) and settled a
+work item early, which is why it is a confirmation rather than a discovery.
+
+**Stripping at the FIRST `(` is safe, and the reason is a language rule rather than a survey of
+the data**: a C# method name cannot contain `(`, so nothing after the first one can be part of
+the name however an argument is spelled. `Prove-Judge` and `Ledger-Live` both do exactly that
+(`-replace '\(.*$', ''`) and both must keep doing the same thing.
+
+**A theory is ONE check made of N rows, and one red row reddens the method.** `dev prove` prints
+the shape it saw (`PASS -- 2 rows`) because "1 of 8 rows" and "8 of 8" are different findings
+about a mutant.
+
+### The two reds, verbatim
+
+CLAUDE.md 0.3: a check is worth nothing until it has been seen red. That applies to the tool
+too, so the tool's own first reds are kept as checked-in mutants under `tests\mutants\`.
+
+**`w3-verify-01.patch`** -- `LanePrefix` requires a double colon, so `WATER: make it darker` is
+no longer a tier-0 prefix. Aimed at ONE function reached from two layers, which is the shape a
+slice's mutant has to have:
+
+```
+  PROVEN   Dodona.Tests.RoutingInCodeTests.A_lane_prefix_names_its_target_and_keeps_the_rest: FAIL -- 1 of 1 case not passed
+  PROVEN   Dodona.Tests.RoutingInCodeTests.A_prefixed_paragraph_keeps_its_newlines: FAIL -- 1 of 1 case not passed
+  PROVEN   tier0_prefix_routes: FAIL -> SKY (focus, no classifier warm)
+  CONTROL  Dodona.Tests.RoutingInCodeTests.A_colon_with_no_space_is_not_a_target: PASS -- 2 rows
+  CONTROL  tier0_message_delivered: PASS
+
+PROVEN: all 3 check(s) fail under w3-verify-01.patch, so they have teeth.
+        and 2 declared control(s) survived it.
+```
+
+That is the paired red the plan's 5.3 asks for, in both languages, under one checked-in defect.
+
+### The finding: `m2:tier0_message_delivered` does not test tier 0
+
+`tier0_message_delivered` was listed `expects-red` on the first run of that mutant and came back
+**VACUOUS**. It is about the CHECK, not the mutant. With tier 0 dead the sentence still reached
+SKY, by the focus fallback -- the same run printed `-> SKY (focus, no classifier warm)` -- so the
+body still arrived and the check still passed. It asserts ARRIVAL, and arrival is what the
+fallback also produces. Only its sibling `tier0_prefix_routes` asserts the RUNG, by matching
+`-> SKY (tier 0)`.
+
+**This reaches past one check.** TEST-ARCHITECTURE-PLAN 2.2 names `m2:tier0_message_delivered` as
+the owner of wire **E7**, whose sentence is *"takes the INSTANT path ... with no classifier
+consulted and nothing held"*. Under a defect that removed the instant path entirely, E7's owner
+stayed green. On the plan's own four-rung ladder (5.4) that is a `vacuous-guard` or a
+mis-aimed owner, and W8's E7 slice has to decide which; `tier0_prefix_routes` is the candidate
+that actually asserts the rung. **`wires.tsv` is frozen and is NOT edited here** -- this is the
+record, and the decision belongs to whoever owns that slice.
+
+It is written down as a CHECK and not only as prose: it is an `expects-green` row on
+`w3-verify-01.patch`, so if somebody strengthens that check the proof goes OVER-BROAD and says
+so. Prose is not enforcement (0.2's whole lesson, and 3.3.1's).
+
+### A mutant patch is stored LF and checked out CRLF, and that is FINE -- measured, not assumed
+
+`git add` says `LF will be replaced by CRLF the next time Git touches it` for every file under
+`tests\mutants\`. `core.autocrlf=true` here, `git diff` emits a pure-LF patch, and the round trip
+through the index hands it back with CRLF everywhere. That looked like a trap worth a
+`.gitattributes` rule, so it was measured instead of argued: the LF form and a hand-CRLF-ified
+copy of the same patch were both run through `git apply --check` and `git apply` against this
+CRLF working tree, and **both applied cleanly and produced a byte-identical result** -- 1 changed
+line, `git diff --numstat` `1 1`, and the target file still 6612 CRLF and 0 bare LF afterwards.
+Git converts on both sides of the comparison. So there is no `*.patch -text` rule, deliberately:
+this repo's `.gitattributes` says in as many words that a normalisation rule introduced casually
+is how the line-ending bill gets paid twice, and this one buys nothing.
+
+### What is NOT done
+
+- **`w3-verify-02.patch` is ADDED AND PROVED IN THE FOLLOWING COMMIT, not this one, and that
+  order is forced.** It reddens a check in `tests\Dodona.Ui.Tests`, which does not compile against a HEAD
+  whose `DodonaUi.csproj` has no `InternalsVisibleTo`. `dev prove` said so exactly:
+
+  ```
+  RecognizerArrivalTests.cs(27,21): error CS0122: 'FakeRecognizer' is inaccessible due to its protection level
+  BLOCKED: HEAD does not build (tests\Dodona.Ui.Tests\Dodona.Ui.Tests.csproj), so it cannot be used as a baseline
+  ```
+
+  That is the plan's delta 5 reason 1 happening in the flesh, and the plan's own answer to it is
+  *"the seam commit landing first"*. So the seam lands, and the proof is run against it.
+- **`ui-unit` is deliberately NOT in `AllSuites`.** It is reachable as `dev test ui-unit` and as a
+  `ui-unit:` proof pair. Putting it in the default set widens `dev gate` and `dev suites`, which
+  is W4's call when it has something to assert there.
+- **`Ledger-Live` still reads only `unit.trx`.** `tests\Dodona.Ui.Tests`'s single method is in no
+  `baseline.tsv` row and is not counted by `dev ledger`; the baseline is frozen, and teaching the
+  census about a second project is W4's, in the commit that gives it rows to count.
+- **`--rehash` is still not implemented** (unchanged from W2).

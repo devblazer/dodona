@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The pure-logic tests for the WINDOW's assembly, and it exists as a second project for one
+       flat reason: tests\Dodona.Tests is net8.0 and CANNOT LOAD DodonaUi AT ALL. A net8.0
+       assembly cannot reference a net8.0-windows one, so everything that lives in src\DodonaUi
+       was unreachable from the one-second loop no matter how pure it was.
+
+       WHAT THAT COST, precisely (docs/TEST-ARCHITECTURE-PLAN.md W3.0, review findings 1 and 16).
+       Two of this repo's three existing test doubles are in src\DodonaUi, namely FakeRecognizer
+       (Recognizer.cs) and Poses (Poses.cs), so the double ledger's reflection rung would have
+       enumerated a population containing neither, and gone green because it was looking at an
+       empty set. That is the routing ladder's own failure shape, in the mechanism written to
+       prevent it. And `dev prove` with a mutant patch could not have reddened a UI-side destination, so four
+       of the ten migration slices would have moved checks nobody could prove had teeth.
+
+       IT IS DELIBERATELY NOT IN AllSuites. `dev test ui-unit` runs it and a `ui-unit:` proof
+       pair runs it; widening the default gate is W4's call to make when it has something to
+       assert (CLAUDE.md 0.1: nobody asked for a wider automatic reader).
+
+       Version-pinned to the same versions tests\Dodona.Tests uses, for that project's own
+       stated reason: a verification step that needs the network is a verification step that is
+       unavailable exactly when it is wanted. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- Not decoration: DodonaUi is a WPF assembly, and without this the reference resolves
+         but every type that mentions a WPF one is unusable from here. -->
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>Dodona.Ui.Tests</AssemblyName>
+    <RootNamespace>Dodona.Ui.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- DodonaUi ONLY, and never Dodona beside it. The window links a dozen files out of
+         src\Dodona by source (DodonaUi.csproj's Compile Include block, and each one carries the
+         reason it is shared rather than referenced), so Instance, Paths, Ask, Dictation and
+         the rest are already COMPILED INTO this assembly. Referencing Dodona as well would put
+         a second copy of every one of those types in scope and make them ambiguous. -->
+    <ProjectReference Include="..\..\src\DodonaUi\DodonaUi.csproj" />
+  </ItemGroup>
+
+</Project>

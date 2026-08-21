@@ -633,7 +633,7 @@ function Complete-Suite($h, [int]$timeoutSec = 420) {
 }
 
 function Run-Suite([string]$name, [int]$timeoutSec = 420) {
-    if ($name -eq 'unit') { return Run-Unit }
+    if ((UnitSuites) -contains $name) { return Run-Unit -Name $name }
     Complete-Suite (Start-Suite $name) $timeoutSec
 }
 
@@ -779,7 +779,29 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 #         Splitting a suite only pays if the pieces run CONCURRENTLY. If one of them ever has
 #         to come back here, it costs far more than its share of the monolith did, and the
 #         other three should stay in the wave rather than follow it out of sympathy.
-function SoloSuites { , @('unit', 'voice') }
+function SoloSuites { , @('unit', 'ui-unit', 'voice') }
+
+# THE TEST PROJECTS, addressed by a suite name like everything else. Two of them since W3.0:
+# `unit` is tests\Dodona.Tests (net8.0) and `ui-unit` is tests\Dodona.Ui.Tests
+# (net8.0-windows). The second exists because a net8.0 test assembly CANNOT LOAD DodonaUi at
+# all -- and FakeRecognizer, Poses and RecordingTransport all live in src\DodonaUi, so without
+# it the double ledger's reflection rung covers one of the four double-bearing assemblies and
+# `dev prove --with` cannot redden a UI-side test at all (plan W3.0, findings 1 and 16).
+#
+# `ui-unit` is DELIBERATELY NOT IN AllSuites. It is reachable by name (`dev test ui-unit`) and
+# by a `ui-unit:` proof pair; putting it in the default set is what W4 does when it has
+# something to say. Widening the gate is not a side effect anybody asked for (CLAUDE.md 0.1).
+# Both are SOLO for SoloSuites' own stated reason: `dotnet test` compiles into src\...\bin,
+# and every acceptance suite copies its binaries out of there.
+function UnitSuites { , @('unit', 'ui-unit') }
+
+function UnitProject([string]$name) {
+    switch ($name) {
+        'unit' { 'tests\Dodona.Tests\Dodona.Tests.csproj' }
+        'ui-unit' { 'tests\Dodona.Ui.Tests\Dodona.Ui.Tests.csproj' }
+        default { '' }
+    }
+}
 
 # `voice` joined this list on 2026-08-20, MEASURED rather than assumed. It went into the wave
 # first, on the reasoning that m3 is also a window suite and runs there. The gate then failed on
@@ -1052,20 +1074,37 @@ function Report-Suites($results, [switch]$Wide) {
 # --nologo and minimal verbosity because the interesting output is the tally, and a `dev test`
 # that prints twenty lines of MSBuild banner in front of it teaches people to skip reading it.
 function Run-Unit {
+    param(
+        # WHICH TREE. Every caller but one wants this repo. `dev prove --with` wants its
+        # throwaway worktree of HEAD -- reason 3 of Do-Prove's own refusal is that Run-Unit
+        # tested the WORKING tree, which would be the change measured against itself, and
+        # -Root is the whole of the answer to it.
+        [string]$Root = '',
+        # WHICH PROJECT, under the name the runner reports it as. See UnitSuites.
+        [string]$Name = 'unit',
+        [string]$Project = ''
+    )
+    if (-not $Root) { $Root = $repo }
+    if (-not $Project) { $Project = (UnitProject $Name) }
+    if (-not $Project) { Abort "no unit project called '$Name'" "one of: $((UnitSuites) -join ', ')" }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $trxDir = "$repo\tests\unit-output"
+    # STILL tests\unit-output, and the file is named for the project rather than for the
+    # directory. dotnet test's default is tests\<project>\TestResults, which is a TRACKED
+    # path, and the gate asserts a suite run dirtied nothing; tests\*-output\ is already
+    # gitignored and is where all sixteen other suites write.
+    $trxDir = "$Root\tests\unit-output"
     New-Item -ItemType Directory -Force $trxDir | Out-Null
-    Remove-Item "$trxDir\unit.trx" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$trxDir\$Name.trx" -Force -ErrorAction SilentlyContinue
     # THE TRX IS THE UNIT SUITE'S CENSUS. `dev ledger` needs per-test verdicts, and the
     # scraped "Passed: N" line is the CASE count -- a [Theory] with 8 [InlineData] rows is
     # one METHOD and eight cases, and the ledger is keyed on the method (plan 1.2/5.2).
     # --results-directory is not decoration: the default is tests\Dodona.Tests\TestResults,
     # which is a TRACKED path, and the gate asserts a suite run dirtied nothing. Every other
     # suite writes to tests\<name>-output\, which .gitignore already covers.
-    $o = & dotnet test "$repo\tests\Dodona.Tests\Dodona.Tests.csproj" -c Release --nologo -v q --logger "trx;LogFileName=unit.trx" --results-directory $trxDir 2>&1
+    $o = & dotnet test (Join-Path $Root $Project) -c Release --nologo -v q --logger "trx;LogFileName=$Name.trx" --results-directory $trxDir 2>&1
     $code = $LASTEXITCODE
     $sw.Stop()
-    Add-Content -Path $log -Value "===== unit =====" -Encoding utf8
+    Add-Content -Path $log -Value "===== $Name =====" -Encoding utf8
     Add-Content -Path $log -Value $o -Encoding utf8
 
     # dotnet test's own summary line, turned into the same "<N> checks, <M> failed" shape every
@@ -1091,12 +1130,17 @@ function Run-Unit {
     if ($failed -eq 0 -and $code -ne 0) { $problems += "dotnet test reported 0 failures but exited $code -- see $log" }
 
     [pscustomobject]@{
-        Name     = 'unit'
+        Name     = $Name
         Fails    = $fails
         Problems = $problems
         Seconds  = [math]::Round($sw.Elapsed.TotalSeconds, 1)
         Exit     = $code
         Tally    = "$($passed + $failed) checks, $failed failed"
+        # The per-test census. `dev prove` judges ONE named method out of this, because a unit
+        # run prints no line for a test that passed -- so there is nothing to grep, and
+        # scraping [FAIL] lines could only ever see the reds. That cannot tell VACUOUS (it
+        # passed) from MISSING (it never ran), and those two mean opposite things.
+        Trx      = "$trxDir\$Name.trx"
     }
 }
 
@@ -1129,6 +1173,80 @@ function Do-Suites {
     if ($bad -gt 0) { exit 1 }
 }
 
+# A MUTANT: a checked-in defect, and the checks it is supposed to redden (plan W3 delta 6).
+#
+# It is a FILE, and it is tracked, because the mutant IS the evidence. A `moved` ledger row
+# says an old acceptance check and a new unit test assert the same thing; the only proof of
+# that anybody can review is a single defect that reddened BOTH (plan 5.3, the paired red).
+# An inline expression would leave the reviewer with two green ticks and a promise.
+#
+# The header is four kinds of line and nothing else:
+#
+#   # defect:        one sentence of prose, printed when the patch is applied
+#   # expects-red:   <suite>:<check>   -- one per line, and BOTH languages belong here
+#   # expects-green: <suite>:<check>   -- the over-broad-mutant detector
+#
+# expects-green is not decoration. A mutant that reddens half the suite proves nothing about
+# the one check it was aimed at, and "it went red" is exactly as convincing either way -- the
+# believed-a-green-check disease with the sign flipped. Naming a neighbour that must SURVIVE
+# is what makes the red mean something.
+function Read-Mutant([string]$path) {
+    $defect = @(); $red = @(); $green = @()
+    foreach ($line in @(Get-Content $path -ErrorAction SilentlyContinue)) {
+        $t = "$line".Trim()
+        # The header stops at the diff. Anything after it is the patch body, where a context
+        # line copied out of a comment could otherwise read as a directive.
+        if ($t -like 'diff --git *' -or $t -like '--- *' -or $t -like 'index *') { break }
+        if ($t -match '^#\s*defect:\s*(.+)$') { $defect += $Matches[1].Trim() }
+        elseif ($t -match '^#\s*expects-red:\s*(.+)$') { $red += $Matches[1].Trim() }
+        elseif ($t -match '^#\s*expects-green:\s*(.+)$') { $green += $Matches[1].Trim() }
+    }
+    if ($red.Count -eq 0) {
+        Abort "the mutant names no check to redden: $path" "add at least one  # expects-red: <suite>:<check>  line above the diff (plan W3 delta 6)"
+    }
+    [pscustomobject]@{ Path = $path; Defect = ($defect -join ' '); ExpectsRed = $red; ExpectsGreen = $green }
+}
+
+# ONE verdict about ONE named check, whichever kind of run produced it.
+#
+# An acceptance suite prints `<check>: PASS|FAIL` and this greps it. A unit project prints no
+# line at all for a test that passed, so there is nothing to grep -- it writes a TRX instead,
+# and this reads per-test outcomes out of that. The distinction the TRX buys is the one that
+# matters: PASS and ABSENT are indistinguishable in console output, and they mean opposite
+# things (VACUOUS = your change is not what makes it fail; MISSING = it never ran).
+function Prove-Judge($run, [string]$suite, [string]$check) {
+    if ($null -eq $run) { return [pscustomobject]@{ State = 'MISSING'; Text = "$suite $check" } }
+    if (@($run.PSObject.Properties.Name) -contains 'Trx') {
+        if (-not (Test-Path $run.Trx)) { return [pscustomobject]@{ State = 'MISSING'; Text = "$suite $check -- no TRX at $($run.Trx)" } }
+        $xml = [xml](Get-Content $run.Trx -Raw)
+        $rows = @(); $bad = 0
+        foreach ($r in @($xml.TestRun.Results.UnitTestResult)) {
+            if ($null -eq $r) { continue }
+            $name = "$($r.testName)"
+            # A [Theory] row's testName is the method's FQN with a parenthesised argument list
+            # appended; a [Fact]'s is the bare FQN. Splitting at the FIRST '(' is safe because a
+            # C# method name cannot contain one, so no argument value can be mistaken for part
+            # of the name however it is spelled. Both forms are recorded VERBATIM, off this
+            # machine's own TRX, in tests\ledger\README.md.
+            $method = ($name -replace '\(.*$', '')
+            if ($method -ne $check -and -not $method.EndsWith(".$check", [System.StringComparison]::Ordinal)) { continue }
+            $rows += $name
+            if ("$($r.outcome)" -ne 'Passed') { $bad++ }
+        }
+        if ($rows.Count -eq 0) { return [pscustomobject]@{ State = 'MISSING'; Text = "$suite $check" } }
+        # A THEORY IS ONE CHECK MADE OF N ROWS, and one red row reddens the method. The count is
+        # printed because "1 of 8 rows" and "8 of 8" are different findings about a mutant.
+        $shape = if ($rows.Count -eq 1) { '1 case' } else { "$($rows.Count) rows" }
+        if ($bad -gt 0) { return [pscustomobject]@{ State = 'FAIL'; Text = "$($check): FAIL -- $bad of $shape not passed" } }
+        return [pscustomobject]@{ State = 'PASS'; Text = "$($check): PASS -- $shape" }
+    }
+    $line = @($run.Output | Select-String -Pattern ([regex]::Escape($check) + ':') | Select-Object -First 1)
+    if ($line.Count -eq 0) { return [pscustomobject]@{ State = 'MISSING'; Text = "$suite $check" } }
+    $txt = $line[0].Line.Trim()
+    if ($txt -match ': FAIL') { return [pscustomobject]@{ State = 'FAIL'; Text = $txt } }
+    return [pscustomobject]@{ State = 'PASS'; Text = $txt }
+}
+
 # prove: the mechanism for the second half of the 2026-08-18 lesson. A new acceptance check
 # is worth nothing until it has been SEEN RED against the code it is supposed to catch. This
 # builds HEAD (i.e. the tree WITHOUT your uncommitted fix) in a throwaway git worktree, runs
@@ -1150,21 +1268,64 @@ function Do-Prove {
     # justification had to be measured before it could be corrected: the build was never the
     # cost. The cost was running the same failing suite over and over, each time waiting out the
     # same deadlines, to read a different line of the same output.
-    if (-not $Rest -or $Rest.Count -lt 1) { Abort "need a suite and a check name" "dev prove m3 respawned_ticket_lane_returns_to_its_worktree  --  or  dev prove m0:check_a m0:check_b" }
+    # A THIRD FORM, and it is what makes a pure MOVE provable at all (plan W3):
+    #
+    #   dev prove --with tests\mutants\s-wire-01.patch m2:tier0_prefix_routes unit:<FQN>
+    #
+    # The default form judges a check against HEAD, which works while the check is NEW: HEAD
+    # lacks your fix, so a check with teeth fails there. A MOVE contains no fix -- it is the
+    # same assertion one layer down -- so HEAD passes it and every moved check comes back
+    # VACUOUS by construction. The instrument for a move is therefore a DEFECT rather than an
+    # absence: break the function on purpose and demand that the old acceptance check and the
+    # new unit test go red on the SAME break.
+    #
+    # With no check named, the patch's own `# expects-red:` lines are the list -- so the pair
+    # that has to stay in step (the defect, and what it must redden) lives in one reviewable
+    # file instead of in a command somebody retypes.
+    $with = ''
+    $argv = @()
+    $args0 = @($Rest)
+    for ($i = 0; $i -lt $args0.Count; $i++) {
+        if ($args0[$i] -eq '--with') {
+            if ($i + 1 -ge $args0.Count) { Abort "--with needs a patch file" "dev prove --with tests\mutants\<slice>-NN.patch [<suite>:<check> ...]" }
+            $with = $args0[$i + 1]
+            $i++
+            continue
+        }
+        $argv += $args0[$i]
+    }
+
+    $mutant = $null
+    if ($with) {
+        $wp = if ([System.IO.Path]::IsPathRooted($with)) { $with } else { Join-Path $repo $with }
+        if (-not (Test-Path $wp)) { Abort "no patch at $wp" "mutants are CHECKED IN at tests\mutants\<slice>-NN.patch (plan W3 delta 6)" }
+        $mutant = Read-Mutant $wp
+        if ($argv.Count -eq 0) { $argv = @($mutant.ExpectsRed) }
+    }
+
+    if ($argv.Count -lt 1) { Abort "need a suite and a check name" "dev prove m3 respawned_ticket_lane_returns_to_its_worktree  --  or  dev prove m0:check_a m0:check_b  --  or  dev prove --with <patch>" }
     $pairs = @()
-    if (@($Rest | Where-Object { $_ -match ':' }).Count -gt 0) {
-        foreach ($a in $Rest) {
+    if (@($argv | Where-Object { $_ -match ':' }).Count -gt 0) {
+        foreach ($a in $argv) {
             if ($a -notmatch '^([^:]+):(.+)$') { Abort "cannot read '$a' as suite:check" "mixing the one-check and many-check forms is not supported; use m0:check_a m0:check_b" }
             $pairs += [pscustomobject]@{ Suite = $Matches[1]; Check = $Matches[2] }
         }
     }
     else {
-        if ($Rest.Count -lt 2) { Abort "need a suite and a check name" "dev prove m3 respawned_ticket_lane_returns_to_its_worktree" }
-        $pairs += [pscustomobject]@{ Suite = $Rest[0]; Check = $Rest[1] }
+        if ($argv.Count -lt 2) { Abort "need a suite and a check name" "dev prove m3 respawned_ticket_lane_returns_to_its_worktree" }
+        $pairs += [pscustomobject]@{ Suite = $argv[0]; Check = $argv[1] }
     }
-    $suiteNames = @($pairs | ForEach-Object { $_.Suite } | Sort-Object -Unique)
+    # The controls. These ride the same runs and are judged the other way up -- see Read-Mutant.
+    $greens = @()
+    if ($mutant) {
+        foreach ($g in @($mutant.ExpectsGreen)) {
+            if ($g -notmatch '^([^:]+):(.+)$') { Abort "cannot read expects-green '$g' as suite:check" "in $($mutant.Path)" }
+            $greens += [pscustomobject]@{ Suite = $Matches[1]; Check = $Matches[2] }
+        }
+    }
+    $suiteNames = @(@($pairs) + @($greens) | ForEach-Object { $_.Suite } | Sort-Object -Unique)
     foreach ($n in $suiteNames) {
-        if ($n -ne 'unit' -and -not (Test-Path "$repo\tests\$n-acceptance.ps1")) { Abort "no suite '$n'" "one of: $((AllSuites) -join ', ')" }
+        if ((UnitSuites) -notcontains $n -and -not (Test-Path "$repo\tests\$n-acceptance.ps1")) { Abort "no suite '$n'" "one of: $((AllSuites) -join ', '), ui-unit" }
     }
     # `unit` CANNOT BE PROVED HERE, and saying so is the whole fix (2026-08-19). It looked
     # supported -- CLAUDE.md's table says `prove <suite> <check>` and the loop above lets the
@@ -1187,8 +1348,20 @@ function Do-Prove {
     # already prescribes for machine-state checks -- break the thing on purpose and watch the
     # check go red -- and it is a stronger demonstration for a pure refactor anyway, because it
     # pins the exact behaviour rather than the symbol's absence.
-    if ($suiteNames -contains 'unit') {
-        Abort "the unit suite cannot be proved against HEAD" (@(
+    #
+    # ALL THREE OF THOSE ARE ANSWERED BY `--with`, and that is why the refusal is now
+    # conditional rather than absolute (plan W3 delta 5):
+    #   1. a HEAD that lacks your new symbol -> a MOVE adds no symbol, and the seam commit
+    #      lands before the slice that uses it, so the project compiles against HEAD;
+    #   2. there is no tests\unit-acceptance.ps1 -> `unit` and `ui-unit` route to Run-Unit,
+    #      which is not a .ps1 suite and never was;
+    #   3. Run-Unit tested the WORKING tree -> Run-Unit -Root $wt tests the worktree of HEAD
+    #      with the mutant applied, which is a different tree from the one holding the fix.
+    # What is NOT answered, and so is not offered: proving a unit check against a bare HEAD.
+    # There is still no red to see there, only a compile error.
+    $unitAsked = @($suiteNames | Where-Object { (UnitSuites) -contains $_ })
+    if (-not $with -and $unitAsked.Count -gt 0) {
+        Abort "the unit suites cannot be proved against a bare HEAD" (@(
             "A unit test compiles AGAINST the code it tests, so a HEAD without your new symbol",
             "cannot run it at all -- there is no red to see, only a compile error.",
             "",
@@ -1197,14 +1370,24 @@ function Do-Prove {
             "  2. dev test unit      -- the check must go RED, and you must read the failure",
             "  3. revert the break, and record what the red said in the commit message",
             "",
-            "Acceptance checks (.ps1 suites) prove normally: dev prove m3:check workspace:check"
+            "Acceptance checks (.ps1 suites) prove normally: dev prove m3:check workspace:check",
+            "",
+            "Or supply the DEFECT yourself, which is what a MOVE needs (plan W3):",
+            "  dev prove --with tests\mutants\<slice>-NN.patch unit:<FQN> <suite>:<old_check>"
         ) -join "`n         ")
     }
     Say $(if ($pairs.Count -eq 1) { "== prove: '$($pairs[0].Check)' must FAIL against HEAD ==" }
           else { "== prove: $($pairs.Count) check(s) across $($suiteNames.Count) suite(s) must FAIL against HEAD ==" })
 
-    $dirty = @(git -C $repo status --porcelain -- 'src' 'tests')
-    if ($dirty.Count -eq 0) { Abort "src and tests are identical to HEAD, so there is no change to prove" "make the fix first, leave it uncommitted, then run prove" }
+    # THE PATCH *IS* THE CHANGE, so a clean tree is not an error under --with -- it is the
+    # normal state at step B0 of a slice, where the mutant is written before anything moves.
+    if ($with) {
+        Say "with: $($mutant.Path)"
+    }
+    else {
+        $dirty = @(git -C $repo status --porcelain -- 'src' 'tests')
+        if ($dirty.Count -eq 0) { Abort "src and tests are identical to HEAD, so there is no change to prove" "make the fix first, leave it uncommitted, then run prove  --  or supply a defect: dev prove --with <patch>" }
+    }
 
     # ONE WORKTREE PER COMMIT PER LANE, KEPT (P7.4, per-lane by P1.7). This used to make a
     # GUID-named worktree, cold-build
@@ -1285,6 +1468,50 @@ function Do-Prove {
         # still be the one that runs. Also drops the previous proof's <suite>-output directories.
         Remove-Item "$wt\tests\*" -Recurse -Force -ErrorAction SilentlyContinue
         Copy-Item "$repo\tests\*" "$wt\tests\" -Recurse -Force
+
+        # src\ IS RESTORED FIRST, AND UNCONDITIONALLY. This worktree is a per-commit CACHE
+        # (see the pruning block above), so a previous --with run's mutation is still sitting
+        # in its src\ -- and a proof judged against yesterday's defect is a WRONG answer, not
+        # a missing one. Unconditional because the run that must not inherit one is the run
+        # WITHOUT --with: that is the plain `dev prove`, whose whole promise is "this is
+        # HEAD". Nothing else in this tree is tracked-and-modified, so it costs milliseconds.
+        git -C $wt checkout HEAD -- src 2>&1 | ForEach-Object { Add-Content -Path $log -Value $_ -Encoding utf8 }
+
+        if ($mutant) {
+            # SRC ONLY, and the refusal is the point. A mutant that touched tests\ would be
+            # editing the very checks it is supposed to redden -- reason 3 of the unit refusal
+            # above in a new costume, a change measured against itself. `git apply --numstat`
+            # answers "which files" using git's OWN parser, so this cannot disagree with what
+            # `git apply` is about to do; a hand regex over `diff --git` lines could.
+            $touched = @(& git -C $wt apply --numstat $mutant.Path 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($l in $touched) { Say "  $l" }
+                Abort "that file does not read as a diff of this tree: $($mutant.Path)" "regenerate it from a tree at this commit: git diff > <patch>"
+            }
+            $files = @()
+            foreach ($l in $touched) {
+                $cols = @("$l" -split "`t")
+                if ($cols.Count -ge 3) { $files += $cols[2] }
+            }
+            $outside = @($files | Where-Object { $_ -notmatch '^src[\\/]' })
+            if ($outside.Count -gt 0) {
+                Abort "the mutant touches $($outside.Count) path(s) outside src\: $($outside -join ', ')" "a mutant is a DEFECT IN THE PRODUCT; a patch that edits tests\ measures a change against itself"
+            }
+            if ($files.Count -eq 0) { Abort "the mutant changes nothing: $($mutant.Path)" "an empty patch reddens nothing, and every check under it would report VACUOUS" }
+
+            $out = @(& git -C $wt apply --check $mutant.Path 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($l in $out) { Say "  $l" }
+                Abort "the mutant does not apply to HEAD ($($head.Substring(0,12)))" "it was cut against a different commit -- regenerate it from this one"
+            }
+            $out = @(& git -C $wt apply $mutant.Path 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                foreach ($l in $out) { Say "  $l" }
+                Abort "git apply --check passed and git apply then failed" "see $log"
+            }
+            Say "mutant applied to HEAD: $($files -join ', ')"
+            if ($mutant.Defect) { Say "  defect: $($mutant.Defect)" }
+        }
         # THE FOUR PRODUCT PROJECTS, NOT THE SOLUTION (2026-08-19). `Dodona.sln` includes
         # tests\Dodona.Tests, and an acceptance suite has no use for it: every suite runs the
         # binaries that Use-TestBinaries copies out of src\*\bin\Release, and the unit suite
@@ -1297,6 +1524,14 @@ function Do-Prove {
         Say $(if ($reused) { "building HEAD (incremental) ..." } else { "building HEAD (cold, first proof at this commit) ..." })
         $projects = @('src\Dodona\Dodona.csproj', 'src\DodonaShim\DodonaShim.csproj',
                       'src\DodonaFakeAgent\DodonaFakeAgent.csproj', 'src\DodonaUi\DodonaUi.csproj')
+        # ...PLUS a test project, but only when a proof actually NAMES one. The paragraph above
+        # is still right that an ACCEPTANCE proof has no business compiling tests\Dodona.Tests:
+        # that is what stopped one unit test naming a new symbol from taking eleven acceptance
+        # proofs down with it. A `unit:` or `ui-unit:` pair changes the question -- that project
+        # IS the subject, and a compile failure in it is a real "HEAD does not build" rather
+        # than collateral. Each is added only for ITS OWN prefix: a UI-only proof must not pay
+        # for a net8.0 compile, and a net8.0-only proof must not pay for WPF.
+        foreach ($u in $unitAsked) { $projects += (UnitProject $u) }
         foreach ($proj in $projects) {
             $b = & dotnet build (Join-Path $wt $proj) -c Release 2>&1
             Add-Content -Path $log -Value $b -Encoding utf8
@@ -1317,10 +1552,13 @@ function Do-Prove {
         # other suite copies out of it; m1 is intermittent beside a parallel wave) -- the same
         # rules Run-Suites obeys, for the same reasons, because this worktree has one bin too.
         $runs = @{}
-        foreach ($n in @($suiteNames | Where-Object { (SoloSuites) -contains $_ })) {
+        # -Root $wt is the whole of reason 3's answer: the code under test is HEAD-plus-mutant
+        # in the throwaway tree, never the working tree holding the change being proved.
+        foreach ($n in $unitAsked) { $runs[$n] = Run-Unit -Root $wt -Name $n }
+        foreach ($n in @($suiteNames | Where-Object { (SoloSuites) -contains $_ -and (UnitSuites) -notcontains $_ })) {
             $runs[$n] = Complete-Suite (Start-Suite $n "$wt\tests\$n-acceptance.ps1")
         }
-        $wave = @($suiteNames | Where-Object { (SoloSuites) -notcontains $_ })
+        $wave = @($suiteNames | Where-Object { (SoloSuites) -notcontains $_ -and (UnitSuites) -notcontains $_ })
         $cap = SuiteConcurrency
         $started = @()
         foreach ($n in $wave) {
@@ -1336,19 +1574,22 @@ function Do-Prove {
         # A check that never RAN is not vacuous, it is unproven, and the two must not be
         # conflated: vacuous means "your change is not what makes it fail", missing means "this
         # code path was never reached", and only the second one might be a typo in the name.
-        $proven = 0; $vacuous = 0; $missing = 0
+        $proven = 0; $vacuous = 0; $missing = 0; $overbroad = 0
         Say ""
         foreach ($pr in $pairs) {
-            $o = $runs[$pr.Suite].Output
-            $line = @($o | Select-String -Pattern ([regex]::Escape($pr.Check) + ':') | Select-Object -First 1)
-            if ($line.Count -eq 0) {
-                Say "  MISSING  $($pr.Suite) $($pr.Check) -- never ran against HEAD"
-                $missing++
-                continue
-            }
-            $txt = $line[0].Line.Trim()
-            if ($txt -match ': FAIL') { Say "  PROVEN   $txt"; $proven++ }
-            else { Say "  VACUOUS  $txt"; $vacuous++ }
+            $v = (Prove-Judge $runs[$pr.Suite] $pr.Suite $pr.Check)
+            if ($v.State -eq 'FAIL') { Say "  PROVEN   $($v.Text)"; $proven++ }
+            elseif ($v.State -eq 'PASS') { Say "  VACUOUS  $($v.Text)"; $vacuous++ }
+            else { Say "  MISSING  $($v.Text) -- never ran against HEAD"; $missing++ }
+        }
+        # The controls, judged the other way up. A mutant that reddens a check it was not aimed
+        # at is over-broad, and every red under it is worth exactly as little as a green would
+        # be -- so this fails the proof rather than printing a note somebody scrolls past.
+        foreach ($pr in $greens) {
+            $v = (Prove-Judge $runs[$pr.Suite] $pr.Suite $pr.Check)
+            if ($v.State -eq 'PASS') { Say "  CONTROL  $($v.Text)" }
+            elseif ($v.State -eq 'FAIL') { Say "  OVERBROAD $($v.Text) -- declared expects-green, and the mutant reddened it"; $overbroad++ }
+            else { Say "  MISSING  $($v.Text) -- declared expects-green, never ran"; $missing++ }
         }
 
         Say ""
@@ -1360,9 +1601,15 @@ function Do-Prove {
             Say "$vacuous check(s) VACUOUS: they PASS against HEAD, so they do not test your change."
             Say "         Rewrite them before trusting them. (This is the exact trap of 2026-08-18.)"
         }
-        if ($vacuous -eq 0 -and $missing -eq 0) {
-            Say $(if ($proven -eq 1) { "PROVEN: the check fails without your change, so it has teeth." }
-                  else { "PROVEN: all $proven check(s) fail without your change, so they have teeth." })
+        if ($overbroad -gt 0) {
+            Say "$overbroad check(s) OVER-BROAD: the mutant reddened a check it was not aimed at, so"
+            Say "         nothing it reddened is evidence about the check it WAS aimed at. Narrow the defect."
+        }
+        if ($vacuous -eq 0 -and $missing -eq 0 -and $overbroad -eq 0) {
+            $why = if ($with) { "under $(Split-Path -Leaf $mutant.Path)" } else { "without your change" }
+            Say $(if ($proven -eq 1) { "PROVEN: the check fails $why, so it has teeth." }
+                  else { "PROVEN: all $proven check(s) fail $why, so they have teeth." })
+            if ($with -and $greens.Count -gt 0) { Say "        and $($greens.Count) declared control(s) survived it." }
         }
         else { Say "log: $log"; exit 1 }
     }

@@ -1,0 +1,54 @@
+# W3's own verification mutant. Not a slice: this is the defect that proved
+# `dev prove --with` can produce a red at all, and it is kept because a tool's first red is the
+# only evidence anybody has that the tool can produce one (CLAUDE.md 0.3).
+#
+# defect: LanePrefix requires a DOUBLE colon, so `WATER: make it darker` is no longer a tier-0
+# defect: prefix at all -- the routing ladder's one instant, model-free, code-only rung.
+#
+# It is aimed at ONE function reached from two layers, which is what a slice's mutant has to be:
+# a pure-logic test calls Daemon.LanePrefix directly, and m2 types a prefixed sentence at a real
+# daemon and reads where it landed. One character reddens both.
+#
+# expects-red: unit:Dodona.Tests.RoutingInCodeTests.A_lane_prefix_names_its_target_and_keeps_the_rest
+# expects-red: unit:Dodona.Tests.RoutingInCodeTests.A_prefixed_paragraph_keeps_its_newlines
+# expects-red: m2:tier0_prefix_routes
+#
+# ------------------------------------------------------------------ the two controls
+#
+# (1) THE REASON THIS MUTANT IS `::` AND NOT `return null`. The test that pins `\s+` and not
+#     `\s*` -- `routekind:new-task ...` must NOT be read as a target, the bug that once created
+#     a lane titled ROUTEKIND -- asserts LanePrefix returns null. A mutant that made it return
+#     null ALWAYS would have reddened three checks and turned that one greener for the wrong
+#     reason. A defect that satisfies the check it was not aimed at is how an over-broad mutant
+#     flatters itself.
+#
+# expects-green: unit:Dodona.Tests.RoutingInCodeTests.A_colon_with_no_space_is_not_a_target
+#
+# (2) A FINDING, WRITTEN AS A CHECK RATHER THAN AS PROSE, because prose is not enforcement.
+#     `m2:tier0_message_delivered` was listed expects-red on the first run of this mutant and
+#     came back VACUOUS. That is correct and it is about the CHECK, not about the mutant: with
+#     tier 0 dead the sentence still reached SKY, by the focus fallback -- the run printed
+#     `-> SKY (focus, no classifier warm)` -- so the body still arrived and the check still
+#     passed. It asserts ARRIVAL, and arrival is what the fallback also produces. Only its
+#     sibling `tier0_prefix_routes` asserts the RUNG, by matching `-> SKY (tier 0)`.
+#
+#     This matters beyond one check: TEST-ARCHITECTURE-PLAN 2.2 names
+#     `m2:tier0_message_delivered` as the owner of wire E7, whose whole sentence is "takes the
+#     INSTANT path ... with no classifier consulted". Under this defect no instant path existed
+#     and its owner stayed green. Recorded in tests\ledger\README.md; wires.tsv is frozen and
+#     is not edited here.
+#
+# expects-green: m2:tier0_message_delivered
+diff --git a/src/Dodona/Daemon.cs b/src/Dodona/Daemon.cs
+index 54091c2..489d57d 100644
+--- a/src/Dodona/Daemon.cs
++++ b/src/Dodona/Daemon.cs
+@@ -5759,7 +5759,7 @@ sealed class Daemon
+     internal static (string Target, string Body)? LanePrefix(string text)
+     {
+         var m = System.Text.RegularExpressions.Regex.Match(
+-            text, @"^([A-Za-z0-9_-]+):\s+(.+)$", System.Text.RegularExpressions.RegexOptions.Singleline);
++            text, @"^([A-Za-z0-9_-]+)::\s+(.+)$", System.Text.RegularExpressions.RegexOptions.Singleline);
+         return m.Success ? (m.Groups[1].Value, m.Groups[2].Value) : null;
+     }
+ 
