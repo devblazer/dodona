@@ -525,7 +525,17 @@ sealed class Daemon
         catch (Exception ex) { _store.Event("repo_path_stamp_failed", null, ex.Message); }
     }
 
-    Daemon(string primary, string wsId, string wsName, string ctlPipe, Store store)
+    /// <summary>
+    /// INTERNAL FOR THE TEST ASSEMBLY, AND FOR NOTHING ELSE (seam S3,
+    /// `docs/TEST-ARCHITECTURE-PLAN.md` §4/W8). `RunAsync` is still the only way a daemon is
+    /// started for real: it takes the `Global\dodona-&lt;id&gt;` mutex, opens the store itself and
+    /// does not return until stop. What this keyword buys is a `Daemon` over a temp-file
+    /// `Store` with no mutex, no pipe server and no `RunAsync`, which is the only thing
+    /// standing between the 45-case command surface and the ~1 second `unit` loop
+    /// (`docs/testarch/seams.md` F2). It changes no behaviour: `Dodona.csproj` already grants
+    /// `InternalsVisibleTo("Dodona.Tests")` and the type itself is already internal.
+    /// </summary>
+    internal Daemon(string primary, string wsId, string wsName, string ctlPipe, Store store)
     {
         _primary = primary;
         _instanceId = wsId;
@@ -978,7 +988,19 @@ sealed class Daemon
         return 0;
     }
 
-    async Task<bool> HandleAsync(string req, StreamWriter w)
+    /// <summary>
+    /// THE ENTIRE DAEMON COMMAND SURFACE — 45 `case` labels — and its only dependencies are a
+    /// JSON string in and a `StreamWriter` out. The pipe server that calls it is the nine lines
+    /// directly above.
+    ///
+    /// INTERNAL FOR THE TEST ASSEMBLY (seam S3, `docs/TEST-ARCHITECTURE-PLAN.md` §4/W8, and
+    /// D-T11 in that plan's §3.5). A `StreamWriter` over a `MemoryStream` substitutes for the
+    /// pipe **with no fake at all** — it is this handler with nine lines of pipe server not
+    /// present, which is why the plan deletes that transport rather than doubling it: *a
+    /// transport you can leave out beats a transport you fake.* One keyword, no refactor, no
+    /// interface, and nothing about what any command DOES is changed by it.
+    /// </summary>
+    internal async Task<bool> HandleAsync(string req, StreamWriter w)
     {
         using var d = JsonDocument.Parse(req);
         var e = d.RootElement;
@@ -1806,17 +1828,8 @@ sealed class Daemon
                 // recorded for the manager to read (R4/R5) and it gates nothing.
                 var (dc, diff) = Git.Run(reqPath, "diff", "--name-only", $"{reqCfg.Main}...{t.Branch}");
                 if (dc == 0 && diff.Length > 0)
-                {
-                    var touched = diff.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(f => Claims.Normalize(reqPrefix + f.Trim()))   // git speaks repo-relative; claims are workspace-relative
-                        .Where(f => f.Length > 0)
-                        .ToList();
-                    var ticketClaims = _store.TicketClaims(tid);
-                    var undeclared = touched.Where(f => !ticketClaims.Any(cl => Claims.Covers(cl.Kind, cl.Value, f))).ToList();
                     _store.Event("branch_touched", null,
-                        $"ticket {tid} touched {touched.Count} path(s): {string.Join(", ", touched)}" +
-                        (undeclared.Count > 0 ? $" | undeclared: {string.Join(", ", undeclared)}" : ""));
-                }
+                                 BranchTouchedDetail(tid, diff, reqPrefix, _store.TicketClaims(tid)));
 
                 var (status, gen, pos) = _store.TokenRequest(tid, TokenIdOf(t), lease, () => Git.Sha(reqPath, reqCfg.Main));
                 w.WriteLine(status == "granted"
@@ -3123,9 +3136,7 @@ sealed class Daemon
         var existing = _store.OpenQuestions()
             .FirstOrDefault(q => q.Kind == Ask.KindRepoInit &&
                                  q.Subject.Equals(project, StringComparison.OrdinalIgnoreCase));
-        var leaf = Path.GetFileName(project.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        if (leaf.Length == 0) leaf = project;
-        var text = $"{leaf} has no git repo, so \"{forWhat}\" cannot become a ticket. Create one?";
+        var (leaf, text) = RepoInitAsk(project, forWhat);
         var id = existing?.Id ?? _store.QuestionOpen(text, Ask.RepoInitCandidates(leaf), Ask.KindRepoInit, project);
         if (existing is null)
         {
@@ -3168,7 +3179,7 @@ sealed class Daemon
                                  q.Subject.Equals(text, StringComparison.Ordinal));
         if (existing is not null) return existing.Id;
         var names = candidates.Select(ProjectLadder.Leaf).ToList();
-        var id = _store.QuestionOpen($"Which project is “{Truncate(text, 60)}” for?",
+        var id = _store.QuestionOpen(WhichProjectAskText(text),
                                      Ask.RouteCandidates(names), Ask.KindRoute, text);
         _store.Event("question_opened", null,
             $"question {id} kind={Ask.KindRoute} candidates={(names.Count == 0 ? "none" : string.Join(",", names))} " +
@@ -3310,10 +3321,6 @@ sealed class Daemon
     /// </summary>
     string LandAskText(Store.TicketRow t, string? recordJson)
     {
-        var files = 0; var uncommitted = 0;
-        var verify = "not-run"; var drop = "moot";
-        var names = new List<string>();
-        var haveRecord = false;
         // THE SECOND CALLER HANDS NOTHING (`token-request`'s unapproved refusal), so the record
         // is looked up. There may not be one: `completion_record_impossible` is a real state — a
         // ticket can outlive its worktree — and a ticket can also ask for the token before any
@@ -3321,6 +3328,35 @@ sealed class Daemon
         // must NOT do is print "0 files" and pass an absence off as a measurement.
         recordJson ??= _store.LastTicketEvent(t.Id, "completion_record") is { Detail: string rd } &&
                        rd.IndexOf('{') is int b && b >= 0 ? rd[b..] : null;
+        // THE BOUND IS A COUNT, NOT AN EVENT ORDERING (D-R12/D-R18), and asking it FIRST is a
+        // correction rather than a tidy-up: it was written as one more arm of the switch below
+        // and `brain` caught it. Past the bound no further review will ever run, so any later
+        // turn's record lands on top of `manager_bound_reached` and the ask reverted to "not
+        // reviewed yet" — permanently, for a ticket that is precisely the one the operator has
+        // been handed. Counted in the store for the same reason the bound itself is: a daemon
+        // restarts on every publish.
+        //
+        // THESE ARE THE STORE READS, AND THEY STAY HERE (seam, `docs/TEST-ARCHITECTURE-PLAN.md`
+        // §4/W8): everything below the call is a paragraph assembled out of them, and it is the
+        // paragraph the `ui-ask` checks are about. `priorReviews` is read eagerly where the
+        // switch below used to read it lazily in one arm — one indexed COUNT per turn-end, and
+        // the words it produces are unchanged.
+        return LandAskText(t.Id, t.Title, recordJson,
+                           _store.CountTicketEvents(t.Id, "manager_sent_back"),
+                           _store.LastTicketEvent(t.Id, "completion_record", "manager_review",
+                                                  "manager_review_skipped", "manager_review_failed"),
+                           _store.CountTicketEvents(t.Id, "manager_review"));
+    }
+
+    /// <summary>The words themselves, over facts a caller has already read. See the instance
+    /// overload above for what each one is and why it is read where it is.</summary>
+    internal static string LandAskText(long ticketId, string ticketTitle, string? recordJson,
+                                       int rounds, (string Kind, string Ts, string Detail)? last, int priorReviews)
+    {
+        var files = 0; var uncommitted = 0;
+        var verify = "not-run"; var drop = "moot";
+        var names = new List<string>();
+        var haveRecord = false;
         try
         {
             if (recordJson is null) throw new JsonException("no completion record");
@@ -3352,16 +3388,6 @@ sealed class Daemon
         if (drop == "dropped") facts.Add("IT RESOLVED BY DISCARDING SOMETHING MAIN CHANGED");
         if (uncommitted > 0) facts.Add($"{uncommitted} uncommitted");
 
-        // THE BOUND IS A COUNT, NOT AN EVENT ORDERING (D-R12/D-R18), and asking it FIRST is a
-        // correction rather than a tidy-up: it was written as one more arm of the switch below
-        // and `brain` caught it. Past the bound no further review will ever run, so any later
-        // turn's record lands on top of `manager_bound_reached` and the ask reverted to "not
-        // reviewed yet" — permanently, for a ticket that is precisely the one the operator has
-        // been handed. Counted in the store for the same reason the bound itself is: a daemon
-        // restarts on every publish.
-        var rounds = _store.CountTicketEvents(t.Id, "manager_sent_back");
-        var last = _store.LastTicketEvent(t.Id, "completion_record", "manager_review",
-                                          "manager_review_skipped", "manager_review_failed");
         var review = rounds >= SendBackBound
             ? $"the manager sent this back {rounds} times, which is the bound — it is yours to judge now"
             : last?.Kind switch
@@ -3371,12 +3397,12 @@ sealed class Daemon
                 "manager_review_failed" => $"the review did not finish ({Tail(last.Value.Detail)})",
                 // The record is on top, so no review has come back for THIS change yet. Showing
                 // the previous turn's note here would be a write-up about a diff that is gone.
-                _ => _store.CountTicketEvents(t.Id, "manager_review") > 0
+                _ => priorReviews > 0
                         ? "the manager has not reviewed this latest change yet"
                         : "no review has run",
             };
 
-        return Truncate($"ticket {t.Id} \"{t.Title}\" is ready to merge — {string.Join(", ", facts)}.\n" +
+        return Truncate($"ticket {ticketId} \"{ticketTitle}\" is ready to merge — {string.Join(", ", facts)}.\n" +
                         $"{review}\nApprove the merge?", 700);
 
         // The manager's own words. A verdict with no note is reported AS a verdict with no note:
@@ -3995,6 +4021,32 @@ sealed class Daemon
         return AttachShimAsync(laneId, title, role, cwd, child, childArgs);
     }
 
+    /// <summary>
+    /// HOW A SHIM IS LAUNCHED, AS TWO REPLACEABLE PROBES — the seam
+    /// `docs/testarch/survey-daemon.md` blocker 8 asks for, and the `Trees.Locate` shape
+    /// (`Trees.cs:44` + `:77`): the real filesystem and the real launcher are bound HERE, once,
+    /// so production has exactly one path and no call site chooses.
+    ///
+    /// **What it unblocks.** `a_missing_shim_is_named_not_guessed` and
+    /// `a_failed_spawn_leaves_no_lane_claiming_alive` are a string and a state transition over
+    /// one boolean, and today the only way to produce a spawn that fails is to point
+    /// `DODONA_SHIM` at a nonexistent path and start a whole extra real daemon
+    /// (`m0-acceptance.ps1:335` explains why it cannot even reuse one).
+    ///
+    /// **A FIELD RATHER THAN A PARAMETER, DELIBERATELY.** <see cref="AttachShimAsync"/> is
+    /// private and is reached from the outside only through <see cref="HandleAsync"/>'s
+    /// `lane-start`, which is the seam a test drives (S3); a defaulted parameter would be
+    /// unreachable from there and would therefore be a seam in name only. `docs/TEST-ARCHITECTURE-PLAN.md`
+    /// §3.1 names a field as a landing site for exactly this reason — what matters is that the
+    /// double replaces the thing production reads, and this IS the thing production reads.
+    /// </summary>
+    internal Func<string, bool> ShimBinaryExists = File.Exists;
+
+    /// <summary>The launcher itself. See <see cref="ShimBinaryExists"/>; the return value is
+    /// discarded here exactly as `Process.Start(psi)` was — the daemon has never held the
+    /// `Process`, it waits for the shim's PIPE to answer.</summary>
+    internal Action<ProcessStartInfo> StartShim = psi => Process.Start(psi);
+
     async Task<(long Id, string Msg)> AttachShimAsync(long id, string title, string role, string workDir, string child, List<string> childArgs,
                                                      string? scope = null)
     {
@@ -4110,7 +4162,7 @@ sealed class Daemon
         // overwhelmingly likely cause and deserves to be NAMED rather than reported as a
         // Win32Exception, because "name the real cause" is the difference between a five-second
         // fix and an hour (CLAUDE.md 0.3).
-        if (!File.Exists(shimExe))
+        if (!ShimBinaryExists(shimExe))
         {
             _store.LaneState(id, "unreachable");
             var missing = $"shim binary not found: {shimExe}" +
@@ -4120,7 +4172,7 @@ sealed class Daemon
             _store.Event("shim_spawn_failed", id, missing);
             return (-1, $"error: lane {id} not started -- {missing}");
         }
-        try { Process.Start(psi); }
+        try { StartShim(psi); }
         catch (Exception ex)
         {
             _store.LaneState(id, "unreachable");
@@ -4237,9 +4289,7 @@ sealed class Daemon
     /// </summary>
     void CompressResult(long laneId, long paneEventId, string body)
     {
-        // Already the length a compressor would produce: spending a model call here would
-        // be exactly the no-judgment volume §2.2 says not to buy.
-        if (body.Length <= 120 && !body.Contains('\n')) return;
+        if (!Compression.WorthCompressing(body)) return;
 
         var pool = _store.LanesAll()
             .Where(l => l.Role == "compressor" && l.State == "alive" && _lanes.ContainsKey(l.Id))
@@ -4272,27 +4322,50 @@ sealed class Daemon
                 if (d.RootElement.TryGetProperty("options", out var op) && op.ValueKind == JsonValueKind.Array)
                     options.AddRange(op.EnumerateArray().Select(x => x.GetString() ?? "").Where(x => x.Length > 0).Take(3));
 
-                // The fixed shape from §5. The lane's name is NOT repeated here the way the
-                // design sketch shows it: in a pane the row already sits under that lane's
-                // own coloured header, and in the feed the title is already the first thing
-                // on the row. Printing it a third time is noise, not structure.
-                var flat = headline.Trim().ReplaceLineEndings(" ");
-                // A model that already opened with the word would otherwise render
-                // "BLOCKED — BLOCKED ..." — the prefix is structure, so it is added exactly
-                // once and never echoed.
-                if (flat.StartsWith("BLOCKED", StringComparison.OrdinalIgnoreCase))
-                    flat = flat[7..].TrimStart(' ', ':', '-', '—');
-                var text = new StringBuilder();
-                if (needsYou) text.Append("BLOCKED — ");
-                text.Append(Truncate(flat, 90));
-                if (needsYou && options.Count > 0) text.Append("\n   options: ").Append(string.Join(" / ", options));
+                var text = Compression.Render(headline, needsYou, options);
 
-                _store.PaneCompressed(paneEventId, text.ToString());
+                _store.PaneCompressed(paneEventId, text);
                 _store.Event("compressed", pick.Id,
                     $"{sw.ElapsedMilliseconds}ms lane={laneId} row={paneEventId} {body.Length}->{text.Length} chars needs_you={needsYou}");
             }
             catch (Exception ex) { _store.Event("compressor_failed", pick.Id, ex.Message); }
         });
+    }
+
+    /// <summary>
+    /// The two decisions <see cref="CompressResult"/> makes that are not I/O — lifted out so
+    /// they can be asked on the ~1 second `unit` loop instead of behind a warm pool of two real
+    /// `claude -p` processes (`docs/testarch/survey-daemon.md` blocker 2, which names both by
+    /// these names). Nothing about WHICH compressor is picked, when it is asked, or what happens
+    /// to its answer moved: this is the length test and the rendering, and both are byte-for-byte
+    /// what they were inline.
+    /// </summary>
+    internal static class Compression
+    {
+        /// <summary>Already the length a compressor would produce: spending a model call there
+        /// would be exactly the no-judgment volume §2.2 says not to buy.</summary>
+        internal static bool WorthCompressing(string body) => body.Length > 120 || body.Contains('\n');
+
+        /// <summary>
+        /// The fixed shape from §5. The lane's name is NOT repeated here the way the design
+        /// sketch shows it: in a pane the row already sits under that lane's own coloured
+        /// header, and in the feed the title is already the first thing on the row. Printing it
+        /// a third time is noise, not structure.
+        /// </summary>
+        internal static string Render(string headline, bool needsYou, IReadOnlyList<string> options)
+        {
+            var flat = headline.Trim().ReplaceLineEndings(" ");
+            // A model that already opened with the word would otherwise render
+            // "BLOCKED — BLOCKED ..." — the prefix is structure, so it is added exactly
+            // once and never echoed.
+            if (flat.StartsWith("BLOCKED", StringComparison.OrdinalIgnoreCase))
+                flat = flat[7..].TrimStart(' ', ':', '-', '—');
+            var text = new StringBuilder();
+            if (needsYou) text.Append("BLOCKED — ");
+            text.Append(Truncate(flat, 90));
+            if (needsYou && options.Count > 0) text.Append("\n   options: ").Append(string.Join(" / ", options));
+            return text.ToString();
+        }
     }
 
     // ------------------------------------------------- the completion record (R4, D-R8/D-R13)
@@ -5537,12 +5610,12 @@ sealed class Daemon
         var prefix = LanePrefix(text);
         if (prefix is not null)
         {
-            var lane = work.FirstOrDefault(l => l.Title.Equals(prefix.Value.Target, StringComparison.OrdinalIgnoreCase));
+            var lane = work.FirstOrDefault(l => TitleMatches(l.Title, prefix.Value.Target));
             if (lane is not null && _lanes.TryGetValue(lane.Id, out var rt0))
             {
                 rt0.Say(prefix.Value.Body);
                 _store.RoutingInsert(text, "prefix", lane.Id, lane.Id, "explicit");
-                return $"-> {lane.Title} (tier 0)";
+                return Tier0Verdict(lane.Title);
             }
         }
 
@@ -5560,13 +5633,11 @@ sealed class Daemon
         }
 
         // ---- who is focused. With no focus, pick rather than refuse (§11). ---------------
-        long fid;
-        var focused = _store.KvGet("focused_lane");
-        if (focused is not null && long.TryParse(focused, out var f0) && live.Any(l => l.Id == f0)) fid = f0;
-        else
+        var focus = FocusPick(_store.KvGet("focused_lane"), live.Select(l => l.Id).ToList());
+        long fid = focus.Id;
+        if (focus.Picked)
         {
-            var pick = live[^1];                       // the newest lane is the one you just made
-            fid = pick.Id;
+            var pick = live.First(l => l.Id == fid);
             _store.KvSet("focused_lane", fid.ToString());
             if (live.Count > 1)
                 _store.PaneEvent(fid, "announcement", $"↦ focused {pick.Title} (nothing was focused)", null, null);
@@ -5582,7 +5653,7 @@ sealed class Daemon
         {
             frt.Say(text);
             _store.RoutingInsert(text, "generic", fid, fid, "explicit");
-            return $"-> {focusedRow.Title} (generic)";
+            return GenericVerdict(focusedRow.Title);
         }
 
         // ---- the classifier decides, and we WAIT for it. --------------------------------
@@ -5607,14 +5678,11 @@ sealed class Daemon
             if (!_saidNoClassifier)
             {
                 _saidNoClassifier = true;
-                _store.Event("routing_unrouted", null, _config.Brain ? "classifier would not start" : "brain disabled in config");
-                Announce(_config.Brain
-                    ? "[dodona] the input classifier will not start — every sentence is going to the FOCUSED lane until it does. `dodona router-start` to retry."
-                    : "[dodona] brain is off in dodona.json — routing is focused-lane only; a distinct task will NOT get its own lane.");
+                var notice = UnroutedNotice(_config.Brain);
+                _store.Event("routing_unrouted", null, notice.Detail);
+                Announce(notice.Announcement);
             }
-            var stale0 = ovModel is not null || ovEffort is not null
-                ? "  (model/effort is set when a lane starts — this one is already running)" : "";
-            return $"-> {focusedRow.Title} (focus, no classifier warm){stale0}";
+            return NoClassifierVerdict(focusedRow.Title, ovModel, ovEffort);
         }
 
         var verdict = await ClassifyAsync(routerId, text, work, focusedRow);
@@ -5635,13 +5703,13 @@ sealed class Daemon
         {
             frt.Say(text);
             _store.RoutingInsert(text, "generic", fid, fid, conf);
-            return $"-> {focusedRow.Title} (generic)";
+            return GenericVerdict(focusedRow.Title);
         }
 
         // ---- addendum: an existing lane's thread continues. -----------------------------
         if (kind == "addendum" && conf != "low")
         {
-            var tLane = work.FirstOrDefault(l => l.Title.Equals(target ?? "", StringComparison.OrdinalIgnoreCase));
+            var tLane = work.FirstOrDefault(l => TitleMatches(l.Title, target));
             if (tLane is not null && _lanes.TryGetValue(tLane.Id, out var trt))
             {
                 trt.Say(text);
@@ -5710,7 +5778,7 @@ sealed class Daemon
                 _store.Event("routed_new_task", id, $"escalated reason={hReason}");
                 return $"-> {msg} (new task, escalated, started on {choice.Describe})";
             }
-            var hLane = work.FirstOrDefault(l => l.Title.Equals(hTarget ?? "", StringComparison.OrdinalIgnoreCase));
+            var hLane = work.FirstOrDefault(l => TitleMatches(l.Title, hTarget));
             if (hKind is "addendum" or "generic" && (hLane is not null || hKind == "generic"))
             {
                 var dest = hLane ?? focusedRow;
@@ -5738,6 +5806,117 @@ sealed class Daemon
         return $"held: not sure if this is new work or a continuation — nothing was delivered. " +
                $"Prefix a lane ({candidates}) to continue, or start a new lane.";
     }
+
+    // ---------------------------------------------------------------------------------------
+    // THE RUNGS BELOW `LanePrefix` AND `IsObviousGeneric`, AND THE OTHER SENTENCES THE DAEMON
+    // ASSEMBLES BY HAND.
+    //
+    // `docs/testarch/survey-daemon.md` blocker 3, verbatim: *"Verdict strings are produced
+    // inside `RouteInput`, not by a function."* `LanePrefix` and `IsObviousGeneric` were pulled
+    // out for exactly this reason at P4.5 (their comments say so) and the rungs BELOW them were
+    // not, so five m2 checks — `tier0_prefix_routes`, `focus_routes_optimistically`,
+    // `stale_focus_falls_back_to_a_live_lane`, `unrouted_fallback_is_announced`,
+    // `routing_rows_recorded` — still need a real daemon, a real store and two real lanes to
+    // read one sentence back.
+    //
+    // NONE OF THIS DECIDES ANYTHING NEW. Each one is the expression that was inline, moved
+    // whole; what was I/O at the call site is still I/O at the call site. That is the whole
+    // contract of a seam commit (`docs/TEST-ARCHITECTURE-PLAN.md` §9.3, commit A).
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>How a routing target names a lane: by TITLE, case-insensitively, at all three
+    /// sites that do it (tier 0, the classifier's addendum, the escalated addendum). A null
+    /// target from a model that answered without one matches nothing, which is what the
+    /// `target ?? ""` at those sites has always meant.</summary>
+    internal static bool TitleMatches(string laneTitle, string? target) =>
+        laneTitle.Equals(target ?? "", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verdict `RouteInput` returns when a `LANE:` prefix found its lane.</summary>
+    internal static string Tier0Verdict(string laneTitle) => $"-> {laneTitle} (tier 0)";
+
+    /// <summary>The verdict for a generic — the focused lane, whether it was decided in code
+    /// (tier 0.5) or by the classifier. One string, because it is one outcome.</summary>
+    internal static string GenericVerdict(string laneTitle) => $"-> {laneTitle} (generic)";
+
+    /// <summary>
+    /// WHO IS FOCUSED, over the recorded `focused_lane` and the lanes that are actually live.
+    /// With no focus, PICK rather than refuse (§11): the newest lane is the one you just made.
+    /// `Picked` is true exactly when the caller must write the kv back and say so in the pane —
+    /// i.e. when the recorded lane is missing, unparseable, or no longer live, which is what
+    /// `stale_focus_falls_back_to_a_live_lane` is about. Callers only reach this with at least
+    /// one live lane; the empty case answers 0 rather than throwing, because a decision function
+    /// that throws is a worse diagnosis than one that returns.
+    /// </summary>
+    internal static (long Id, bool Picked) FocusPick(string? focusedKv, IReadOnlyList<long> liveIds)
+    {
+        if (focusedKv is not null && long.TryParse(focusedKv, out var f0) && liveIds.Contains(f0))
+            return (f0, false);
+        return liveIds.Count == 0 ? (0, true) : (liveIds[^1], true);
+    }
+
+    /// <summary>
+    /// WHAT THE DAEMON SAYS WHEN THERE IS NO CLASSIFIER — an event detail and one announcement,
+    /// once per daemon. A permanent silent downgrade to "whatever is focused" is exactly the
+    /// quietly-stale state CLAUDE.md §0.1 forbids: the operator typed for two days into a system
+    /// whose routing had been off the whole time, and the only evidence was a status-line suffix
+    /// nobody reads. `unrouted_fallback_is_announced` is the check, and E8 in
+    /// `docs/TEST-ARCHITECTURE-PLAN.md` §2.3 is why it is one of the thirteen never skipped —
+    /// keeping the detector and dropping the alarm is how those two days happened.
+    /// </summary>
+    internal static (string Detail, string Announcement) UnroutedNotice(bool brainEnabled) =>
+        brainEnabled
+            ? ("classifier would not start",
+               "[dodona] the input classifier will not start — every sentence is going to the FOCUSED lane until it does. `dodona router-start` to retry.")
+            : ("brain disabled in config",
+               "[dodona] brain is off in dodona.json — routing is focused-lane only; a distinct task will NOT get its own lane.");
+
+    /// <summary>The verdict for the no-classifier fallback, carrying the stale-override note: a
+    /// model/effort override is applied when a lane STARTS, and this sentence went to one that
+    /// is already running, so saying nothing would let the operator believe it took.</summary>
+    internal static string NoClassifierVerdict(string laneTitle, string? ovModel, string? ovEffort) =>
+        $"-> {laneTitle} (focus, no classifier warm)" +
+        (ovModel is not null || ovEffort is not null
+            ? "  (model/effort is set when a lane starts — this one is already running)" : "");
+
+    /// <summary>
+    /// WHAT A BRANCH TOUCHED, RECORDED AND NOT JUDGED (D-R5/D-R7, R3) — the `branch_touched`
+    /// detail, assembled out of `git diff --name-only` and the ticket's declared claims. It was
+    /// written inline in the `token-request` case, so four m2 checks needed a live daemon and a
+    /// real git repository to read a string built from two lists
+    /// (`docs/testarch/survey-daemon.md` blocker 4).
+    ///
+    /// The caller keeps the `dc == 0 &amp;&amp; diff.Length > 0` guard, so this is only ever
+    /// asked about a diff that produced output — an empty `touched` after normalisation still
+    /// renders "touched 0 path(s): ", exactly as it did inline.
+    /// </summary>
+    internal static string BranchTouchedDetail(long ticketId, string diff, string claimPrefix,
+                                               IReadOnlyList<(string Kind, string Value)> claims)
+    {
+        var touched = diff.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(f => Claims.Normalize(claimPrefix + f.Trim()))   // git speaks repo-relative; claims are workspace-relative
+            .Where(f => f.Length > 0)
+            .ToList();
+        var undeclared = touched.Where(f => !claims.Any(cl => Claims.Covers(cl.Kind, cl.Value, f))).ToList();
+        return $"ticket {ticketId} touched {touched.Count} path(s): {string.Join(", ", touched)}" +
+               (undeclared.Count > 0 ? $" | undeclared: {string.Join(", ", undeclared)}" : "");
+    }
+
+    /// <summary>The words of the repo-init question, and the leaf its choices are built from —
+    /// see <see cref="AskForRepo"/> for the idempotency, which is a store question and stays
+    /// there. A project path whose leaf is empty answers with the path, because a question that
+    /// names nothing is worse than a question that names too much.</summary>
+    internal static (string Leaf, string Text) RepoInitAsk(string project, string forWhat)
+    {
+        var leaf = Path.GetFileName(project.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (leaf.Length == 0) leaf = project;
+        return (leaf, $"{leaf} has no git repo, so \"{forWhat}\" cannot become a ticket. Create one?");
+    }
+
+    /// <summary>The words of the held-sentence question. The SUBJECT column keeps the sentence
+    /// whole because answering delivers it; this is the line a person reads, so this is the one
+    /// that gets shortened (<see cref="AskWhichProject"/>).</summary>
+    internal static string WhichProjectAskText(string text) =>
+        $"Which project is “{Truncate(text, 60)}” for?";
 
     /// <summary>
     /// Tier 0 of the routing ladder (docs/WORKSPACES-CONCIERGE.md §5): `LANE: text` names its
