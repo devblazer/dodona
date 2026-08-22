@@ -182,7 +182,17 @@ function MachineNoise {
     $mb = if ($servers.Count) { [math]::Round((($servers | Measure-Object WorkingSet64 -Sum).Sum) / 1MB) } else { 0 }
     $tempDirs = 0
     try { $tempDirs = @([IO.Directory]::EnumerateDirectories($env:TEMP)).Count } catch { }
-    [pscustomobject]@{ Servers = $servers.Count; ServerMB = $mb; TempDirs = $tempDirs }
+    # COMMIT PRESSURE IS THE ONE THAT ACTUALLY CORRELATES, and it is the reading this function was
+    # nearly shipped without. Working set is not it: what hurts is Windows compressing and paging
+    # once commit approaches the limit, and every suite here is file-I/O heavy.
+    $commit = 0
+    try {
+        $c = (Get-Counter '\Memory\Committed Bytes' -EA SilentlyContinue).CounterSamples[0].CookedValue
+        $l = (Get-Counter '\Memory\Commit Limit' -EA SilentlyContinue).CounterSamples[0].CookedValue
+        if ($l -gt 0) { $commit = [math]::Round(($c / $l) * 100) }
+    }
+    catch { }
+    [pscustomobject]@{ Servers = $servers.Count; ServerMB = $mb; TempDirs = $tempDirs; CommitPct = $commit }
 }
 
 # The wrappers and agents specifically -- what I3 is about. A `dodona` daemon still winding down
@@ -1947,16 +1957,32 @@ function Do-Gate {
     # The other half of "a dirty machine invalidates the timing row", and the half that was
     # invisible: see MachineNoise for the five-run measurement that put it here.
     $noise = MachineNoise
-    Say "machine before: $($noise.Servers) build server process(es) holding $($noise.ServerMB) MB; TEMP holds $($noise.TempDirs) directories"
-    # ONLY the build servers get a warning, and only because it is the half you can DO something
-    # about with one command. The TEMP count is reported and never warned on: most of that folder
-    # belongs to other programs entirely (9,341 Chrome entries and 2,079 yarn ones when this was
-    # measured), so a threshold on it would fire on nearly every run of every machine and teach
-    # people to skip the line -- which is the disease CLAUDE.md 3 names about a gate that is always
-    # green, arriving from the other direction.
-    if ($noise.Servers -ge 8) {
-        Say "  THAT SKEWS THE CLOCK, and they are not Dodona processes, so nothing above counts them:"
-        Say "  dotnet build-server shutdown     # retires the MSBuild/compiler nodes; leaves your IDE alone"
+    Say "machine before: memory commit $($noise.CommitPct)%; $($noise.Servers) build server process(es) holding $($noise.ServerMB) MB; TEMP holds $($noise.TempDirs) directories"
+    # THE WARNING IS ON COMMIT AND NOTHING ELSE, because that is the only one of the three that was
+    # MEASURED to move the clock, and the other two were nearly warned on out of plausibility:
+    #
+    #   commit 92% -> ~78%   (2.1 GB of background apps closed)   327.5s -> 279.6s   ~48s
+    #   13 build servers -> 1                                     327.5s -> 320.0s    ~7s
+    #   TEMP directory count                                      no measured effect
+    #
+    # The first draft of this line said 13 build servers "SKEWS THE CLOCK". They do not, much --
+    # and a warning that names the wrong cause is worse than none, because the next person clears
+    # build servers, sees no improvement and stops trusting the whole preamble. They stay on the
+    # line as a READING because they are this repo's own litter and worth seeing; they do not get
+    # an imperative.
+    #
+    # TEMP is never warned on either: most of that folder belongs to other programs (9,341 Chrome
+    # entries and 2,079 yarn ones when this was measured), so a threshold would fire on nearly
+    # every run and teach people to skip the line -- the always-green disease from the other side.
+    # 92 IS THE VALUE THAT WAS ACTUALLY OBSERVED FAILING, not a round number chosen for it, and the
+    # evidence is ONE PAIR -- 92% at 327.5s, ~78% at 279.6s. That is thin, and picking 88 (which the
+    # first draft did) would have fired on a run that then PASSED at 279.6s with commit at 91%,
+    # which is the same always-warns failure this file complains about two comments up. Raise or
+    # lower it when there are more pairs, and say which ones.
+    if ($noise.CommitPct -ge 92) {
+        Say "  MEMORY COMMIT IS HIGH, and that is the one that has been measured to move this clock:"
+        Say "  Windows starts compressing and paging near the limit, and every suite here is file-I/O heavy."
+        Say "  Close what you are not using; 2.1 GB of background apps was worth ~48s on a 320s run."
     }
 
     Say ""
