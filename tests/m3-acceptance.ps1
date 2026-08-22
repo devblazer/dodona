@@ -38,6 +38,27 @@ function Dump() { Dodona @('ui', 'dump') | ConvertFrom-Json }
 # "not answering yet" as a VALUE rather than an exception, so a Wait-Until can poll it.
 function DumpOrNull() { try { Dump } catch { $null } }
 function Check([string]$name, [bool]$cond, [string]$detail = '') { $results[$name] = if ($cond) { 'PASS' } else { "FAIL $detail".Trim() } }
+# WHAT THE AGENT SAID -- NOT THE ECHO OF WHAT WAS SENT TO IT (2026-08-22, in a gate wave).
+#
+# `dodona say <lane> <script>` renders in the pane as `you> <script>` and THEN the agent's own
+# lines. So the whole script text is on screen before the fake agent has done anything at all,
+# and every wait or assertion spelled `-match '<some word from the script>'` was satisfiable by
+# the echo alone. Both halves of that were live:
+#
+#   - the tool-heavy turn waited on 'progress done', which is the last word of its own script.
+#     The wait returned instantly, the three checks after it read a half-rendered pane, and m3
+#     went red 3-of-36 in a wave while passing everywhere quieter. It read as issue #3 and was
+#     not: the wait had never waited for anything.
+#   - `wake_revives_the_lane` asserted 'woke up fine' against the same pane, so it could pass on
+#     the echo with the respawned agent never having answered -- green, and proving nothing.
+#
+# Dropping the echo lines is what makes "the agent said it" the thing being asserted. Do not
+# spell a pane assertion against raw `.lines` unless the ECHO is deliberately the subject
+# (routed_input_reaches_pane asserts `you> ...` on purpose, and stays as it is).
+function PaneSaid([string]$title) {
+    @(@((DumpOrNull).slots | Where-Object { -not $_.empty -and $_.title -eq $title }).lines |
+        Where-Object { $_ -notmatch '^\s*you>' }) -join '|'
+}
 function PngDims([string]$path) {
     # [int] casts matter: -shl on a [byte] stays a byte and overflows to zero.
     $b = [IO.File]::ReadAllBytes($path)
@@ -105,7 +126,7 @@ try {
     # case in tests\Dodona.Tests (unit, ~1s); what only a real daemon and a real window can
     # prove is that the two ends are connected at all.
     Dodona @("say", "$skyLane", "tool:Read:src/a.cs tool:Read:src/b.cs tool:Read:src/c.cs tool:Read:src/d.cs tool:Edit:src/keep.cs bash:dotnet build -c Release toolfail:Exit code 2 unexpected EOF say progress done") | Out-Null
-    Wait-Until { ((@((DumpOrNull).slots | Where-Object { $_.title -eq 'SKY' }).lines) -join '|') -match 'progress done' } 25000 'the tool-heavy turn finishes' | Out-Null
+    Wait-Until { (PaneSaid 'SKY') -match 'progress done' } 25000 'the tool-heavy turn finishes (the AGENT says it, not the echo of the script)' | Out-Null
     $d = Dump
     $sky = $d.slots | Where-Object { $_.title -eq 'SKY' }
     $lines = @($sky.lines)
@@ -302,16 +323,42 @@ print('|' if r is None else str(r[0]) + '|' + r[1])
     $d = Dump
     $water = $d.slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }
     Check 'lane_survives_as_dormant' ($water.state -eq 'dormant') ($water | ConvertTo-Json -Compress)
-    Check 'lane_keeps_its_slot_and_thread' ($water.slot -eq 0 -and (($water.lines) -join '|') -match 'water ready') ''
+    Check 'lane_keeps_its_slot_and_thread' ($water.slot -eq 0 -and (PaneSaid 'WATER') -match 'water ready') ''
 
     # wake: a fresh agent resumes the thread (fake = fresh session; real claude = --resume)
+    #
+    # WAIT FOR A NEW `shim_spawned` ROW, NOT FOR `state='alive'`. The block 100 lines above
+    # already paid for this lesson once ("asserting only on the newest shim_spawned row cannot
+    # tell a fresh spawn from an old one") and this block did not carry it: `state` is a column
+    # the daemon can set on the respawn PATH, so it flips before -- or without -- a shim being
+    # there to talk to, and the `say` that follows then goes to nothing. That is precisely the
+    # gap that let `wake_revives_the_lane` sit green on the echo of its own script.
+    $wakeSpawnsBefore = [int](((python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+r = db.execute('SELECT MAX(id) FROM events WHERE kind=? AND lane_id=?', ('shim_spawned', $waterLane)).fetchone()
+print(0 if r is None or r[0] is None else r[0])
+") | Out-String).Trim())
     Dodona @("lane-respawn", "$waterLane") | Out-Null
+    Wait-Until { [int](((python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+r = db.execute('SELECT MAX(id) FROM events WHERE kind=? AND lane_id=?', ('shim_spawned', $waterLane)).fetchone()
+print(0 if r is None or r[0] is None else r[0])
+") | Out-String).Trim()) -gt $wakeSpawnsBefore } 25000 'the landed lane respawns a NEW shim' | Out-Null
+    $wakeSpawnsAfter = [int](((python -c "
+import sqlite3
+db = sqlite3.connect(r'$storeDb')
+r = db.execute('SELECT MAX(id) FROM events WHERE kind=? AND lane_id=?', ('shim_spawned', $waterLane)).fetchone()
+print(0 if r is None or r[0] is None else r[0])
+") | Out-String).Trim())
+    Check 'wake_spawns_a_new_shim' ($wakeSpawnsAfter -gt $wakeSpawnsBefore) "before=$wakeSpawnsBefore after=$wakeSpawnsAfter"
     Wait-Until { (@((DumpOrNull).slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }).state) -eq 'alive' } 25000 'the lane wakes' | Out-Null
     Dodona @("say", "$waterLane", "say woke up fine") | Out-Null
-    Wait-Until { ((@((DumpOrNull).slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }).lines) -join '|') -match 'woke up fine' } 25000 'the woken lane answers' | Out-Null
+    Wait-Until { (PaneSaid 'WATER') -match 'woke up fine' } 25000 'the woken lane answers (the AGENT, not the echo)' | Out-Null
     $d = Dump
     $water = $d.slots | Where-Object { -not $_.empty -and $_.title -eq 'WATER' }
-    Check 'wake_revives_the_lane' ($water.state -eq 'alive' -and (($water.lines) -join '|') -match 'woke up fine') ($water | ConvertTo-Json -Compress)
+    Check 'wake_revives_the_lane' ($water.state -eq 'alive' -and (PaneSaid 'WATER') -match 'woke up fine') ($water | ConvertTo-Json -Compress)
 
     # ---- overlay maximize: verb-driven, grid never reflows underneath ----
     Dodona @("ui", "overlay", "WATER") | Out-Null
