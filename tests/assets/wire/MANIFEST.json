@@ -1,0 +1,75 @@
+{
+  "//": [
+    "THE CORPUS MANIFEST -- the only thing in this repository that reaches D3 (plan 3.1): the",
+    "world moved and our stand-in is faithful to yesterday. Nothing automatic can catch that. A",
+    "recording of REAL bytes, replayed through the REAL parser, is the whole mechanism.",
+    "",
+    "ASCII only, and no BOM on THIS file: PS 5.1 reads a BOM-less file as ANSI and a non-ASCII",
+    "byte in it matches nothing, silently (CLAUDE.md 0.2). The RECORDING itself keeps its BOM,",
+    "deliberately -- real line 1 carries one, and that is the GateHook incident's own artefact in",
+    "fixture form (plan 3.4).",
+    "",
+    "`classifies_as` is what gives WireCorpusTests teeth. It is the pane_events kind the real",
+    "parser produced for that shape when the recording was replayed, or `(no pane row)` where it",
+    "deliberately produced none. Change a `case` in LaneRuntime.HandleShimLine and the replay",
+    "stops matching this file, at a line number."
+  ],
+
+  "provenance": {
+    "recorded": "2026-08-17",
+    "committed": "1bad5bf",
+    "source": "spikes/spike1-output/wire.jsonl -- spike 1 (resume durability), a real `claude -p --output-format stream-json` session",
+    "model": "claude-haiku-4-5-20251001",
+    "lines": 20,
+    "unparseable": 0,
+    "note": "Seeded into real/wire.jsonl byte-for-byte, BOM included. It costs no quota: it is already tracked."
+  },
+
+  "witnessed": [
+    { "shape": "system/init",              "lines": 2,  "classifies_as": "system" },
+    { "shape": "system/thinking_tokens",   "lines": 11, "classifies_as": "wire" },
+    { "shape": "assistant//thinking",      "lines": 2,  "classifies_as": "(no pane row)" },
+    { "shape": "assistant//text",          "lines": 2,  "classifies_as": "agent_line" },
+    { "shape": "result/success",           "lines": 2,  "classifies_as": "result" },
+    { "shape": "rate_limit_event",         "lines": 1,  "classifies_as": "wire" }
+  ],
+
+  "unwitnessed": [
+    {
+      "shape": "system/permission_denied",
+      "reason": "not-in-seed",
+      "issue": 18,
+      "note": "The loud `kind = error` branch. Its own comment calls it the most-repeated failure in this project's history, and no real bytes for it exist anywhere in this repository."
+    },
+    {
+      "shape": "assistant//tool_use",
+      "reason": "not-in-seed",
+      "issue": 18,
+      "note": "The richest branch in the parser: presence AND a derived progress row written with seq null so it never competes for UNIQUE(lane_id, seq). DodonaFakeAgent emits it; reality has not been recorded emitting it here."
+    },
+    {
+      "shape": "user//tool_result",
+      "reason": "not-in-seed",
+      "issue": 18,
+      "note": "ReportFailedResults. A FAILED tool result is the most valuable mid-turn line there is, and the fake is the only thing that has ever produced one for a test."
+    },
+    {
+      "shape": "system/*",
+      "reason": "not-in-seed",
+      "issue": 18,
+      "note": "Any other system subtype falls through to a raw `wire` row. The seed happens to contain only init and thinking_tokens, so the fall-through itself is unwitnessed."
+    }
+  ],
+
+  "//not-built-here": [
+    "`unwitnessed[]` is scored against what LaneRuntime.HandleShimLine HANDLES, not yet against",
+    "what DodonaFakeAgent EMITS. The second comparison is `dev wire-sample` + lint row I9 +",
+    "FakeShapeTests, and it needs the fake to enumerate its own shapes from the table it emits",
+    "from (plan 3.4: `--wire-sample` ENUMERATES rather than samples, because a shape behind a",
+    "directive the sample never exercises would leave both green over a shape nobody has seen).",
+    "That is a change in src\\DodonaFakeAgent and tools\\dev.ps1, and the pilot's commit split",
+    "(plan 9.3: commit A is src\\, commit B is tests\\) has no room for it. Issue #18 carries it.",
+    "Hand-copying the fake's shape list into this file was rejected: a hand copy is the exact",
+    "thing this mechanism exists to replace."
+  ]
+}

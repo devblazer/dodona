@@ -11,8 +11,8 @@
 #
 # ASCII, CRLF, no BOM, tab-separated. tests\ledger\README.md says why.
 project	assembly	rung2	note
-src\Dodona	dodona	tests\Dodona.Tests	net8.0. Holds Testing\DoubleAttribute.cs itself, and will hold RecordingLaneSink (W5).
+src\Dodona	dodona	tests\Dodona.Tests	net8.0. Holds Testing/DoubleAttribute.cs itself. W5 was expected to put RecordingLaneSink here (plan 3.6 says the Dodona assembly); it went to tests/Dodona.Tests instead, because 9.3 scopes commit B to tests/ and NOTHING NEEDS IT IN src/ -- unlike FakeRecognizer, which is the implementation the suites run. The Interface anchor is unaffected: it counts ILaneSink's shipping implementers, wherever the double lives.
 src\DodonaUi	DodonaUi	tests\Dodona.Ui.Tests	net8.0-windows, so tests\Dodona.Tests CANNOT LOAD IT AT ALL - that is why this row exists and why W3 stood the second test project up. FakeRecognizer and Poses live here.
 src\DodonaFakeAgent	DodonaFakeAgent	corpus	D-T27: a program, not a type. Anchoring a 545-line exe by reflecting over one of its classes asserts nothing about the wire shapes it emits, which is the only thing anyone cares about. Its anchor is MANIFEST.json + dev wire-sample + lint row I9, file-based end to end, so [Double] is NOT linked in here (D-B7).
-tests\Dodona.Tests	Dodona.Tests	tests\Dodona.Tests	itself: fixtures and contract classes that carry [Double] are enumerated by the same facts.
+tests\Dodona.Tests	Dodona.Tests	tests\Dodona.Tests	itself: fixtures and contract classes that carry [Double] are enumerated by the same facts. Holds RecordingLaneSink and LaneSinkContract since W5.
 tests\Dodona.Ui.Tests	Dodona.Ui.Tests	tests\Dodona.Ui.Tests	itself, for the same reason.

@@ -1,0 +1,36 @@
+# S-WIRE 04 (plan W5, 9.4 step B0). The only one of the four that is not in the parser.
+#
+# defect: filling in a row's short version also overwrites the agent's own words -- one extra
+# defect: assignment in the UPDATE that `Store.PaneCompressed`'s whole comment forbids.
+#
+# WHY IT IS THE `Store` AND NOT A DOUBLE. Plan 3.5: `Store` is never faked, because the properties
+# ARE the transactions. This one is a property of a single UPDATE statement, so a stand-in would
+# be asserting about itself. The unit test that replaced the acceptance check therefore opens a
+# REAL Store on a real temp file -- the first disk-touching unit fixture in this repository.
+#
+# In production this is the compressor destroying what it was only ever meant to summarise: the
+# pane renders COALESCE(compressed, body) and the overlay is the raw truth, so every fallback the
+# feature rests on would have nothing to fall back to.
+#
+# THE PAIRED RED (plan 5.3). Before deletion, this same patch reddened the acceptance ancestor:
+#
+#   raw_body_is_never_overwritten: FAIL 60
+#
+# expects-red: unit:Dodona.Tests.StoreCompressionTests.raw_body_is_never_overwritten
+#
+# The control: the wire parser writes rows, it does not compress them.
+#
+# expects-green: unit:Dodona.Tests.ShimWireTests.midturn_narration_is_still_a_row
+diff --git a/src/Dodona/Store.cs b/src/Dodona/Store.cs
+index 3aa5e49..6f23f57 100644
+--- a/src/Dodona/Store.cs
++++ b/src/Dodona/Store.cs
+@@ -1046,7 +1046,7 @@ sealed class Store : IDisposable, ILaneSink
+         lock (_lock)
+         {
+             using var c = _db.CreateCommand();
+-            c.CommandText = "UPDATE pane_events SET compressed = $c WHERE id = $id;";
++            c.CommandText = "UPDATE pane_events SET compressed = $c, body = $c WHERE id = $id;";
+             c.Parameters.AddWithValue("$c", compressed);
+             c.Parameters.AddWithValue("$id", paneEventId);
+             return c.ExecuteNonQuery() > 0;

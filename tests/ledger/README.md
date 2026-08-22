@@ -737,6 +737,156 @@ rather than a per-case one -- the measurement above is deliberately the per-case
   explicit list ever stops matching the register in EITHER direction, and rung 1 is a text scan
   that cannot miss an assembly.
 
+## W5 -- the pilot slice `S-WIRE`, which is the kill switch
+
+Two commits, in the order 9.3 requires. **Commit A** widened
+`LaneRuntime.HandleShimLine` from `private` to `internal` -- one keyword, `src\` only, no test
+change and no ledger change, verified by `dev build` plus `unit` / `m0` / `compression` all green,
+which IS the behaviour-preservation proof (9.5) and is why `dev prove` is deliberately not run
+there. **Commit B** is `tests\` and `tests\ledger\` only and follows 9.4's six steps.
+
+**The arithmetic: 8 names in, 8 names disposed of. 4 `moved`, 4 `stays (no-seam-yet)`.**
+`m0` went 27 checks to 26, `compression` 19 to 16, `unit` 304 cases to 322. `dev ledger --live`
+is clean at 719 registration sites and 229 unit methods.
+
+### THE FOUR FALSIFIERS (plan 8.3). NONE FIRED.
+
+**1 -- the corpus mechanism.** *Half built, and the half that was built is the half the falsifier
+is about.* `tests\assets\wire\real\wire.jsonl` is `spikes\spike1-output\wire.jsonl` byte-for-byte,
+**BOM included**, and `WireCorpusTests` replays all 20 lines through the REAL parser and compares
+each line's classification against `MANIFEST.json`. So *"can real recorded bytes be compared to
+what the parser does with them"* is answered YES, by a running test.
+
+The other clause -- *"can `DodonaFakeAgent`'s emittable shapes be enumerated"* -- is answered YES
+**by reading**, not by building: the fake emits from **16 literal `Emit(new { type = ... })` sites
+in one file**, and the seven shapes it can produce are all literal strings there. Turning that into
+a `static readonly` table it also emits from is a mechanical change. It was NOT done, and the reason
+is scope rather than difficulty: `--wire-sample`, `dev wire-sample` and lint row I9 are changes in
+`src\DodonaFakeAgent` and `tools\dev.ps1`, and 9.3 scopes commit A to the seam and commit B to
+`tests\`. **Hand-copying the fake's shape list into `MANIFEST.json` was rejected** -- a hand copy is
+the exact thing the mechanism exists to replace, and 3.4 is explicit that `--wire-sample` must
+ENUMERATE rather than sample for the same reason. Issue **#18** carries it.
+
+**2 -- the paired red, in both languages, under one named defect.** Four for four, and this is the
+one that most needed proving. Every `red_old` was observed BEFORE the old check was deleted
+(9.4's load-bearing ordering), and every `red_new` under the same checked-in patch:
+
+| mutant | `red_old` | `red_new` |
+|---|---|---|
+| `s-wire-01.patch` | `session_id_recorded: FAIL` | `Dodona.Tests.ShimWireTests.session_id_recorded: FAIL -- 2 of 2 rows not passed` |
+| `s-wire-02.patch` | `midturn_narration_is_still_a_row: FAIL 0` | `Dodona.Tests.ShimWireTests.midturn_narration_is_still_a_row: FAIL -- 1 of 1 case not passed` |
+| `s-wire-03.patch` | `progress_rows_are_written: FAIL progress rows: 0` | `Dodona.Tests.ShimWireTests.progress_rows_are_written: FAIL -- 1 of 1 case not passed` |
+| `s-wire-04.patch` | `raw_body_is_never_overwritten: FAIL 60` | `Dodona.Tests.StoreCompressionTests.raw_body_is_never_overwritten: FAIL -- 1 of 1 case not passed` |
+
+Every one of the eight runs also carried **declared controls that survived** -- 2, 2, 2 and 1
+respectively. That matters more than the reds: three of the four defects are in three different
+`case` arms of ONE `switch`, and the controls are what say the red belongs to the arm it was aimed
+at rather than to the parser generally.
+
+**3 -- the TRX `testName` format.** Confirmed again, and the `[Theory]` half is now exercised by a
+real moved check rather than by a fixture: `session_id_recorded` carries two `[InlineData]` rows and
+`dev prove` reported `FAIL -- 2 of 2 rows not passed` while `dev ledger`'s last-segment rule
+resolved it to the bare method name. That is 5.2's stripping clause and 9.4's B1 agreeing on live
+data for the first time.
+
+**4 -- the unit budget.** Measured on this machine, 2026-08-22, warm, three consecutive runs each,
+`dev test unit`'s own printed seconds:
+
+| | run 1 | run 2 | run 3 | cases |
+|---|---|---|---|---|
+| before (a worktree at commit A) | 5.7 s cold | **1.7 s** | **1.8 s** | 304 |
+| after | 2.5 s | **2.3 s** | **2.4 s** | 322 |
+
+**+0.6 s for 18 cases, five of which open a real `Store` on a real temp file** (one in
+`StoreCompressionTests`, four in `LaneSinkContract`'s real-store subclass). That agrees with W4's
+56 ms-per-store-case figure and leaves roughly 1.5 s of headroom against the ~4 s threshold. The
+split into `dev test unit` / `dev test fixtures` was NOT needed and NOT taken.
+
+### The double, and where it actually went
+
+`RecordingLaneSink` is in **`tests\Dodona.Tests\Doubles\`**, not in `src\Dodona` as plan 3.6 and
+this file's own `double-assemblies.tsv` note said it would be. Two reasons, and neither is a
+preference: 9.3 scopes commit B to `tests\`, and -- more to the point -- **nothing needs it in
+`src\`**. `FakeRecognizer` lives in `src\DodonaUi` because it is *the implementation the suites
+run* and `DODONA_UI_MIC=off` returning it is what stops a suite opening the operator's microphone.
+A recording sink has no such caller: only unit tests construct it, `ILaneSink` is internal, and
+`InternalsVisibleTo("Dodona.Tests")` was already granted. The `Interface` anchor is unaffected --
+it counts `ILaneSink`'s **shipping** implementers (`Store`, `ConciergeStore`), and where the double
+sits does not change that count. `dev lint` now reads `doubles: 2 anchored by attribute`.
+
+`LaneSinkContract` runs four facts against the double AND against a real temp-file `Store`,
+including the dedup case plan 3.3 named in advance: the real `PaneEventId` is `INSERT OR IGNORE`
+on `UNIQUE(lane_id, seq)` and **returns 0 for a repeat**, while a NULL seq never dedups -- which is
+what lets a derived progress row be written with `seq: null` without competing for the key that
+makes shim redelivery exactly-once.
+
+### The four that could not move, and what they bought
+
+`m0:a_missing_shim_is_named_not_guessed`, `m0:a_failed_spawn_is_recorded`,
+`m0:a_failed_spawn_leaves_no_lane_claiming_alive` (all three inside `Daemon.AttachShimAsync`'s
+spawn-failure branch, `Daemon.cs:4113` / `:4120` / `:4127`, a `private async Task` that also calls
+`Process.Start`, which 3.5 forbids faking) and `compression:blocked_uses_the_fixed_schema` (needs a
+`Compression.Render` extraction). All four are `stays` with a note beginning `no-seam-yet` and
+carrying issue **#19**, and **no second seam was opened in `Daemon.cs` to move them** -- needing no
+second seam is the property the pilot exists to demonstrate.
+
+They were worth having. Writing them exercised the closed reason vocabulary, the separate
+`no-seam-yet` count, the requirement that a `stays` row name a live wire, and the reachability rung
+-- none of which four `moved` rows would have touched.
+
+**The `wire` column forced a judgement the register has no row for.** The three spawn-failure
+checks were pointed at **A6**, whose sentence is *"the spawn-site environment reaches the agent two
+process hops away"* -- the only wire whose subject is the spawn site itself. It is the closest
+existing row and it is not a comfortable fit: A6's fixture is a lane that spawns SUCCESSFULLY, and
+these three need a daemon started with a deliberately bogus `DODONA_SHIM`. Recorded rather than
+smoothed over, because the next slice to hit this will want to know it was a judgement.
+
+### FOUR THINGS THE PLAN COULD NOT BE FOLLOWED ON LITERALLY
+
+1. **W5's own bullet list and 9.3 contradict each other about commit B.** The work item puts
+   `src/Dodona/WireShape.cs`, `RecordingLaneSink` (in the `Dodona` assembly, per 3.6) and
+   `DodonaFakeAgent --wire-sample` in commit B; 9.3 says commit B is *"`tests/` and
+   `tests/ledger/` only"*. Resolved in 9.3's favour, because 9.3 is the general rule and is what
+   the per-slice contract is written against. `WireShape.cs` was therefore **not created**: the
+   tuple is computed from the JSON inside `WireCorpusTests`, which is a copy of nothing (the parser
+   has no such type today -- it switches on string literals inline). If a later slice wants
+   `WireShape` in `src\`, that is a seam commit, not a move.
+
+2. **`dev ledger --verdict`'s DOUBLES block still says W4 has not happened.** It prints
+   `anchored -   <- W4 builds the double ledger; there is nothing to read yet` while `dev lint`
+   on the same tree prints `doubles: 2 anchored by attribute, 1 by corpus`. The reading exists; the
+   verdict block was not re-pointed at it. Not fixed here -- it is `tools\dev.ps1`, which commit B
+   may not touch.
+
+3. **`stays (no-seam-yet)` is counted but its issue numbers are not read.** The verdict prints
+   `MUST BE 0, or every one carries an issue number` and nothing checks the second clause. All four
+   rows do carry `#19`, in the note, by hand. Cheap to enforce: the reason word is already parsed
+   out of the note, so a `#\d+` next to it could be too.
+
+4. **`dev prove --with` needs a FORWARD-SLASH path from a POSIX shell.**
+   `--with tests\mutants\s-wire-01.patch` typed from bash arrives as `testsmutantss-wire-01.patch`
+   and the refusal (`no patch at ...testsmutantss-wire-01.patch`) is clear enough to diagnose in
+   one look. Noted because every slice after this one will type that command.
+
+### AND THE HEREDOC TRAP FIRED AGAIN, INSIDE THE SLICE THAT WAS WARNED ABOUT IT
+
+CLAUDE.md 0.2 and the `file-patching` skill both say a bash heredoc collapses one backslash level.
+It does so **even when the delimiter is quoted** (`<<'PY'`), which reads as though it would not.
+Writing `tests\\assets\\wire\\...` into a ledger note that way produced `tests\assets\...` in the
+Python source, and Python read `\a` as **BEL** -- a raw 0x07 byte, written into
+`moves\s-wire.tsv`, in the one file format whose lint rung exists to refuse control bytes:
+
+```
+tests\ledger\moves\s-wire.tsv:2 non-ASCII byte ... a ledger row read as ANSI matches nothing and drops SILENTLY
+```
+
+It was caught by checking the bytes rather than by reading the file, which is the only way it
+could have been caught -- `\a` is invisible in every viewer. The general form is worth more than
+the instance: **a path with a backslash in a generated string is a lottery over which letter
+follows it.** `\a` `\b` `\f` `\n` `\r` `\t` `\v` are silent corruption; `\l` `\s` `\w` are merely a
+warning. Use forward slashes in generated content, or the `edit.py` helper, which takes the string
+as a literal argument and never goes near a shell.
+
 ## The wire owners have not been audited, and every one looked at so far was wrong
 
 `wires.tsv` names, for each of the 52 wires, the single check that would fail most loudly if that

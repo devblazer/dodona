@@ -1,0 +1,33 @@
+# S-WIRE 03 (plan W5, 9.4 step B0).
+#
+# defect: the tier test in the tool_use branch is inverted, so the only tool calls that earn a
+# defect: progress row are the ones Progress classified as NOISE -- i.e. none of them.
+#
+# WHY THE TIER AND NOT THE WRITE. Deleting the `PaneEvent` call would prove the row is written;
+# inverting the tier proves the DECISION about which steps are worth a row is consulted, which is
+# the thing PaneProgress exists to make in code and never with a model call.
+#
+# Presence is untouched on purpose -- it is written one line above the tier test. A defect that
+# took presence with it would redden a second property and the red would stop meaning one thing.
+#
+# THE PAIRED RED (plan 5.3). Before deletion, this same patch reddened the acceptance ancestor:
+#
+#   progress_rows_are_written: FAIL progress rows: 0
+#
+# expects-red: unit:Dodona.Tests.ShimWireTests.progress_rows_are_written
+#
+# expects-green: unit:Dodona.Tests.ShimWireTests.midturn_narration_is_still_a_row
+# expects-green: unit:Dodona.Tests.ShimWireTests.session_id_recorded
+diff --git a/src/Dodona/LaneRuntime.cs b/src/Dodona/LaneRuntime.cs
+index 555baa3..9897c29 100644
+--- a/src/Dodona/LaneRuntime.cs
++++ b/src/Dodona/LaneRuntime.cs
+@@ -178,7 +178,7 @@ sealed class LaneRuntime
+                             // trace; Progress decides in code whether it is worth one.
+                             var seen = c.TryGetProperty("input", out var pin) ? pin : default;
+                             var (tier, text) = PaneProgress.FromTool(tool, seen);
+-                            if (tier != ProgressTier.Noise && text.Length > 0)
++                            if (tier == ProgressTier.Noise && text.Length > 0)
+                                 // seq stays NULL: the seq of this wire line belongs to the
+                                 // row written below it, and UNIQUE(lane_id, seq) is what
+                                 // makes shim redelivery exactly-once. A progress row is a

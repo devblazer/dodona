@@ -106,8 +106,12 @@ try {
     $results['orphaned_result_landed'] = if ($hits.Count -ge 1) { 'PASS' } else { 'FAIL' }
     $results['orphaned_result_landed_exactly_once'] = if ($hits.Count -eq 1) { 'PASS' } else { "FAIL (count=$($hits.Count))" }
 
-    $status = Dodona @("status")
-    $results['session_id_recorded'] = if ($status -match 'session=fake-') { 'PASS' } else { 'FAIL' }
+    # session_id_recorded MOVED DOWN (S-WIRE, tests\ledger\moves\s-wire.tsv). It read `status`
+    # for `session=fake-`, which is a question about what LaneRuntime.HandleShimLine does with a
+    # `system/init` line -- no daemon, no shim and no process needed to answer it. It is
+    # Dodona.Tests.ShimWireTests.session_id_recorded now, over real recorded bytes as well as the
+    # fake's, and s-wire-01.patch reddened both. What stays here is the WIRE: the orphaned result
+    # above, drained exactly once through a real shim pipe by a daemon that did not spawn it.
 
     # ---- the session must not notice: same agent answers through daemon #2 ----
     $roundtrip = "ROUNDTRIP-" + [guid]::NewGuid().ToString('N').Substring(0, 6)

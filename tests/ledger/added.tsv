@@ -9,3 +9,16 @@ Interface_is_never_a_sole_anchor	ui-unit	W4 rung 2 over the DodonaUi assembly. R
 The_assemblies_this_project_loads_are_exactly_the_ones_it_is_declared_to_cover	ui-unit	W4 rung 2 over the DodonaUi assembly.
 Exactly_one_of_Ready_or_Failed_arrives_and_it_arrives_exactly_once	ui-unit	W4 RecognizerContract: one body run against FakeRecognizer AND against the real DeepgramRecognizer at a closed loopback port. Two concrete subclasses share this leaf name, so one row counts both.
 The_fake_recogniser_raises_Ready_exactly_once_from_Start	ui-unit	W3 wrote it and W4 is the first commit that counts it: baseline.tsv was frozen before Ledger-Live could read a second TRX, so it ran uncounted. Not new coverage - newly VISIBLE coverage.
+session_id_recorded	unit	S-WIRE moved it down from m0. The acceptance ancestor is disposed of in moves\s-wire.tsv; this is the same name in the unit namespace, which baseline.tsv keys separately (unit/<leaf>).
+midturn_narration_is_still_a_row	unit	S-WIRE moved it down from compression. Same name, unit namespace.
+progress_rows_are_written	unit	S-WIRE moved it down from compression. Same name, unit namespace.
+raw_body_is_never_overwritten	unit	S-WIRE moved it down from compression. Same name, unit namespace.
+A_pane_row_gets_an_id_and_a_repeated_seq_is_ignored	unit	W5 LaneSinkContract: one body over the recording sink AND a real temp-file Store. THE case the plan named in advance -- the real PaneEventId returns 0 for a redelivered seq, and a naive append-and-count double would not.
+A_null_seq_never_dedups	unit	W5 LaneSinkContract. A derived progress row is written with seq null so it never competes for UNIQUE(lane_id, seq); a double that deduped on null would drop every progress row after the first.
+PaneEvent_agrees_with_PaneEventId	unit	W5 LaneSinkContract. Two concrete subclasses share this leaf name, so one row counts both.
+The_session_and_presence_last_written_are_what_stands	unit	W5 LaneSinkContract. Two concrete subclasses share this leaf name.
+The_corpus_is_present_and_keeps_its_BOM	unit	W5 corpus rung. The recording's UTF-8 BOM is kept deliberately: a leading U+FEFF read back as an ordinary character is the GateHook fail-open incident's own artefact.
+every_recorded_line_classifies_as_recorded	unit	W5 corpus rung, and the only thing in this repo that reaches D3 (plan 3.1): 20 lines of REAL claude stream-json replayed through the REAL parser. Named by plan 3.3 for 'changed a case in HandleShimLine'.
+The_real_transcript_drives_session_presence_and_quota	unit	W5 corpus rung: the parser's side effects on real bytes, not only its classification -- session, 11 thinking presences, idle at the end, and the rate_limit reading.
+Every_unwitnessed_shape_is_declared_with_a_reason_and_an_issue	unit	W5 corpus rung. Plan 3.4 applied to its own escape hatch: a closed reason vocabulary and an open issue (#18), because a mechanism whose failure mode is 'edit a JSON list and be green' is a convention wearing enforcement clothes.
+The_corpus_says_where_it_came_from	unit	W5 corpus rung. Provenance is a READING, not a staleness assertion (D-T13) -- what is asserted is that it is present and well formed.

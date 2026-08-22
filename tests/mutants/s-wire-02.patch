@@ -1,0 +1,33 @@
+# S-WIRE 02 (plan W5, 9.4 step B0).
+#
+# defect: the parser matches the content-block type `texts` instead of `text`, so an assistant's
+# defect: own words are silently dropped and the mid-turn row is never written at all.
+#
+# WHY A TYPO IN A SHAPE NAME. This is D3 drift in miniature -- the wire's vocabulary is decided
+# outside this repository, `IRecognizer`-style interfaces cannot see it, and the compiler is
+# perfectly happy. It is the class of defect the corpus rung exists for.
+#
+# What it does NOT break, deliberately: the body is still assembled, so a tool-only assistant
+# event still writes its progress row, and `system/init` is a different case entirely.
+#
+# THE PAIRED RED (plan 5.3). Before deletion, this same patch reddened the acceptance ancestor:
+#
+#   midturn_narration_is_still_a_row: FAIL 0
+#
+# expects-red: unit:Dodona.Tests.ShimWireTests.midturn_narration_is_still_a_row
+#
+# expects-green: unit:Dodona.Tests.ShimWireTests.progress_rows_are_written
+# expects-green: unit:Dodona.Tests.ShimWireTests.session_id_recorded
+diff --git a/src/Dodona/LaneRuntime.cs b/src/Dodona/LaneRuntime.cs
+index 555baa3..fb937a9 100644
+--- a/src/Dodona/LaneRuntime.cs
++++ b/src/Dodona/LaneRuntime.cs
+@@ -157,7 +157,7 @@ sealed class LaneRuntime
+                     foreach (var c in d.RootElement.GetProperty("message").GetProperty("content").EnumerateArray())
+                     {
+                         var ct = c.TryGetProperty("type", out var ctp) ? ctp.GetString() : null;
+-                        if (ct == "text") sb.Append(c.GetProperty("text").GetString());
++                        if (ct == "texts") sb.Append(c.GetProperty("text").GetString());
+                         else if (ct == "tool_use")
+                         {
+                             // Presence is derived from tool events by CODE — no model (§5).

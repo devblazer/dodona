@@ -93,9 +93,14 @@ try {
     Check 'no_pool_still_shows_the_agents_words' (($pane.lines -join '|') -match 'only breaking crests foam') ($pane.lines -join '|')
 
     # ---- mid-turn narration never reaches the grid, but is never lost either ----
+    #
+    # ONE HALF OF THAT PAIR MOVED DOWN AND THE OTHER MUST NOT (S-WIRE; plan 2.2's second note).
+    # `is_still_a_row` was a question about the parser -- an assistant text block becomes one
+    # agent_line row -- and it is Dodona.Tests.ShimWireTests.midturn_narration_is_still_a_row now.
+    # `is_not_in_the_pane` is an ABSENCE asserted through a live window, and an absence can always
+    # be produced by a renderer that never consulted the filter it is supposed to be testing, so
+    # it stays here where a real window is doing the rendering.
     Check 'midturn_narration_is_not_in_the_pane' (($pane.lines -join '|') -notmatch 'working on:') ($pane.lines -join '|')
-    $stored = Rows "SELECT COUNT(*) FROM pane_events WHERE kind='agent_line' AND body LIKE 'working on:%'"
-    Check 'midturn_narration_is_still_a_row' ([int]($stored.Trim()) -ge 1) $stored
 
     # ---- now warm the pool and take another turn ----
     Dodona @("compressor-start", "--child", $fake, "--count", "2") | Out-Null
@@ -114,8 +119,12 @@ try {
     Check 'compression_is_recorded_as_an_event' ([int]((Rows "SELECT COUNT(*) FROM events WHERE kind='compressed'").Trim()) -ge 1) ''
 
 
-    $body = Rows "SELECT length(body) FROM pane_events WHERE kind='result' AND lane_id=1 ORDER BY id DESC LIMIT 1"
-    Check 'raw_body_is_never_overwritten' ([int]($body.Trim()) -eq $long.Length) "$body vs $($long.Length)"
+    # raw_body_is_never_overwritten MOVED DOWN (S-WIRE). It is a property of ONE UPDATE statement
+    # in Store.PaneCompressed, and it needed no seam at all: Store(string path) is public on an
+    # internal class and Dodona.csproj already grants InternalsVisibleTo("Dodona.Tests"). It is
+    # Dodona.Tests.StoreCompressionTests.raw_body_is_never_overwritten now, over a REAL Store on a
+    # real temp file -- never a double, because the property IS the transaction (plan 3.5).
+    # `turn_final_gets_compressed` above still rides the real compressor pool over a real shim.
 
     Wait-Until {
         $script:pane = @((DumpOrNull).slots | Where-Object { -not $_.empty })
@@ -171,7 +180,12 @@ try {
     Wait-Until { [int]((Rows "SELECT COUNT(*) FROM pane_events WHERE kind='progress'").Trim()) -ge 3 } 25000 'the progress rows land' | Out-Null
     $steps = Rows "SELECT COUNT(*) FROM pane_events WHERE kind='progress'"
     $paid = Rows "SELECT COUNT(*) FROM pane_events WHERE kind='progress' AND compressed IS NOT NULL"
-    Check 'progress_rows_are_written' ([int]($steps.Trim()) -ge 3) "progress rows: $steps"
+    # progress_rows_are_written MOVED DOWN (S-WIRE) -- that a tool_use event earns a progress row
+    # is the parser's decision and PaneProgress's tier, neither of which needs a daemon. It is
+    # Dodona.Tests.ShimWireTests.progress_rows_are_written now. The `$steps -ge 3` half survives
+    # INSIDE the check below, which is the reason that check can never be vacuous, and the QUOTA
+    # half of it -- that a progress row never picked up a compressed value while a warm compressor
+    # pool sat right there -- can only be asked with a warm pool, so it stays.
     # Both halves in one assertion, on purpose: "none of them were compressed" is
     # trivially true of a store with no progress rows in it, so a check written as that
     # alone would pass against the build this feature does not exist in -- VACUOUS, and

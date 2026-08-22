@@ -1,0 +1,37 @@
+# S-WIRE 01. The pilot slice's first defect (docs/TEST-ARCHITECTURE-PLAN.md W5, 9.4 step B0).
+#
+# defect: the wire parser reads the session id out of a real `system/init` line and then records
+# defect: an EMPTY one against the lane. `claude` announced who it was; nothing kept it.
+#
+# WHY THIS SHAPE. It is the smallest defect that reaches the property both layers assert and
+# nothing else: the JSON is still parsed, the pane row is still written, its body still reads
+# `init session=<id>`. Only `lanes.session_id` is wrong -- which is exactly the column a
+# replacement daemon resumes from, so in production this is a lane that comes back as a stranger.
+#
+# THE PAIRED RED (plan 5.3). Before deletion, this same patch reddened the acceptance ancestor:
+#
+#   session_id_recorded: FAIL
+#
+# and it is `expects-red` on the unit method that replaced it, so the proof stays re-runnable
+# after the ancestor is gone.
+#
+# expects-red: unit:Dodona.Tests.ShimWireTests.session_id_recorded
+#
+# The control. A defect in ONE branch of a `switch` must not be able to redden the others, or the
+# red says nothing about which branch was cut.
+#
+# expects-green: unit:Dodona.Tests.ShimWireTests.progress_rows_are_written
+# expects-green: unit:Dodona.Tests.ShimWireTests.midturn_narration_is_still_a_row
+diff --git a/src/Dodona/LaneRuntime.cs b/src/Dodona/LaneRuntime.cs
+index 555baa3..f6f83ea 100644
+--- a/src/Dodona/LaneRuntime.cs
++++ b/src/Dodona/LaneRuntime.cs
+@@ -126,7 +126,7 @@ sealed class LaneRuntime
+                     if (sub == "init" && d.RootElement.TryGetProperty("session_id", out var sid))
+                     {
+                         kind = "system";
+-                        _store.LaneSession(Id, sid.GetString() ?? "");
++                        _store.LaneSession(Id, "");
+                         body = $"init session={sid.GetString()}";
+                     }
+                     else if (sub == "permission_denied")
