@@ -62,7 +62,7 @@ sealed class Poller
     /// the snapshot JSON changes on that cadence and the poller re-renders it — precision
     /// past that is noise. Long silence is reported as `quiet`, a neutral state: big
     /// thinks and slow builds are legitimate, so it informs rather than accuses.</summary>
-    static string Liveness(string presence, string state, DateTime? lastSeen, DateTime now)
+    internal static string Liveness(string presence, string state, DateTime? lastSeen, DateTime now)
     {
         if (state == "unreachable") return "unreachable";
         if (state == "dormant") return presence is { Length: > 0 } ? presence : "landed";
@@ -152,13 +152,18 @@ sealed class Poller
         return new Snapshot(slots, tray, feed, overlay) { Quota = QuotaLine(now) };
     }
 
+    /// <summary>The convenience overload that binds the real reader — the Trees.Locate
+    /// pattern (Trees.cs:44 + :77, and docs/testarch/seams.md S4). Production has exactly ONE
+    /// path through the decision below; a test supplies the kv bytes instead of a store, which
+    /// is what keeps the rendering out of a live window without faking StoreReader.</summary>
+    string? QuotaLine(DateTime now) => QuotaLine(_reader.Kv("rate_limit"), now);
+
     /// <summary>The 5-hour-window line for the dispatcher column. The CLI pushes
     /// `rate_limit_event` down every lane's wire unasked; the daemon keeps the latest in
     /// kv. It only updates when a lane takes a turn, so it always carries its age — a
     /// stale number presented as live is how a fleet dies at 4pm with no warning (§2.6).</summary>
-    string? QuotaLine(DateTime now)
+    internal static string? QuotaLine(string? raw, DateTime now)
     {
-        var raw = _reader.Kv("rate_limit");
         if (raw is null) return null;
         try
         {
