@@ -76,7 +76,36 @@ then read as PROVEN — a fake RED, which is worse than a fake green.
 at all; m0 had no tally for its entire life, so a red m0 was indistinguishable from a green
 one.
 
-## 6. Name the incident in a comment
+## 6. A check that matches a PRODUCT STRING is coupled to it, and `-notmatch` hides that
+
+An assertion that greps for a message the product prints is a dependency on that message. A
+POSITIVE match announces itself the moment the string changes — the check goes red and somebody
+looks. A **negative** one does not: `-notmatch 'gate fail-open'` passes when the string changes,
+passes when the string is deleted, and passes when the feature it was about is removed. It cannot
+distinguish *"the bad thing did not happen"* from *"the bad thing can no longer be spelled"*.
+
+Measured, 2026-08-22 (slice `S-GATE`): a `src/` commit renamed the marker
+`gate fail-open:` to `gate could not check:`, correctly, because every path that reached it went
+on to DENY and the log had been lying for months. That commit found and updated the two positive
+matches in the suites. It could not see the third check, whose second arm was
+`-notmatch 'gate fail-open'` — nothing emits that string any more, so the arm was **green and
+blind**, and `m1` stayed at 128/0 throughout. It surfaced only because `dev prove --with` came
+back **VACUOUS** on that exact check.
+
+So:
+
+- **Prefer a positive assertion.** Assert what the output IS, not what it is not.
+- If a negative is genuinely the property (*"it must not claim a fail-open"*), **pin it to a
+  string the product still emits** — assert the line is present AND says the right thing — so a
+  rename breaks the check instead of silencing it.
+- When you rename a product string, `grep` the suites for **both** `-match` and `-notmatch`. The
+  second kind will not fail to tell you.
+- The general form: **an assertion that cannot fail after an unrelated edit is not passing, it is
+  absent.** This is the same family as a scan whose regex matches nothing and a query that returns
+  empty — six incidents in one session, every one found by comparing two readings rather than by
+  re-reading the code.
+
+## 7. Name the incident in a comment
 
 Not decoration. The next person reads it while debugging at speed, and "why is this check
 here" is the question they cannot answer from the assertion alone.
