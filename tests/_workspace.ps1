@@ -568,21 +568,61 @@ function Invoke-StoreSql([string]$db, [string]$sql) {
         #
         # A zero-ROW query is still legitimate and still returns empty: the marker rides after
         # the rows and is stripped, so `$out` is byte-for-byte what it always was.
-        $out = (python -c "
+        # ONE RETRY ON "NOTHING AT ALL", AND IT ANNOUNCES ITSELF EITHER WAY.
+        #
+        # Measured 2026-08-22 in a gate wave at 3538c68: `brain` died on a `SELECT COUNT(*) FROM
+        # events WHERE kind='classified'` with $out empty, $err empty and no exception -- after
+        # roughly twenty identical calls in the same suite had worked. python had produced no
+        # stdout, no stderr and no error record: a process that did not start, not a query that
+        # failed. `python` on this machine resolves FIRST to the Store app-execution alias
+        # (%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe), which launches a packaged app and
+        # is exactly the kind of start that fails without writing to stderr.
+        #
+        # Throwing on the FIRST miss cost the whole suite, not the check: the exception tore out
+        # of the try block, the remaining ~38 checks never ran, and `dev gate` reported
+        # `brain NO TALLY LINE` -- a transient process start presenting as a crashed suite, which
+        # is a worse diagnosis than the one this marker was added to give.
+        #
+        # A SELECT is idempotent, so the retry costs correctness nothing, and a systematically
+        # broken python still throws one attempt later with the same message. What it must never
+        # be is SILENT: a recovery nobody sees is the false green this helper exists to remove,
+        # and issue #3 is specifically about sightings that leave no datum behind. So the retry
+        # prints, and the printed line is what goes on the ticket.
+        $out = ''
+        $err = ''
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            $out = (python -c "
 import sqlite3, os
 db = sqlite3.connect(os.environ['DODONA_TEST_DB'])
 for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is None else str(x) for x in r))
 print('##ok')
 " 2> $errFile) | Out-String
-        $err = ''
-        if (Test-Path $errFile) { $err = (Get-Content $errFile -Raw -ErrorAction SilentlyContinue) }
-        # Collapse first: captured native stderr is WRAPPED to the console width, so a newline
-        # lands mid-sentence and any regex spanning a space breaks when a path gets longer.
-        if ($err) { $err = ($err -replace '\s+', ' ').Trim() }
+            $err = ''
+            if (Test-Path $errFile) { $err = (Get-Content $errFile -Raw -ErrorAction SilentlyContinue) }
+            # Collapse first: captured native stderr is WRAPPED to the console width, so a newline
+            # lands mid-sentence and any regex spanning a space breaks when a path gets longer.
+            if ($err) { $err = ($err -replace '\s+', ' ').Trim() }
+            # A python that RAN and complained is a real failure -- report it now, never retry it.
+            # Only the no-output-no-stderr shape is a candidate for a second attempt.
+            if ($err) { break }
+            if ($out -match '(?m)^##ok\s*$') {
+                if ($attempt -gt 1) {
+                    Write-Host ("STORE QUERY RETRY: python produced nothing on attempt 1 (no stdout, no stderr), " +
+                                "and attempt 2 succeeded. A process start failed, not a query. " +
+                                "Put this line on issue #3. sql: $sql")
+                }
+                break
+            }
+            if ($attempt -eq 1) {
+                Write-Host ("STORE QUERY RETRY: python produced nothing at all (no stdout, no stderr) -- " +
+                            "retrying once. sql: $sql")
+                Remove-Item $errFile -Force -ErrorAction SilentlyContinue
+            }
+        }
         if ($err) { throw "store query FAILED: $err  --  sql: $sql" }
         if ($out -notmatch '(?m)^##ok\s*$') {
-            throw ("store query RETURNED NOTHING AT ALL -- python did not run to completion, and " +
-                   "an empty reading becomes 0 in every [int] cast in the suites. sql: $sql")
+            throw ("store query RETURNED NOTHING AT ALL on TWO attempts -- python did not run to " +
+                   "completion, and an empty reading becomes 0 in every [int] cast in the suites. sql: $sql")
         }
         return ($out -replace '(?m)^##ok\r?\n?', '')
     }

@@ -249,6 +249,14 @@ try {
     Set-Content "$out\publish2.txt" $publish2
     Check 'midmerge_arms_swap' ($publish2 -match 'MERGE is mid-merge' -and $publish2 -match 'armed' -and $publish2 -match 'swap-answer now \| hold') $publish2
     Check 'blocked_swap_armed_in_store' ((Sql "SELECT state FROM swaps ORDER BY id DESC LIMIT 1") -match 'armed') ''
+    # WAIT, DO NOT READ INSTANTLY. `publish` returns as soon as the daemon has ARMED the swap --
+    # the `swaps` row on the line above is written on that path -- but the announcement is a
+    # pane_event the daemon writes on its own task afterwards, so the two are not simultaneous.
+    # Read the moment publish returns, this check is a race that a quiet machine wins and a gate
+    # wave loses: it went red on 2026-08-22 at 3538c68 in a full wave with `blocked_swap_armed_in
+    # _store` green one line above, which is the signature of exactly that gap and NOT of a
+    # missing announcement. The assertion is unchanged; only the "when" is.
+    Wait-Until { (Sql "SELECT body FROM pane_events WHERE kind='announcement' ORDER BY id") -match 'armed.*lands the instant this clears.*mid-merge' } 20000 'the armed swap is announced with its overrides' | Out-Null
     Check 'armed_announced_with_overrides' ((Sql "SELECT body FROM pane_events WHERE kind='announcement' ORDER BY id") -match 'armed.*lands the instant this clears.*mid-merge') ''
     Check 'daemon_did_not_swap_while_blocked' ((Dodona @("status")) -match "daemon pid=$newPid") ''
 

@@ -146,6 +146,7 @@ which spent part of its session unable to parse, denying nothing while looking i
 | **WPF** | implicit usings omit `System.IO`; with `AcceptsReturn` the TextBox class handler eats Enter before instance `KeyDown` (use `PreviewKeyDown`); `RenderTargetBitmap` renders in the element's own coordinate space (capture the Window, not a margined child) |
 | **Redirected child stdio defaults to the OEM codepage** | set UTF-8 or em dashes become `ΓÇö` |
 | **`Microsoft.Data.Sqlite`** | `INSERT …; SELECT last_insert_rowid();` in one command returns nothing without `NextResult()` → use a separate command |
+| **`python` resolves to the Store app-exec alias first** (`WindowsApps\python.exe`) | a start can fail with **no stdout, no stderr and no error record** — indistinguishable from a query returning nothing. Seen once mid-wave after ~20 good calls; throwing on it killed `brain` entire (38 checks unrun, gate read `NO TALLY LINE`). `Invoke-StoreSql` retries once and **prints** either way |
 
 **A NAMED PIPE'S NAME BLINKS OUT while its server swaps instances**, so **a single instantaneous read
 is not a liveness test**. Measured: **8 of 192 reads over 1.5 s saw no pipe** while the shim was
