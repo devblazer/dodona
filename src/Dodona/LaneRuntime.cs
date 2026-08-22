@@ -92,7 +92,15 @@ sealed class LaneRuntime
         return false;
     }
 
-    void HandleShimLine(string line)
+    /// <summary>
+    /// THE PARSER, and the one seam this pilot slice opens (docs/TEST-ARCHITECTURE-PLAN.md W5).
+    /// `internal` rather than `private` for exactly one reason: `Dodona.csproj` grants
+    /// `InternalsVisibleTo("Dodona.Tests")`, so a unit test can hand this method a real
+    /// recorded `claude` wire line and read what it wrote through a recording
+    /// <see cref="ILaneSink"/>. Nothing else changes -- the daemon still reaches it only from
+    /// the pump task above, and no production caller exists outside this class.
+    /// </summary>
+    internal void HandleShimLine(string line)
     {
         int t = line.IndexOf('\t');
         if (t < 0) return;                                     // greeting/noise
