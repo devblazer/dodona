@@ -1277,34 +1277,37 @@ int Publish()
     //
     // Any lingering pipe that belongs to no registered workspace is left alone. That is the
     // whole difference: a stale or foreign `dodona-*-ctl` is no longer a swap target.
-    var targets = new List<(string Label, string Pipe)>();
+    // The three inputs that are NOT pure -- the registry's rows, the OS pipe namespace and
+    // the owning workspace -- are bound HERE and nowhere else. The decision they feed is
+    // PublishPlan.Resolve, which is why "who gets the swap" can be asked without starting a
+    // daemon (TEST-ARCHITECTURE-PLAN, wire I5).
+    //
+    // The registry is opened only when a flag actually needs it, and the owning workspace is
+    // resolved only when no target was named -- resolving it can MIGRATE a store, and a
+    // publish must never do that as a side effect of being run in a source tree (found live:
+    // the tree's own pre-workspace daemon was holding it, and publish refused before it had
+    // built anything).
     var named = Many("workspace");
-    if (opts.ContainsKey("all"))
+    var wantAll = opts.ContainsKey("all");
+    List<PublishPlan.Target> targets;
     {
-        using var reg = new Registry();
-        foreach (var w in reg.All().Where(w => Instance.IsLive(w.Id)))
-            targets.Add(($"{w.Name} ({w.Id})", Instance.CtlPipe(w.Id)));
-        if (Instance.IsLive(Instance.ConciergeId)) targets.Add(("concierge", Instance.CtlPipe(Instance.ConciergeId)));
-    }
-    else if (named.Count > 0)
-    {
-        using var reg = new Registry();
-        foreach (var n in named)
+        using Registry? reg = wantAll || named.Count > 0 ? new Registry() : null;
+        IReadOnlyList<PublishPlan.Ws> registered = reg is null
+            ? Array.Empty<PublishPlan.Ws>()
+            : reg.All().Select(w => new PublishPlan.Ws(w.Id, w.Name)).ToList();
+        Func<string, PublishPlan.Ws?> byNameOrId = n =>
+            reg is not null && WorkspaceResolve.ByNameOrId(reg, n) is { } w
+                ? new PublishPlan.Ws(w.Id, w.Name)
+                : null;
+        try
         {
-            var w = WorkspaceResolve.ByNameOrId(reg, n);
-            if (w is null) { Console.Error.WriteLine($"error: no workspace \"{n}\" to publish to"); return 2; }
-            targets.Add(($"{w.Name} ({w.Id})", Instance.CtlPipe(w.Id)));
+            var plan = PublishPlan.Resolve(
+                wantAll, named, opts.ContainsKey("concierge"), registered, byNameOrId,
+                Instance.IsLive, Instance.ConciergeId,
+                () => new PublishPlan.Target($"{WsName()} ({WsId()})", CtlPipe()));
+            if (plan.Error is not null) { Console.Error.WriteLine(plan.Error); return plan.ExitCode; }
+            targets = plan.Targets;
         }
-        if (opts.ContainsKey("concierge") && Instance.IsLive(Instance.ConciergeId))
-            targets.Add(("concierge", Instance.CtlPipe(Instance.ConciergeId)));
-    }
-    else
-    {
-        // The workspace owning what we just built. Resolved HERE and not earlier, so a
-        // publish never migrates a store as a side effect of being run in a source tree
-        // (found live: the tree's own pre-workspace daemon was holding it, and publish
-        // refused before it had built anything).
-        try { targets.Add(($"{WsName()} ({WsId()})", CtlPipe())); }
         catch (WorkspaceUnavailable ex)
         {
             Shortcut(outDir);                           // probe-verified above; nothing running to object
@@ -1340,28 +1343,13 @@ int Publish()
         var code = Client(new { cmd = "swap", exe = newExe, mode = One("mode") ?? "ask" }, target, capture: reply);
         foreach (var line in reply) Console.WriteLine($"    {line}");
 
-        string verdict;
-        if (code != 0)
-        {
-            verdict = $"DID NOT SWAP (exit {code})";
-            stillOld.Add(label);
-        }
-        else if (reply.Count == 0)
-        {
-            // Silence. Do not let it pass as success, and do not let it pass as exit 0 either.
-            verdict = "ANSWERED NOTHING — it did not take this build";
-            stillOld.Add(label);
-            code = 1;
-        }
-        else if (reply.Any(l => l.StartsWith("armed:")))
-            verdict = "armed — it takes this build when its blocker clears";   // vouched for, not yet running
-        else
-            verdict = "took this build";
-        // `armed` still counts as accepted for the shortcut, exactly as before: a daemon read
-        // the binary, judged it, and committed to it.
-        if (code == 0) accepted = true;
-        Console.WriteLine($"  {label}: {verdict}");
-        worst = Math.Max(worst, code);
+        // READING that reply is PublishPlan.Judge -- pure over (code, reply), and the one place
+        // silence is promoted to a failure. `armed` still counts as accepted for the shortcut,
+        // exactly as before: a daemon read the binary, judged it, and committed to it.
+        var verdict = PublishPlan.Judge(code, reply);
+        if (verdict.StillOld) stillOld.Add(label); else accepted = true;
+        Console.WriteLine($"  {label}: {verdict.Text}");
+        worst = Math.Max(worst, verdict.Code);
     }
     if (stillOld.Count > 0)
         Console.Error.WriteLine($"note: STILL ON THE OLD BUILD — {string.Join(", ", stillOld)}. " +

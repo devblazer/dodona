@@ -152,47 +152,41 @@ static class Ver
     /// </summary>
     static readonly Dictionary<string, string> _meta = ReadMetadata();
 
+    /// <summary>What THIS image says about itself. Every provenance member below is the same
+    /// question asked of <see cref="BuildProvenance"/>, which is the seam: the answers are a
+    /// pure function of four metadata keys, so asking them of an ARBITRARY set costs a call
+    /// rather than an MSBuild run.</summary>
+    static readonly BuildProvenance _prov = BuildProvenance.Read(Meta);
+
     /// <summary>Human-readable dump of what this build knows about itself; empty when nothing.</summary>
-    public static string Provenance =>
-        Commit.Length == 0 ? "" : $"commit={Commit} main={MainBaseline} dirty={(Dirty ? "1" : "0")} branch={Branch}";
+    public static string Provenance => _prov.Text;
 
     /// <summary>The commit this build was made from; empty when unknown.</summary>
-    public static string Commit => Meta("DodonaCommit");
+    public static string Commit => _prov.Commit;
 
     /// <summary>Where <c>main</c> stood when this build was made. For a main build that is the
     /// same as <see cref="Commit"/>; for a TRIAL it is the baseline the trial was cut against,
     /// which is what lets "the next commit to main replaces the trial" (P2.5) work without any
     /// remembered state: the binary carries its own baseline, so nothing survives a handoff
     /// wrongly and nothing has to be reset.</summary>
-    public static string MainBaseline => Meta("DodonaMainSha") is { Length: > 0 } m ? m : Commit;
+    public static string MainBaseline => _prov.MainBaseline;
 
     /// <summary>The branch this build was made from; empty when unknown.</summary>
-    public static string Branch => Meta("DodonaBranch");
+    public static string Branch => _prov.Branch;
 
     /// <summary>Was the tree dirty when this was built? Then the SHA does not fully describe
     /// the binary, and saying <c>build=&lt;sha&gt;</c> alone would be a small lie.</summary>
-    public static bool Dirty => Meta("DodonaDirty") == "1";
+    public static bool Dirty => _prov.Dirty;
 
     /// <summary>A build whose commit is not <c>main</c> -- a deliberate trial (P2.5/D-1).</summary>
-    public static bool IsTrial => Commit.Length > 0 && Meta("DodonaMainSha") is { Length: > 0 } m && m != Commit;
+    public static bool IsTrial => _prov.IsTrial;
 
     /// <summary>True when this image cannot say what commit it came from.</summary>
-    public static bool NoProvenance => Commit.Length == 0;
+    public static bool NoProvenance => _prov.None;
 
     /// <summary>One line for <c>status</c> and the swap feed. Bisectable: the SHA it prints is
     /// a commit <c>git log</c> knows (RECOVERY-PHASES P2.6).</summary>
-    public static string ProvenanceLine
-    {
-        get
-        {
-            if (NoProvenance)
-                return "build=unknown (no commit provenance -- built by `dev build`, or published with --exe)";
-            var dirty = Dirty ? " +uncommitted-changes" : "";
-            return IsTrial
-                ? $"trial: {(Branch.Length > 0 ? Branch : "detached")}@{Short(Commit)}{dirty} (main was {Short(MainBaseline)})"
-                : $"build={Short(Commit)}{dirty}";
-        }
-    }
+    public static string ProvenanceLine => _prov.Line;
 
     public static string Short(string sha) => sha.Length >= 12 ? sha.Substring(0, 12) : sha;
 
@@ -218,5 +212,65 @@ static class Ver
         try { stamp = File.GetLastWriteTimeUtc(asm.Location).ToString("yyyyMMddHHmmss"); }
         catch { stamp = "unknown"; }
         return $"{v}+{stamp}";
+    }
+}
+
+/// <summary>
+/// WHAT A BUILD SAYS IT WAS MADE FROM, as a VALUE rather than as a property of the running
+/// process.
+///
+/// <see cref="Ver"/>'s provenance members used to read <c>typeof(Ver).Assembly</c>'s own
+/// metadata one key at a time, so the only way to ask "does a build with no DodonaCommit
+/// report unknown, or does it guess?" was to produce such a binary and run it. Four keys go
+/// in and four facts come out; nothing here reads the world, and <c>Ver</c> binds the one real
+/// source -- its own assembly attributes -- exactly once.
+///
+/// THE DISTINCTION THAT MATTERS, and the reason "the version string is non-empty" would not be
+/// a valid test of provenance: the .NET SDK writes a bare commit SHA into
+/// <c>AssemblyInformationalVersion</c> all by itself. Only Dodona's OWN named keys count here,
+/// so a build the SDK stamped but publish did not is "unknown" and says so out loud, rather
+/// than becoming a plausible lie. That is the case <c>publish --exe</c> reaches on every call,
+/// and the old code DEGRADED to an mtime compare in exactly it -- the loop-prone bug wearing a
+/// fallback (<see cref="Ver"/>'s class comment carries the 64-publish afternoon).
+/// </summary>
+/// <param name="Commit">the commit this build was made from; empty when unknown</param>
+/// <param name="MainSha">where <c>main</c> stood when it was built; empty when unknown</param>
+/// <param name="Branch">cosmetic -- "is this main?" is decided by comparing the two SHAs, so a
+/// branch name mangled on the way in can never change a decision</param>
+/// <param name="Dirty">was the tree dirty, i.e. does the SHA fully describe the binary?</param>
+readonly record struct BuildProvenance(string Commit, string MainSha, string Branch, bool Dirty)
+{
+    /// <summary>Read the four facts out of one metadata lookup. A missing key is "", never a
+    /// throw and never a guess.</summary>
+    public static BuildProvenance Read(Func<string, string> meta) =>
+        new(meta("DodonaCommit"), meta("DodonaMainSha"), meta("DodonaBranch"), meta("DodonaDirty") == "1");
+
+    /// <summary>True when the image cannot say what commit it came from -- a plain
+    /// <c>dev build</c>, or <c>publish --exe</c> of a prebuilt binary. Every consumer must
+    /// treat this as "unknown", never as "behind".</summary>
+    public bool None => Commit.Length == 0;
+
+    /// <summary>The baseline a trial was cut against; for a main build, the commit itself.</summary>
+    public string MainBaseline => MainSha.Length > 0 ? MainSha : Commit;
+
+    /// <summary>A build whose commit is not <c>main</c> -- a deliberate trial (P2.5/D-1). A
+    /// build with NO provenance is not a trial: unknown is not a claim.</summary>
+    public bool IsTrial => Commit.Length > 0 && MainSha.Length > 0 && MainSha != Commit;
+
+    /// <summary>Human-readable dump; empty when nothing is known.</summary>
+    public string Text => None ? "" : $"commit={Commit} main={MainBaseline} dirty={(Dirty ? "1" : "0")} branch={Branch}";
+
+    /// <summary>One line for <c>status</c> and the swap feed.</summary>
+    public string Line
+    {
+        get
+        {
+            if (None)
+                return "build=unknown (no commit provenance -- built by `dev build`, or published with --exe)";
+            var dirty = Dirty ? " +uncommitted-changes" : "";
+            return IsTrial
+                ? $"trial: {(Branch.Length > 0 ? Branch : "detached")}@{Ver.Short(Commit)}{dirty} (main was {Ver.Short(MainBaseline)})"
+                : $"build={Ver.Short(Commit)}{dirty}";
+        }
     }
 }
