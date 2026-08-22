@@ -267,7 +267,16 @@ async Task<int> Dispatch() => cmd switch
 int Cx(object request)
 {
     var pipe = Instance.CtlPipe(Concierge.Id);
-    if (cmd == "concierge-stop" || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
+    // DECLARED, NOT LISTED (issue #13). This was one exemption -- `cmd == "concierge-stop"` --
+    // so every other concierge verb summoned, including `concierge-status`, `concierge-feed`,
+    // `concierge-questions` and `concierge-resolve`, which are pure reads. A concierge is one
+    // process and no model lanes, which is why it stayed unnoticed and is not why it is right:
+    // the rule is that a command which only reports starts nothing. Fails closed on an
+    // undeclared command, out loud (`DaemonSurface` carries the whole reasoning).
+    var wire = WireCmd(JsonSerializer.Serialize(request));
+    var declared = DaemonSurface.Declared(DaemonSurface.Surface.Concierge, wire);
+    if (declared is null) Console.Error.WriteLine(DaemonSurface.Undeclared(DaemonSurface.Surface.Concierge, wire));
+    if (declared != DaemonSurface.Summon.Always || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
         return Client(request, pipe);
     if (!Instance.IsLive(Concierge.Id))
     {
@@ -1128,7 +1137,7 @@ int Publish()
             var plan = PublishPlan.Resolve(
                 wantAll, named, opts.ContainsKey("concierge"), registered, byNameOrId,
                 Instance.IsLive, Instance.ConciergeId,
-                () => new PublishPlan.Target($"{WsName()} ({WsId()})", CtlPipe()));
+                () => new PublishPlan.Ws(WsId(), WsName()));
             if (plan.Error is not null) { Console.Error.WriteLine(plan.Error); return plan.ExitCode; }
             targets = plan.Targets;
         }
@@ -1369,10 +1378,12 @@ int LandCli(long tid)
     while (true)
     {
         var lines = new List<string>();
-        // neverSummon: a poll must never wake a daemon. If the daemon died mid-land there is
-        // nothing to report and summoning one would spawn its whole warm-up to say so
-        // (CLAUDE.md §3.2's incident, on a 250 ms timer).
-        var code = Client(new { cmd = "land-status", ticket = tid }, null, lines, neverSummon: true);
+        // A poll must never wake a daemon. If the daemon died mid-land there is nothing to report
+        // and summoning one would spawn its whole warm-up to say so (CLAUDE.md §3.2's incident,
+        // on a 250 ms timer). It needed `neverSummon: true` when the decision was
+        // read off the typed verb (`land` here, not `land-status`); the decision is read off the
+        // WIRE command now, so `land-status` carries its own answer and the parameter is gone.
+        var code = Client(new { cmd = "land-status", ticket = tid }, null, lines);
         if (!(lines.Count > 0 && lines[0].StartsWith("state=running")))
         {
             foreach (var l in lines.Where(l => !l.StartsWith("state="))) Console.WriteLine(l);
@@ -1391,9 +1402,14 @@ int LandCli(long tid)
 
 // ---------------------------------------------------------------- client role
 
-int Client(object request, string? pipeName = null, List<string>? capture = null, bool neverSummon = false)
+int Client(object request, string? pipeName = null, List<string>? capture = null)
 {
     pipeName ??= CtlPipe();
+    // Serialised HERE rather than at the write below, because the summon decision is made from
+    // the WIRE COMMAND -- the `cmd` field the daemon will actually dispatch on -- and not from
+    // the verb the operator typed (DaemonSurface carries why the two must not be confused).
+    var payload = JsonSerializer.Serialize(request);
+    var wire = WireCmd(payload);
     var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
     try { pipe.Connect(3000); }
     catch
@@ -1404,37 +1420,28 @@ int Client(object request, string? pipeName = null, List<string>? capture = null
         // failed swap or a crash: the next command brings the daemon back, and the shims
         // have been buffering the whole time.
         var isWorkspaceCtl = wsCache is not null && pipeName == Instance.CtlPipe(wsCache.Id);
-        // `status` NEVER SUMMONS, and that is enforcement replacing a warning (D-6).
+        // WHETHER TO SUMMON IS DECLARED, NOT LISTED HERE (issue #13). This test used to be four
+        // literals -- `cmd is "stop-daemon" or "status" or "land-status" or "ticket-record"` --
+        // read off the verb the operator typed. It was right about those four from the day it was
+        // written and silent about the other sixty, so `dodona policy` started four model agents
+        // to print a static table, and a bare `dodona publish` woke a sleeping daemon on the OLD
+        // build purely to have something to hand a swap to. `DaemonSurface` carries the incident,
+        // the rule (a command that only REPORTS starts nothing) and the enforcement that keeps it
+        // complete; `neverSummon` is gone with it, because keying on the wire command makes
+        // LandCli's `land`-that-sends-`land-status` correct without a parameter.
         //
-        // CLAUDE.md 3.2 exists solely to warn that `dodona status` is not read-only: it summons a
-        // daemon, and a summoned daemon runs its warm-up, which spawns the router, the brain and
-        // the compressor pool. TWO lanes with no `dodona.json` (router + brain) and FOUR in this
-        // repo, which sets `"compressors": 2` -- this comment said "five" until issue #12 counted
-        // them in `Daemon.cs`, and a wrong number asserted as measured is the thing this file has
-        // a whole section about. On 2026-08-19 a
-        // session used it twice as a health check against the operator's LIVE workspace, left a
-        // daemon and five model lanes on a machine they believed was idle, and then spent two
-        // hours diagnosing its own five leaked shims as "machine contention".
-        //
-        // A written warning did not stop that and would not stop the next one. A command whose
-        // name promises a reading must not change what it reads. `stop-daemon` was already on this
-        // list for the same reason in the other direction.
-        //
-        // Deliberately NARROW: `tail`, `say` and the rest still summon, because bringing the
-        // daemon back is what the caller wants there -- and the shims have been buffering. Only
-        // the command people reach for to ASK A QUESTION is changed.
-        // `land-status` is on the list for the same reason, and `neverSummon` carries it for the
-        // poll inside LandCli — where `cmd` is still "land", so the name test alone would miss it.
-        // `ticket-record` joins them for the same reason and one more: it is what a manager (R5)
-        // and a script will poll, so a version of it that summoned would turn "read the record"
-        // into four warm-up model processes on a machine nobody asked to wake.
-        var neverSummons = neverSummon || cmd is "stop-daemon" or "status" or "land-status" or "ticket-record";
-        if (!isWorkspaceCtl || neverSummons || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
+        // FAILS CLOSED both ways: an undeclared command starts nothing and says so, and it is
+        // still only reached when this is the resolved workspace's own control pipe.
+        var declared = isWorkspaceCtl ? DaemonSurface.Declared(DaemonSurface.Surface.Workspace, wire) : null;
+        if (isWorkspaceCtl && declared is null) Console.Error.WriteLine(DaemonSurface.Undeclared(DaemonSurface.Surface.Workspace, wire));
+        if (!isWorkspaceCtl || declared != DaemonSurface.Summon.Always || Environment.GetEnvironmentVariable("DODONA_NO_AUTOSTART") == "1")
             return Fail(
                 // Say what IS known and what starts nothing, so the answer is useful rather than
                 // just a refusal -- an enforcement that leaves you with no next step is a new way
-                // to be stuck (CLAUDE.md 0.1).
-                isWorkspaceCtl && cmd == "status"
+                // to be stuck (CLAUDE.md 0.1). Said for EVERY reading now, not only `status`: the
+                // sentence was always about the property, and hard-coding one verb into it is the
+                // same shape of mistake as hard-coding four into the test above.
+                isWorkspaceCtl && declared == DaemonSurface.Summon.Never
                     // BOTH PROPERTIES, because saying only the first is what issue #12 cost.
                     // This message used to end "`dodona where` and `dodona ps` report without
                     // starting anything" -- true, and silent about the fact that `where` then
@@ -1442,9 +1449,9 @@ int Client(object request, string? pipeName = null, List<string>? capture = null
                     // the command from the incident. A typed `--root` no longer adopts, so the
                     // recommendation is finally safe; say what it is safe FROM.
                     ? $"workspace {wsCache!.Name} is ASLEEP -- nothing was started to answer this, " +
-                      "and nothing was created. `dodona where` and `dodona ps` neither start a daemon " +
-                      "nor adopt a folder; any command that needs the daemon (say, tail, lane-start) " +
-                      "will summon one."
+                      $"and nothing was created; `{wire}` only reports. `dodona where` and `dodona ps` " +
+                      "neither start a daemon nor adopt a folder; any command that acts (say, input, " +
+                      "lane-start) will summon one."
                 : isWorkspaceCtl ? $"daemon not running for workspace {wsCache!.Name} (ctl pipe {pipeName})"
                 : pipeName == Instance.CtlPipe(Concierge.Id) ? $"concierge not running (ctl pipe {pipeName})"
                 : pipeName.EndsWith("-ui") ? $"no Dodona UI on pipe {pipeName}"
@@ -1462,7 +1469,7 @@ int Client(object request, string? pipeName = null, List<string>? capture = null
     int? exitOverride = null;
     try
     {
-        w.WriteLine(JsonSerializer.Serialize(request));
+        w.WriteLine(payload);
         string? line;
         while ((line = r.ReadLine()) is not null && line != "##end")
         {
@@ -1509,6 +1516,20 @@ static string? Autostart(string wsId, string primary)
         return System.Diagnostics.Process.Start(psi) is null ? "Process.Start returned null" : null;
     }
     catch (Exception ex) { return ex.Message; }
+}
+
+/// <summary>The command the far end will DISPATCH on, read out of the request that is about to be
+/// sent. Not the verb the operator typed: `dodona lane-expand` sends `lane-collapse`, `dodona
+/// land`'s poll sends `land-status`, `dodona publish` sends `swap`. Null for a UI request, which
+/// is keyed `verb` and never reaches a summon decision.</summary>
+static string? WireCmd(string payload)
+{
+    try
+    {
+        using var d = JsonDocument.Parse(payload);
+        return d.RootElement.TryGetProperty("cmd", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null;
+    }
+    catch { return null; }      // unreadable means undeclared means start nothing (fail closed)
 }
 
 string? One(string name) => opts.TryGetValue(name, out var l) ? l[0] : null;

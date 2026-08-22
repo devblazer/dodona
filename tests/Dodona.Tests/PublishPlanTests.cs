@@ -71,12 +71,10 @@ public class PublishPlanTests
     /// <summary>What the DEFAULT branch resolves to: the workspace owning what was just built.
     /// A delegate in production because resolving it can throw and can migrate a store, and a
     /// fixed value here because what this file asks is whether it is consulted at all.</summary>
-    static PublishPlan.Target Owning => PublishPlan.For(Beta);
-
     static (List<PublishPlan.Target> Targets, string? Error, int ExitCode) Resolve(
-        bool all = false, string[]? named = null, bool concierge = false) =>
+        bool all = false, string[]? named = null, bool concierge = false, PublishPlan.Ws? owning = null) =>
         PublishPlan.Resolve(all, named ?? Array.Empty<string>(), concierge, Registered,
-                            ByNameOrId, Live, Cx, () => Owning);
+                            ByNameOrId, Live, Cx, () => owning ?? Beta);
 
     static string Labels((List<PublishPlan.Target> Targets, string? Error, int ExitCode) r) =>
         string.Join(" | ", r.Targets.Select(t => t.Label + " on " + t.Pipe));
@@ -186,8 +184,31 @@ public class PublishPlanTests
     {
         var r = Resolve();                       // neither --all nor --workspace
         var only = Assert.Single(r.Targets);
-        Assert.Equal(Owning.Label, only.Label);
+        Assert.Equal(PublishPlan.For(Beta).Label, only.Label);
         Assert.DoesNotContain("alpha", Labels(r));    // the registry is not consulted at all
+    }
+
+    /// <summary>
+    /// ISSUE #13. A bare `dodona publish` against a SLEEPING workspace used to add it as a
+    /// target anyway -- and `Client` then summoned a daemon on the OLD build purely to have
+    /// something to hand a swap to, plus the four model processes its warm-up spawns. A publish
+    /// that starts the very thing it is about to replace.
+    ///
+    /// `--all` and `--workspace` were never exposed: neither resolves the owning workspace, so
+    /// the summon branch was unreachable for both. Only the argument-less form -- the one a
+    /// person types -- could do it, which is why nothing above catches this.
+    ///
+    /// Two assertions, because "no targets" alone would also be produced by a Resolve that had
+    /// stopped consulting `owning` at all: the sleeping one yields nothing AND the live one
+    /// still yields itself (<see cref="default_target_is_the_owning_workspace"/> is that half).
+    /// A name typed explicitly is deliberately NOT filtered -- being told that the workspace you
+    /// NAMED is not running is the answer to that question.
+    /// </summary>
+    [Fact]
+    public void a_sleeping_owner_is_no_target_at_all()
+    {
+        Assert.Empty(Resolve(owning: Asleep).Targets);
+        Assert.Contains("asleep", Labels(Resolve(named: new[] { "asleep" })));
     }
 
     // ----------------------------------------------------------------- what a reply meant

@@ -406,20 +406,52 @@ try {
     $recErr = "$out\ticket-record.err"
     & $dodona ticket-record 1 --root $root 2> $recErr | Out-Null
     $recOut = if (Test-Path $recErr) { ((Get-Content $recErr -Raw) -replace '\s+', ' ').Trim() } else { '' }
+    # ISSUE #13: `policy` rides the SAME window for the same reason. It is the clearest instance
+    # in that ticket -- its own daemon handler comment says "Inspectable without spawning
+    # anything", and until the decision moved into `DaemonSurface` it started the router, the
+    # brain and the compressor pool to print a static config table. It was never on the four-name
+    # literal this check was written against, so `status` and `ticket-record` staying green while
+    # `policy` summoned is exactly what "right about four names, silent about sixty" looked like
+    # from here.
+    $polErr = "$out\policy.err"
+    & $dodona policy --root $root 2> $polErr | Out-Null
+    $polOut = if (Test-Path $polErr) { ((Get-Content $polErr -Raw) -replace '\s+', ' ').Trim() } else { '' }
     $ErrorActionPreference = $prevEap
     $statusOut = if (Test-Path $statusErr) { ((Get-Content $statusErr -Raw) -replace '\s+', ' ').Trim() } else { '' }
     $daemonAppeared = Wait-Until { Test-DodonaPipe $ws.CtlPipe } 4000 '(expecting NO daemon to appear)'
     if ($null -eq $savedAutostart) { Remove-Item env:DODONA_NO_AUTOSTART -ErrorAction SilentlyContinue }
     else { $env:DODONA_NO_AUTOSTART = $savedAutostart }
 
+    # THE MACHINE EFFECT, FOR THE GROUP -- and it is a check of its own because it cannot be
+    # attributed to any one of the three. All three readings share one 4 s window (a second and
+    # third wait would be 8 s of the I7 budget for nothing), so a daemon appearing here means
+    # SOMETHING summoned and the window cannot say which. Folding it into each command's check,
+    # which is what this suite did until issue #13, made every one of them red whenever any one
+    # of them summoned -- so none of them was evidence about its own command, and `dev prove`
+    # reported the #13 mutant OVERBROAD on exactly that. This is the strongest assertion in the
+    # section (a real daemon, on a real machine, with autostart CLEARED) and it belongs to the
+    # group; ATTRIBUTION is the three checks below.
+    $results['no_reading_left_a_daemon_running'] =
+        if (-not $daemonAppeared) { 'PASS' } else { 'FAIL (a daemon appeared: status, ticket-record or policy started one)' }
+    # ATTRIBUTION, one command each, from the command's OWN stderr. A summoning build prints
+    # `no daemon for this workspace -- starting one` from `Autostart` and then the daemon's reply;
+    # a refusing one prints the sentence that names the sleeping workspace AND the command. So a
+    # positive match on that sentence is exact per command, and needs no window of its own.
+    # Positive rather than `-notmatch 'starting one'` deliberately (skill check-authoring 6): a
+    # negative would keep passing if the product stopped emitting the string at all.
+    #
+    # WHAT THAT SENTENCE SAYS CHANGED WITH ISSUE #13. It used to be hard-coded to
+    # `cmd == "status"`, so every other reading fell through to a generic "daemon not running" --
+    # which is also what a UI pipe and a foreign pipe produce, and so could not tell the
+    # no-summon branch from any other failure to connect. It is said for every reading now, and
+    # it names the command.
     $results['status_does_not_summon_a_daemon'] =
-        if (-not $daemonAppeared) { 'PASS' } else { 'FAIL (a daemon appeared: status started one or ticket-record did)' }
-    # Two assertions, because one of them alone would pass against a build that never had the
-    # guard: no daemon appeared (which is only meaningful with autostart CLEARED, above), and the
-    # command took the no-summon branch rather than dying some other way -- that branch is the one
-    # that names the sleeping workspace instead of starting it.
+        if ($statusOut -match 'ASLEEP.*status. only reports') { 'PASS' } else { "FAIL ($statusOut)" }
     $results['ticket_record_does_not_summon_a_daemon'] =
-        if (-not $daemonAppeared -and $recOut -match 'daemon not running') { 'PASS' } else { "FAIL ($recOut)" }
+        if ($recOut -match 'ASLEEP.*ticket-record. only reports') { 'PASS' } else { "FAIL ($recOut)" }
+    # ISSUE #13, on the command that was NOT on the old four-name list.
+    $results['policy_does_not_summon_a_daemon'] =
+        if ($polOut -match 'ASLEEP.*policy. only reports') { 'PASS' } else { "FAIL ($polOut)" }
     $results['status_says_the_workspace_is_asleep'] =
         if ($statusOut -match 'ASLEEP') { 'PASS' } else { "FAIL ($($statusOut.Trim()))" }
     # ...and it started no LANES either, which is the part that costs real money.

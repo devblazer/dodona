@@ -517,10 +517,30 @@ function Invoke-StoreSql([string]$db, [string]$sql) {
     $env:DODONA_TEST_SQL = $sql
     $env:DODONA_TEST_DB = $db
     try {
+        # `##ok` IS NOT DECORATION -- IT IS HOW "NOTHING CAME BACK" STOPS READING AS "ZERO".
+        #
+        # Every caller of this helper spells a count `[int]((Rows "SELECT COUNT(*) ...").Trim())`,
+        # and in PS 5.1 `[int]''` is 0 -- not an error, not $null, 0. So a query that never ran
+        # returns the most passable answer there is, and `-eq 0` / `-eq $before` assertions go
+        # GREEN on a reading that does not exist. That is check-authoring 3's trap ("a check that
+        # passes because its query is broken is indistinguishable from one that works") arriving
+        # from the one direction that helper's stderr guard cannot see: the child never starting.
+        # The stderr file only ever holds what PYTHON wrote, so a failure to launch it at all
+        # leaves $out empty, $err empty, and nothing thrown.
+        #
+        # Found 2026-08-22 in a gate wave: `compression:short_results_skip_the_compressor` failed
+        # `before=1 after=0` -- a COUNT(*) that had apparently DECREASED, which it cannot. The
+        # suite was green alone minutes later (the issue #3 signature). Whatever the contention
+        # is, this is the line that decides whether the next occurrence reports honestly or is
+        # read as a real row disappearing, and the shape generalises past that one check.
+        #
+        # A zero-ROW query is still legitimate and still returns empty: the marker rides after
+        # the rows and is stripped, so `$out` is byte-for-byte what it always was.
         $out = (python -c "
 import sqlite3, os
 db = sqlite3.connect(os.environ['DODONA_TEST_DB'])
 for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is None else str(x) for x in r))
+print('##ok')
 " 2> $errFile) | Out-String
         $err = ''
         if (Test-Path $errFile) { $err = (Get-Content $errFile -Raw -ErrorAction SilentlyContinue) }
@@ -528,7 +548,11 @@ for r in db.execute(os.environ['DODONA_TEST_SQL']): print('|'.join('' if x is No
         # lands mid-sentence and any regex spanning a space breaks when a path gets longer.
         if ($err) { $err = ($err -replace '\s+', ' ').Trim() }
         if ($err) { throw "store query FAILED: $err  --  sql: $sql" }
-        return $out
+        if ($out -notmatch '(?m)^##ok\s*$') {
+            throw ("store query RETURNED NOTHING AT ALL -- python did not run to completion, and " +
+                   "an empty reading becomes 0 in every [int] cast in the suites. sql: $sql")
+        }
+        return ($out -replace '(?m)^##ok\r?\n?', '')
     }
     finally {
         $ErrorActionPreference = $prev

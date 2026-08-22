@@ -360,10 +360,17 @@ try {
     # explicit steps -- summon, then ask -- says it properly.
     #
     # Why status changed: it is what people reach for as a health check, and a summoned daemon
-    # runs its warm-up, which spawns the router, brain and compressor pool -- five real
+    # runs its warm-up, which spawns the router, brain and compressor pool -- four real
     # `claude -p --model haiku` processes. CLAUDE.md 3.2 warned about it in prose and a session
     # did it anyway, twice, against the operator's live workspace.
-    Dodona @("tickets") | Out-Null
+    #
+    # AND IT HAPPENED AGAIN, TO `tickets`, WHICH IS WHY THIS IS `focus` (issue #13). The
+    # substitute chosen above was picked the same way the original was -- a command that
+    # happened to summon -- and `tickets` is a pure read, so #13 stopped it summoning too and
+    # these three checks went red on a correct product. The general trap, worth more than either
+    # instance: PROVOKE A BEHAVIOUR WITH A COMMAND THAT MEANS IT. `focus` changes something, so
+    # it summons because of what it IS, and no future correction to a reading can reach it.
+    Dodona @("focus", "$lane") | Out-Null
     Wait-Daemon $ws.CtlPipe | Out-Null
     $revived = Dodona @("status")
     Check 'autostart_summons_daemon' ($revived -match 'daemon pid=(\d+)' -and [int]$Matches[1] -ne $newPid2) $revived
@@ -376,9 +383,12 @@ try {
     $env:DODONA_NO_AUTOSTART = "1"
     Dodona @("stop-daemon") | Out-Null
     Wait-Until { -not (Test-DodonaPipe $ws.CtlPipe) } 20000 'the daemon is down' | Out-Null
-    # A SUMMONING command, for the same reason: `status` would now refuse whether autostart is
-    # disabled or not, so asking it here would prove nothing about DODONA_NO_AUTOSTART.
-    $noauto = Dodona @("tickets")
+    # A SUMMONING command, for the same reason: a READING would now refuse whether autostart is
+    # disabled or not, so asking one here would prove nothing about DODONA_NO_AUTOSTART. It said
+    # `status` and used `tickets`, and issue #13 made `tickets` a reading -- so this check
+    # silently became the vacuous thing its own comment warns against. `focus` acts, and the
+    # refusal it gets is the generic one, which is what only the disabled path produces.
+    $noauto = Dodona @("focus", "$lane")
     Check 'autostart_can_be_disabled' ($DODONA_EXIT -ne 0 -and $noauto -match 'daemon not running') $noauto
 }
 finally {

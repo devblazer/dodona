@@ -864,6 +864,9 @@ plan shipped without one and handing it off meant re-deriving everything (`a403f
 - **`LandCli(long tid)`** (`Program.cs`) — the polling client, and `--no-wait`. `Client` grew an
   optional `capture` list (so the poll does not print every tick) and a `neverSummon` flag (inside
   `LandCli` the parsed `cmd` is still `"land"`, so the name-based no-summon test would miss it).
+  **`neverSummon` is GONE as of issue #13** — the decision moved to `DaemonSurface`, keyed on the
+  WIRE command, so `land-status` carries its own answer wherever it is sent from. The gap this flag
+  patched by hand is the one that also let a bare `publish` (wire cmd `swap`) wake a daemon.
   `--no-wait` had to be added to `boolFlags` — a valueless flag that is not declared there eats the
   next argument, which is the incident that comment records.
 - **`_lanes` is a `ConcurrentDictionary`** now, and `.Remove(k)` became `.TryRemove(k, out _)` at

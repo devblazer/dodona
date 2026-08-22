@@ -174,6 +174,76 @@ function LeakedAgentProcesses {
 #      thing this whole phase is named after. `(planned)` on the same line exempts it, because a
 #      PLAN describing a suite nobody has written yet is correct prose, and a lint that fires on
 #      correct prose is a lint somebody switches off.
+# ---- (iii) EVERY WIRE COMMAND DECLARES WHETHER IT IS WORTH STARTING A DAEMON (issue #13)
+#
+# `src\Dodona\DaemonSurface.cs` decides, per wire command, whether a client that cannot connect
+# should SUMMON one. Summoning a workspace daemon runs its warm-up: four real `claude -p --model
+# haiku` processes in this repo. Before #13 the decision was four literals in `Client`, right
+# about those four names and silent about the other sixty -- so `dodona policy` started four
+# model agents to print a static config table.
+#
+# A longer hand-maintained list is the same bug with more entries, so what makes this different
+# is HERE and not there: the table has to stay exactly equal to the two dispatchers' `case`
+# labels, in both directions. Add a command and forget to declare it, and this goes red before
+# the commit; delete one and leave a row behind, and it goes red too. The compiler cannot ask
+# the question -- a `case` label is a string -- so the lint asks it.
+#
+# The outer switch is discriminated by INDENTATION (12 spaces): `swap-answer` has a nested
+# `switch (answer)` whose cases sit at 20. A refactor that reindents would silently harvest
+# nothing, which is a check degrading into a green -- so an empty harvest is itself a problem.
+function Surface-Static {
+    $problems = @()
+    $surfaceFile = Join-Path $repo 'src\Dodona\DaemonSurface.cs'
+    if (-not (Test-Path $surfaceFile)) {
+        return @{ Problems = @("src\Dodona\DaemonSurface.cs is missing -- it is what declares which commands may start a daemon (issue #13)") }
+    }
+    $surface = Get-Content $surfaceFile -Raw
+
+    # The two tables, read as text: from `Dictionary<string, Summon> <Name> = new(...)` to the
+    # `};` that closes it. Text and not reflection for the same reason the double ledger's rung 1
+    # is a text scan: it cannot miss an assembly, and it needs no build to run.
+    function Declared([string]$name) {
+        $m = [regex]::Match($surface, "(?s)Dictionary<string,\s*Summon>\s+$name\s*=\s*new\(.*?\n\s*\};")
+        if (-not $m.Success) { return $null }
+        @([regex]::Matches($m.Value, '\["([^"]+)"\]') | ForEach-Object { $_.Groups[1].Value })
+    }
+    function CaseLabels([string]$rel) {
+        $full = Join-Path $repo $rel
+        if (-not (Test-Path $full)) { return $null }
+        @(Get-Content $full | ForEach-Object {
+                $m = [regex]::Match($_, '^ {12}case "([^"]+)":')
+                if ($m.Success) { $m.Groups[1].Value }
+            })
+    }
+
+    foreach ($pair in @(
+            @{ Table = 'Ws'; File = 'src\Dodona\Daemon.Commands.cs'; What = 'the workspace daemon' },
+            @{ Table = 'Cx'; File = 'src\Dodona\Concierge.cs';       What = 'the concierge' })) {
+        $declared = Declared $pair.Table
+        $labels = CaseLabels $pair.File
+        if ($null -eq $declared) {
+            $problems += "DaemonSurface.$($pair.Table) could not be read -- the table that decides whether $($pair.What)'s commands may start a daemon (issue #13)"
+            continue
+        }
+        if ($null -eq $labels) { $problems += "$($pair.File) is missing -- Surface-Static cannot check $($pair.What)"; continue }
+        if (@($labels).Count -eq 0) {
+            $problems += "$($pair.File): no `case` labels found at the outer switch -- Surface-Static harvests on 12-space indentation, so a reindent turns this check into a green that proves nothing (issue #13)"
+            continue
+        }
+        foreach ($c in @($labels)) {
+            if (@($declared) -notcontains $c) {
+                $problems += "$($pair.File) handles `"$c`" and DaemonSurface.$($pair.Table) does not declare it -- say whether answering it is worth STARTING $($pair.What) (issue #13)"
+            }
+        }
+        foreach ($d in @($declared)) {
+            if (@($labels) -notcontains $d) {
+                $problems += "DaemonSurface.$($pair.Table) declares `"$d`" and $($pair.File) handles no such command -- a stale row (issue #13)"
+            }
+        }
+    }
+    @{ Problems = $problems }
+}
+
 function Repo-Lint {
     $problems = @()
     $files = @(git -C $repo ls-files '*.md' '*.ps1' 2>$null)
@@ -246,6 +316,7 @@ function Repo-Lint {
     # of magnitude, and it is the one that catches a check name colliding with another suite's.
     $problems += @((Ledger-Static).Problems)
     $problems += @((Doubles-Static).Problems)
+    $problems += @((Surface-Static).Problems)
     return $problems
 }
 
@@ -1523,6 +1594,15 @@ function Do-Prove {
         # WITHOUT --with: that is the plain `dev prove`, whose whole promise is "this is
         # HEAD". Nothing else in this tree is tracked-and-modified, so it costs milliseconds.
         git -C $wt checkout HEAD -- src 2>&1 | ForEach-Object { Add-Content -Path $log -Value $_ -Encoding utf8 }
+        # ...AND THE FILES A MUTANT ADDED, which `checkout` cannot see. `git checkout HEAD -- src`
+        # restores tracked content and leaves untracked content exactly where it is, so the first
+        # mutant to introduce a NEW file poisoned this cached tree permanently: the next `--with`
+        # died on "already exists in working directory", and a plain `dev prove` -- whose whole
+        # promise is "this is HEAD" -- would have silently judged against HEAD plus somebody
+        # else's new file. That is the wrong answer the paragraph above refuses to accept, one
+        # `git` verb further out. Found by s-summon-01, the first mutant here to add one
+        # (src\Dodona\DaemonSurface.cs, issue #13).
+        git -C $wt clean -fdq -- src 2>&1 | ForEach-Object { Add-Content -Path $log -Value $_ -Encoding utf8 }
 
         if ($mutant) {
             # SRC ONLY, and the refusal is the point. A mutant that touched tests\ would be
@@ -2167,7 +2247,7 @@ function Do-Gate {
     # rung 1 are static parses of tracked files, which is what I8 already is.
     $lint = @(Repo-Lint)
     if ($lint.Count -eq 0) {
-        Say "  PASS  I8  repo lint clean: no control bytes, every named test path real, every ledger row resolves, every double anchored"
+        Say "  PASS  I8  repo lint clean: no control bytes, every named test path real, every ledger row resolves, every double anchored, every wire command declared"
     }
     else {
         Say "  FAIL  I8  repo lint found $($lint.Count) problem(s):"
@@ -2232,7 +2312,7 @@ switch ($Verb) {
         $l = @(Repo-Lint)
         # Readings, NOT assertions (plan 3.4): a number nobody has to keep inside a bound.
         foreach ($r in @((Ledger-Static).Readings) + @((Doubles-Static).Readings)) { Say "  note: $r" }
-        if ($l.Count -eq 0) { Say "clean: no control bytes, every named test path real, every ledger row resolves, every double anchored" }
+        if ($l.Count -eq 0) { Say "clean: no control bytes, every named test path real, every ledger row resolves, every double anchored, every wire command declared" }
         else { foreach ($x in $l) { Say "  $x" }; Say ""; Say "$($l.Count) problem(s)"; exit 1 }
     }
     'gate' { Do-Gate }

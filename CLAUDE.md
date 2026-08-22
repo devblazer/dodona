@@ -658,33 +658,55 @@ reasoning; `workspace:a_named_root_creates_no_workspace_for_a_daemon_command` as
 `status` on purpose — through the resolution layer, not through `where`. `concierge-resolve` needs
 the same `--adopt`, because rung 0 attaches any absolute path it finds in a sentence.
 
-**None of these start a daemon, and none adopt a folder:**
+**THE SUMMON HALF IS NO LONGER A LIST SOMEBODY MAINTAINS — issue #13 closed it.** It was a literal
+`cmd is "stop-daemon" or "status" or "land-status" or "ticket-record"` in `Client`: right about those
+four names from the day it was written, silent about the other sixty. So `policy` — whose own handler
+comment reads *"Inspectable without spawning anything"* — started four model agents to print a static
+config table, and a bare `publish` against a sleeping workspace woke a daemon **on the old build**
+purely to have something to hand a swap to.
+
+**`src\Dodona\DaemonSurface.cs` declares it, per WIRE COMMAND, for both dispatchers.** One rule:
+**a command that only REPORTS starts nothing; a command that CHANGES or DELIVERS summons.** Not
+read-vs-write — `repos` and `token-status` materialise a `merge_token` row and are readings by name;
+`ack` flips one bit and is an act.
+
+- **Keyed on the wire command, not the verb you typed.** They differ: `land`'s poll sends
+  `land-status`, `lane-expand` sends `lane-collapse`, `publish` sends `swap`. That gap was half the
+  bug, and it deleted `Client`'s `neverSummon` parameter.
+- **Completeness is enforced, not remembered:** `dev lint` reconciles the table against every `case`
+  label in `Daemon.Commands.cs` and `Concierge.cs`, both directions. **A new command cannot be added
+  without answering the question** — which is the property the literal never had. Both directions
+  proved red.
+- **Fails closed:** an undeclared command starts nothing and says so, naming the two files.
+- **Moved with it:** `tail` and `tickets` no longer summon (§3.2 used to list them as deliberate;
+  the buffering argument is `say`/`input`'s, where you are DELIVERING). Every `concierge-*` reading
+  the same. `swap`/`swap-answer`/`stop-daemon` too — nothing to stop or swap if nothing is running.
+
+**None of these start a daemon, and none adopt a folder** — read `DaemonSurface` for the full set:
 
 | command | |
 |---|---|
 | `version [--json]` | what a binary is, including its commit. Writes NOTHING, on any path |
+| `where [--json]` · `ps` | ids, paths, pipes, what is running. `ps` **REAPS** stale `shim-lane<N>.json` |
 | `status` | reports ASLEEP rather than waking the workspace |
-| `where [--json]` | ids, paths, pipe names, whether a daemon is LIVE |
-| `ps` | what is running, machine-wide — but it **REAPS**: deletes stale `shim-lane<N>.json` for every registered workspace |
-| `land-status <ticket>` | a land in flight or its outcome |
-| `ticket-record <ticket>` | the completion record — a manager POLLS this |
+| `policy` · `swaps` · `tickets` · `questions` · `tail` · `repos` · `token-status` · `repo-status` · `claim-check` | readings |
+| `land-status` · `ticket-record` | polled by `LandCli` and by a manager (R5) |
+| `concierge-status` · `concierge-feed` · `concierge-questions` · `concierge-resolve` | the concierge's readings |
 
 `version` is the only one writing nothing whatsoever: every other verb opens the registry, and
 **constructing it creates `<DODONA_HOME>\concierge\registry.db`** if absent — inside Dodona's own
-territory, never in a project, but it is a write.
+territory, never in a project, but it is a write. `repos` and `token-status` also INSERT a
+`merge_token` row through a method called `TokenRead` — only ever against a daemon already up, since
+they no longer start one.
 
 **These summon deliberately** (waking the daemon is what the caller wants, and the shims have been
-buffering): `say`, `tail`, `input`, `lane-start`, `tickets`, and the rest. Expect the four warm-up
-processes.
+buffering): `say`, `input`, `lane-start`, `lane-respawn`, `ticket-create`, `land`, `route`, and the
+rest of the acts. Expect the four warm-up processes.
 
-**THE SUMMON HALF IS STILL A HAND-MAINTAINED LIST, AND THE AUDIT FOUND IT LEAKY — issue #13.** It is
-a literal `cmd is "stop-daemon" or "status" or "land-status" or "ticket-record"` in `Client`, so a
-verb is safe only if somebody remembered to add it. Known to summon while reading like a question:
-**`swaps`**, **`policy`** (its own handler comment says *"Inspectable without spawning anything"*),
-**`repo-status`**, **`claim-check`**, **`token-status`**, **`repos`**, **`questions`**, **`tickets`**,
-**`tail`**, and **every `concierge-*` verb** (one exemption, `concierge-stop`). Two also write:
-`repos` and `token-status` INSERT a `merge_token` row through a method called `TokenRead`. **Until
-#13 lands, assume a verb summons unless it is in the table above.**
+**PROVOKE A BEHAVIOUR WITH A COMMAND THAT MEANS IT.** `m4`'s three autostart checks used `status`
+because it happened to summon; when `status` stopped, they were re-pointed at `tickets` — chosen the
+same way — and #13 broke them again. One of the two had by then become vacuous while still green.
+A check that acts uses `focus`; the reading it happens to be adjacent to is not the point.
 
 **THE CONTROL PIPE IS SERIAL, SO A SLOW HANDLER FREEZES THE WHOLE DAEMON.** One
 `NamedPipeServerStream`, `HandleAsync` awaited inline — while any command is handled, that daemon

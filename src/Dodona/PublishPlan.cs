@@ -56,9 +56,22 @@ static class PublishPlan
     ///
     ///   --all                  every live workspace in the registry, plus the concierge
     ///   --workspace n ...      exactly these, plus the concierge with --concierge
-    ///   (neither)              <paramref name="owning"/> -- the workspace that owns what we built
+    ///   (neither)              <paramref name="owning"/> -- the workspace that owns what we
+    ///                          built, IF it is running
     ///
     /// <c>--all</c> wins over <c>--workspace</c>, as it always did.
+    ///
+    /// THE DEFAULT TARGET IS LIVENESS-FILTERED, and it was not until issue #13. A bare
+    /// <c>dodona publish</c> against a sleeping workspace added it as a target anyway, and
+    /// <c>Client</c> then SUMMONED a daemon on the OLD build purely to have something to hand a
+    /// swap to -- a publish that started the very thing it was about to replace, plus its
+    /// warm-up's four model processes. <c>--all</c> and <c>--workspace</c> never did (neither
+    /// resolves the owning workspace, so <c>wsCache</c> stayed null and the summon branch was
+    /// unreachable), which is exactly why the argument-less form -- the one a person types -- was
+    /// the only one that could do it. A name typed explicitly still becomes a target whatever its
+    /// state: being told that the workspace you NAMED is not running is the answer to that
+    /// question. Nothing running means no targets, which publish already reports as
+    /// "no daemon running to swap" and treats as accepted.
     ///
     /// <paramref name="owning"/> is a delegate and not a value because resolving it can THROW
     /// (<see cref="WorkspaceUnavailable"/>), and because it must not be resolved at all when a
@@ -78,7 +91,7 @@ static class PublishPlan
         Func<string, Ws?> byNameOrId,
         Func<string, bool> isLive,
         string conciergeId,
-        Func<Target> owning)
+        Func<Ws> owning)
     {
         var targets = new List<Target>();
         if (all)
@@ -97,7 +110,14 @@ static class PublishPlan
             }
             if (concierge && isLive(conciergeId)) targets.Add(Concierge(conciergeId));
         }
-        else targets.Add(owning());
+        else
+        {
+            // `owning()` is still CALLED when nothing is live -- resolving it is what decides
+            // whether there is a workspace here at all, and its WorkspaceUnavailable throw is the
+            // caller's "published, nothing swapped" path. Only the TARGET is conditional.
+            var w = owning();
+            if (isLive(w.Id)) targets.Add(For(w));
+        }
         return (targets, null, 0);
     }
 
