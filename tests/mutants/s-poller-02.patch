@@ -1,0 +1,33 @@
+# S-POLLER 02 (plan W8, 9.4 step B0).
+#
+# defect: the five-hour quota line drops the word `window`, so the dispatcher column reads
+# defect: `5h 42%` -- which no longer says WHICH window the number is about, and the whole
+# defect: reason the reading is carried is that it is the CLI's own five-hour figure and not
+# defect: an estimate over some other period (Poller.cs's own comment, sec 2.6).
+#
+# WHAT IT DELIBERATELY DOES NOT BREAK: the parse, the type guard, the age suffix, the reset
+# time and the overage marker all still work, so this is aimed at the rendering of the one
+# number the acceptance check actually matched on. The elapsed clock in the same class is
+# declared green.
+#
+# THE PAIRED RED (plan 5.3). Before deletion, this same patch reddened the acceptance ancestor,
+# which put `ratelimit:0.42` on a real agent's wire and read it back off a live `ui dump`.
+#
+# expects-red: ui-grid:quota_line_from_wire
+# expects-red: ui-unit:Dodona.Ui.Tests.PollerQuotaTests.quota_line_from_wire
+#
+# expects-green: ui-unit:Dodona.Ui.Tests.PollerLivenessTests.liveness_shows_a_moving_clock
+# expects-green: ui-grid:badge_flushes_at_turn_end
+diff --git a/src/DodonaUi/Poller.cs b/src/DodonaUi/Poller.cs
+index 067d9e4..f382650 100644
+--- a/src/DodonaUi/Poller.cs
++++ b/src/DodonaUi/Poller.cs
+@@ -173,7 +173,7 @@ sealed class Poller
+             var util = info.TryGetProperty("utilization", out var u) ? u.GetDouble() : -1;
+             if (util < 0) return null;
+ 
+-            var line = $"5h window {util * 100:0}%";
++            var line = $"5h {util * 100:0}%";
+             if (info.TryGetProperty("resetsAt", out var ra) && ra.TryGetInt64(out var epoch))
+                 line += $" · resets {DateTimeOffset.FromUnixTimeSeconds(epoch).ToLocalTime():HH:mm}";
+             if (info.TryGetProperty("isUsingOverage", out var ov) && ov.ValueKind == JsonValueKind.True)

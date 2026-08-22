@@ -22,3 +22,14 @@ every_recorded_line_classifies_as_recorded	unit	W5 corpus rung, and the only thi
 The_real_transcript_drives_session_presence_and_quota	unit	W5 corpus rung: the parser's side effects on real bytes, not only its classification -- session, 11 thinking presences, idle at the end, and the rate_limit reading.
 Every_unwitnessed_shape_is_declared_with_a_reason_and_an_issue	unit	W5 corpus rung. Plan 3.4 applied to its own escape hatch: a closed reason vocabulary and an open issue (#18), because a mechanism whose failure mode is 'edit a JSON list and be green' is a convention wearing enforcement clothes.
 The_corpus_says_where_it_came_from	unit	W5 corpus rung. Provenance is a READING, not a staleness assertion (D-T13) -- what is asserted is that it is present and well formed.
+liveness_shows_a_moving_clock	ui-unit	S-POLLER moved it down from ui-grid. The acceptance ancestor is disposed of in moves\s-poller.tsv; this is the same name in the ui-unit namespace, which baseline.tsv keys separately (ui-unit/<leaf>).
+quota_line_from_wire	ui-unit	S-POLLER moved it down from ui-grid. Same name, ui-unit namespace.
+policy_picks_cheap_for_mechanical	unit	S-POLLER moved it down from ui-grid. Same name, unit namespace.
+policy_picks_max_for_design	unit	S-POLLER moved it down from ui-grid. Same name, unit namespace.
+policy_default_is_opus_high	unit	S-POLLER moved it down from ui-grid. Same name, unit namespace.
+A_lane_with_no_last_seen_gets_no_clock	ui-unit	S-POLLER: the null arm of Poller.Liveness. A lane nothing has been heard from has no elapsed time to report, and no acceptance check ever reached it -- a window fixture cannot easily produce a live lane with no last activity at all.
+The_percentage_is_the_wire_value_not_a_bucket	ui-unit	S-POLLER: the quota number is the CLI's own and is never estimated, so it is rendered to the unit rather than bucketed. 0 and 100 are the ends nobody had asserted.
+A_reading_older_than_two_minutes_says_how_old_it_is	ui-unit	S-POLLER: the `as of Nm ago` suffix and its two-minute threshold. Poller.cs's own comment says why it exists -- a stale number presented as live is how a fleet dies at 4pm with no warning -- and nothing asserted it, because the acceptance fixture's reading was always seconds old.
+Overage_is_named	ui-unit	S-POLLER: OVERAGE is the one quota state that costs money and it is named in capitals. Unasserted before.
+A_reset_time_is_offered_when_the_wire_carried_one	ui-unit	S-POLLER: the reset time is rendered in LOCAL time for the operator, so the assertion is the SHAPE and never an hour -- a literal would make the check a passenger of the machine's timezone.
+An_unreadable_reading_renders_nothing	ui-unit	S-POLLER: seven ways the reading can be unusable -- absent, empty, unparseable, no info, no utilization, a seven_day window, a negative -- all render NOTHING rather than a guess. The catch-all `catch { return null; }` had no coverage at all.

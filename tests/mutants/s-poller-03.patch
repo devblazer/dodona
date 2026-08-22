@@ -1,0 +1,41 @@
+# S-POLLER 03 (plan W8, 9.4 step B0).
+#
+# defect: the policy table's rule-match test is INVERTED -- `if (!m.Success)` -- so every
+# defect: sentence is answered by the first rule it does NOT match. Mechanical work stops being
+# defect: cheap, design-tier work stops being expensive, and anything unrecognised stops
+# defect: reaching the default. Quota is the scarce resource (CLAUDE.md sec 0.1), so a table
+# defect: that answers backwards spends an opus turn on a typo and a haiku turn on a schema.
+#
+# ONE OPERATOR, THREE CHECKS. All three moved checks read the same table through the same
+# selection, so one inversion is the honest defect for the group -- and it is genuinely narrow:
+# StripOverrides is untouched, the override short-circuit above the loop is untouched, and the
+# bad-pattern `continue` is untouched. The three controls below are all on those paths, which
+# is what says the red belongs to the rule selection rather than to Policy generally.
+#
+# THE PAIRED RED (plan 5.3). Before deletion, this same patch reddened the three acceptance
+# ancestors, each of which shelled out to `dodona policy "<sentence>"` from a WINDOW suite.
+#
+# expects-red: ui-grid:policy_picks_cheap_for_mechanical
+# expects-red: ui-grid:policy_picks_max_for_design
+# expects-red: ui-grid:policy_default_is_opus_high
+# expects-red: unit:Dodona.Tests.PolicyChoiceTests.policy_picks_cheap_for_mechanical
+# expects-red: unit:Dodona.Tests.PolicyChoiceTests.policy_picks_max_for_design
+# expects-red: unit:Dodona.Tests.PolicyChoiceTests.policy_default_is_opus_high
+#
+# expects-green: ui-grid:override_tokens_stripped_from_prompt
+# expects-green: ui-grid:override_recorded_in_causal_chain
+# expects-green: ui-grid:policy_table_is_inspectable
+# expects-green: unit:Dodona.Tests.PolicyTests.An_override_beats_the_table_and_says_so
+diff --git a/src/Dodona/Policy.cs b/src/Dodona/Policy.cs
+index f5da075..55c2044 100644
+--- a/src/Dodona/Policy.cs
++++ b/src/Dodona/Policy.cs
+@@ -74,7 +74,7 @@ static class Policy
+             Match m;
+             try { m = Regex.Match(text, r.When, RegexOptions.IgnoreCase); }
+             catch (ArgumentException) { continue; }       // a bad pattern in config must not break routing
+-            if (m.Success) return new Choice(r.Model, r.Effort, r.Why is { Length: > 0 } ? r.Why : m.Value, false);
++            if (!m.Success) return new Choice(r.Model, r.Effort, r.Why is { Length: > 0 } ? r.Why : m.Value, false);
+         }
+         return new Choice(defaultModel, defaultEffort, "default", false);
+     }

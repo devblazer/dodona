@@ -303,10 +303,13 @@ print(r[0].replace(chr(10), '<NL>') if r else 'none')
     Check 'typing_after_undo_starts_a_fresh_lane' ($lanes.Count -eq 1 -and $lanes[0].title -eq 'TOOLBAR') (($lanes | ConvertTo-Json -Compress))
 
     # ---- model/effort policy (§9): the table decides, the operator overrides ----
+    # WHAT THIS ASSERTS IS THE VERB, and that is all it asserts now. The three checks that
+    # used to follow it -- policy_picks_cheap_for_mechanical, policy_picks_max_for_design,
+    # policy_default_is_opus_high -- asked a pure function three questions by starting three
+    # child processes, inside a suite whose entire cost is process starts. They are
+    # Dodona.Tests.PolicyChoiceTests now (slice S-POLLER, tests/ledger/moves/s-poller.tsv),
+    # proved red under tests/mutants/s-poller-03.patch before they were deleted from here.
     Check 'policy_table_is_inspectable' ((Dodona @("policy")) -match 'design-tier') ''
-    Check 'policy_picks_cheap_for_mechanical' ((Dodona @("policy", "fix the spelling in the readme")) -match '^haiku low') ''
-    Check 'policy_picks_max_for_design' ((Dodona @("policy", "redesign the schema")) -match '^opus max') ''
-    Check 'policy_default_is_opus_high' ((Dodona @("policy", "make the toolbar collapsible")) -match '^opus high') ''
 
     # An override in a typed prompt must be honoured AND must never reach the agent.
     # Clear the grid first: model and effort are fixed when a process starts, so the
@@ -369,14 +372,19 @@ db = sqlite3.connect(r'$storeDb')
 print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fetchone()[0])
 ") | Out-String
     Dodona @("undo-route", $route.Trim()) | Out-Null          # writes an unacked announcement mid-turn
-    # The condition is the clock APPEARING, which is exactly what the check below asserts --
-    # so this arrives the moment the 10s threshold is crossed rather than 3s after it.
+    # The clock appearing is now a MID-TURN MARKER rather than an assertion: it is the
+    # cheapest condition that proves the agent is still working and the snapshot has been
+    # rebuilt at least once since, which is what the badge check below needs. What the clock
+    # SAYS moved to Dodona.Ui.Tests.PollerLivenessTests.liveness_shows_a_moving_clock (slice
+    # S-POLLER), where the whole bucket table is asked of Poller.Liveness directly and no
+    # process starts at all. Do not narrow this wait to `presence -ne idle` on the grounds
+    # that the clock is no longer asserted -- it would fire before the poller had rebuilt,
+    # and the badge deferral is a property of a snapshot, not of a store row.
     Wait-Until {
         ($script:mid = @((DumpOrNull).slots | Where-Object { -not $_.empty } | Where-Object { $_.lane -eq $lane3 })[0]) -and
         $script:mid.presence -match '\d+s'
     } 25000 'the elapsed clock appears (past the 10s threshold)' | Out-Null
     Check 'badge_defers_while_agent_works' ($mid.badge -eq 0) "badge=$($mid.badge) presence=$($mid.presence)"
-    Check 'liveness_shows_a_moving_clock' ($mid.presence -match '\d+s') $mid.presence
     # the turn ends; deferred badges flush
     Wait-Until {
         ($script:after = @((DumpOrNull).slots | Where-Object { -not $_.empty } | Where-Object { $_.lane -eq $lane3 })[0]) -and
@@ -384,10 +392,14 @@ print(db.execute('SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1').fe
     } 25000 'the turn ends and the deferred badge flushes' | Out-Null
     Check 'badge_flushes_at_turn_end' ($after.badge -ge 1 -and $after.presence -eq 'idle') "badge=$($after.badge) presence=$($after.presence)"
 
-    # ---- the 5-hour quota line: the CLI's own number, from the wire, no estimation ----
-    Dodona @("say", "$lane3", "ratelimit:0.42 say quota reported") | Out-Null
-    Wait-Until { ($script:d = DumpOrNull).quota -match '5h window 42%' } 20000 'the quota line arrives from the wire' | Out-Null
-    Check 'quota_line_from_wire' ($d.quota -match '5h window 42%') "quota='$($d.quota)'"
+    # ---- the 5-hour quota line moved out, and BOTH HALVES of it landed somewhere real ----
+    # This section used to spend a whole fake-agent turn (`ratelimit:0.42`) and a 20s wait to
+    # read one rendered string off `ui dump`. The RENDERING is
+    # Dodona.Ui.Tests.PollerQuotaTests.quota_line_from_wire (slice S-POLLER), over the kv bytes
+    # LaneRuntime actually writes. The CROSSING -- a rate_limit_event on an agent's wire
+    # reaching kv at all -- is Dodona.Tests.WireCorpusTests, against REAL RECORDED BYTES from
+    # tests/assets/wire/real/wire.jsonl, which is stronger than a fake agent re-emitting the
+    # shape it was taught. Nothing here was left standing on prose.
 
     # ---- the pane's close button is a real button (CLAUDE.md: the feed telling a GUI
     # user to type "dodona lane-stop 3" was this project's original sin) ----
