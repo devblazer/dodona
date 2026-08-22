@@ -1096,11 +1096,28 @@ function UnitProject([string]$name) {
 # a SCHEDULING HINT and nothing else -- an unknown name just sorts to the end, and the set that
 # runs is decided entirely by the caller.
 #
-# Measured 2026-08-19, each suite alone: ui-use 42.5, m4 28.4, publish ~30, brain 23.4,
-# m3 16.6, workspace 13.8, compression 11.7, concierge 11.1, m1 7.7, m2 7.7, m0 7.0.
+# RE-DERIVED 2026-08-22 FROM IN-WAVE MEDIANS OVER SEVEN FULL GATES, and the old order had drifted
+# far enough to cost real time. The figures it carried were from 2026-08-19, they were each suite
+# measured ALONE, and the two facts together made it wrong twice over: alone is not the number that
+# decides a wave, and every suite had roughly tripled since (m1 7.7 -> 48.9, workspace 13.8 -> 81.3).
+# `m1` had drifted to 7th while being the 4th longest; `m0` was LAST while being 6th; `ui-ask` and
+# `publish` sat at 4th and 5th on the strength of numbers four days old.
+#
+#     brain 89,7  workspace 81,3  ui-grid 75,8  m1 48,9  m4 36,1  m0 36,0  ui-ask 33,0
+#     m3 24,4  ui-wake 23,3  ui-shell 19,2  publish 19,1  concierge 15,3  m2 14,8  compression 14,4
+#
+# Simulating the list scheduler over those medians: the old order packs to 199,5 s, this one to
+# 182,6 s, against a lower bound (sum/3) of 177,1 s. ~17 s, for a sorted list.
+#
+# `voice` IS NOT ON THIS LIST ANY MORE. It is in SoloSuites, so Run-Suites filters it out before
+# the hint is consulted and its position here decided nothing -- a line that looks like scheduling
+# and is not, which is the kind of thing that gets read as evidence later.
+#
+# KEEP IT SORTED BY IN-WAVE MEDIAN when you touch it, and re-derive rather than nudge: this list
+# going stale is silent, costs ~17 s, and nothing fails when it happens.
 function SuiteOrderHint {
-    , @('brain', 'workspace', 'ui-grid', 'ui-ask', 'publish', 'm4', 'voice', 'm1', 'ui-shell', 'ui-wake',
-        'm3', 'compression', 'concierge', 'm2', 'm0')
+    , @('brain', 'workspace', 'ui-grid', 'm1', 'm4', 'm0', 'ui-ask', 'm3', 'ui-wake', 'ui-shell',
+        'publish', 'concierge', 'm2', 'compression')
 }
 
 # HOW MANY AT ONCE. THREE. The number is measured, and it was 5 until 5 was shown to be wrong.
