@@ -25,7 +25,7 @@ namespace Dodona.Tests;
 /// </summary>
 public class StoreCompressionTests : IDisposable
 {
-    readonly string _dir = Path.Combine(Path.GetTempPath(), "dodona-compress-" + Guid.NewGuid().ToString("N")[..8]);
+    readonly string _dir = TempTree.New("dodona-compress-");
     readonly string _path;
     readonly Store _store;
 
@@ -86,9 +86,12 @@ public class StoreCompressionTests : IDisposable
         return (r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1));
     }
 
+    /// <summary>Not "a WAL twin still held", which is what this said: `Microsoft.Data.Sqlite`
+    /// pools the connection, so `Dispose` did not close the file and the delete failed on every
+    /// run (issue #25). `TempTree.Delete` clears the pool first.</summary>
     public void Dispose()
     {
         _store.Dispose();
-        try { Directory.Delete(_dir, recursive: true); } catch { /* a WAL twin still held: the OS's problem, not a failing test */ }
+        TempTree.Delete(_dir);
     }
 }

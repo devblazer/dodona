@@ -34,6 +34,11 @@ static class UnitHome
         var home = Path.Combine(Path.GetTempPath(), "dodona-unit-home-" + Environment.ProcessId);
         Directory.CreateDirectory(home);
         Environment.SetEnvironmentVariable("DODONA_HOME", home);
+        // AND IT HAS TO BE TAKEN AWAY AGAIN (issue #25). This is created once per test PROCESS and
+        // nothing ever removed it -- 59 were on the machine when it was measured. There is no
+        // fixture to hang a Dispose off, so the process exit is the only hook there is; `TempTree`'s
+        // sweep is the backstop for the run that is killed before it fires.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => TempTree.Delete(home);
     }
 }
 
@@ -129,8 +134,7 @@ sealed class TempReg : IDisposable
 
     public TempReg()
     {
-        Root = Path.Combine(Path.GetTempPath(), "dodona-reg-" + Guid.NewGuid().ToString("N")[..12]);
-        Directory.CreateDirectory(Root);
+        Root = TempTree.New("dodona-reg-");
     }
 
     /// <summary>A plain folder: no merge token to split, so exclusivity does not apply to it.</summary>
@@ -157,8 +161,9 @@ sealed class TempReg : IDisposable
     /// green on one machine and red on another.</summary>
     public static string Key(string path) => Instance.Canonical(path).ToLowerInvariant();
 
-    public void Dispose()
-    {
-        try { Directory.Delete(Root, true); } catch { /* a temp dir that will not go is not a failure */ }
-    }
+    /// <summary>`Registry` holds a SQLite connection, and `Microsoft.Data.Sqlite` POOLS it -- so
+    /// disposing the registry did not close `registry.db` and this delete failed on every run,
+    /// silently, behind a comment saying that was fine (issue #25). `TempTree.Delete` clears the
+    /// pool first, which is what actually releases the handle.</summary>
+    public void Dispose() => TempTree.Delete(Root);
 }

@@ -147,6 +147,44 @@ function LeakedTestProcesses {
         })
 }
 
+# WHAT ELSE IS ON THE MACHINE THAT MOVES THE CLOCK -- and neither of these is a Dodona process,
+# which is exactly why nothing reported them (issue #1, issue #25).
+#
+# `leaked test processes before` was the right instinct aimed at too narrow a set: it counts what a
+# SUITE leaves and says nothing about what this repo's own tooling leaves. Measured 2026-08-22,
+# five consecutive `dev gate` runs at ONE commit with `live app before: 0` and no leaked test
+# processes every time: 268.6s, 296.2s, 303.3s, 346.3s -- monotonic, not a spread -- and 289.5s
+# after clearing the two things below. That is a 78 s drift nothing in the preamble could see,
+# on a budget whose whole headroom is about 40 s.
+#
+#   1. `dotnet build` reuses MSBuild nodes, so they OUTLIVE the build. Thirteen were up holding
+#      2.9 GB, two of them 22 hours old. This repo builds constantly -- `dev build`, `dev prove`'s
+#      baseline, m4's real build inside every gate, every publish. `dotnet build-server shutdown`
+#      is the polite way to retire them; it is NOT run automatically here, because it is a
+#      machine-wide action and CLAUDE.md 1 is explicit that this script stops nothing on your
+#      behalf.
+#   2. `%TEMP%` is where every suite creates its sandbox, and it had 32,861 directories in it.
+#      Creating, listing and searching there gets slower as that number grows, and it is paid by
+#      every suite in the run.
+#
+# THE COST IS ABOUT 200 ms on a 270 s run, and it is the number that explains the run when it goes
+# long. CLAUDE.md 0.1 says not to widen an automatic reader to buy thoroughness nobody asked for;
+# the case for this one is that a budget nobody can reproduce is worse than no budget.
+function MachineNoise {
+    $servers = @(Get-Process -Name 'dotnet', 'MSBuild', 'VBCSCompiler' -ErrorAction SilentlyContinue | Where-Object {
+            # The operator's IDE runs OmniSharp on `dotnet` too, and it is THEIRS -- never counted
+            # here and never suggested for shutdown. `build-server shutdown` leaves it alone as
+            # well, which is how the two were told apart in the first place.
+            $c = $null
+            try { $c = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue).CommandLine } catch { }
+            -not ($c -and $c -match 'OmniSharp|languageserver')
+        })
+    $mb = if ($servers.Count) { [math]::Round((($servers | Measure-Object WorkingSet64 -Sum).Sum) / 1MB) } else { 0 }
+    $tempDirs = 0
+    try { $tempDirs = @([IO.Directory]::EnumerateDirectories($env:TEMP)).Count } catch { }
+    [pscustomobject]@{ Servers = $servers.Count; ServerMB = $mb; TempDirs = $tempDirs }
+}
+
 # The wrappers and agents specifically -- what I3 is about. A `dodona` daemon still winding down
 # from `stop-daemon` when we look is a RACE, not an orphan, and lumping the two together is what
 # made "publish-acceptance leaks four DodonaShim every run" a fact everybody repeated: publish-
@@ -1904,6 +1942,21 @@ function Do-Gate {
         # pipeline happens to be current, and this line printed `\gate.Path -like \` -- a
         # broken instruction is worse than none, because it is a command someone will paste.
         Say '  Get-Process | Where-Object { $_.Path -like "$env:TEMP\dodona-*" } | Stop-Process -Force'
+    }
+
+    # The other half of "a dirty machine invalidates the timing row", and the half that was
+    # invisible: see MachineNoise for the five-run measurement that put it here.
+    $noise = MachineNoise
+    Say "machine before: $($noise.Servers) build server process(es) holding $($noise.ServerMB) MB; TEMP holds $($noise.TempDirs) directories"
+    # ONLY the build servers get a warning, and only because it is the half you can DO something
+    # about with one command. The TEMP count is reported and never warned on: most of that folder
+    # belongs to other programs entirely (9,341 Chrome entries and 2,079 yarn ones when this was
+    # measured), so a threshold on it would fire on nearly every run of every machine and teach
+    # people to skip the line -- which is the disease CLAUDE.md 3 names about a gate that is always
+    # green, arriving from the other direction.
+    if ($noise.Servers -ge 8) {
+        Say "  THAT SKEWS THE CLOCK, and they are not Dodona processes, so nothing above counts them:"
+        Say "  dotnet build-server shutdown     # retires the MSBuild/compiler nodes; leaves your IDE alone"
     }
 
     Say ""

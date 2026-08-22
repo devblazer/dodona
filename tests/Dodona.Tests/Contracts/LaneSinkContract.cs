@@ -155,7 +155,7 @@ public sealed class LaneSinkContractOverTheRecordingSink : LaneSinkContract
 /// </summary>
 public sealed class LaneSinkContractOverARealStore : LaneSinkContract, IDisposable
 {
-    readonly string _dir = Path.Combine(Path.GetTempPath(), "dodona-lanesink-" + Guid.NewGuid().ToString("N")[..8]);
+    readonly string _dir = Dodona.Tests.TempTree.New("dodona-lanesink-");
     readonly Store _store;
 
     public LaneSinkContractOverARealStore() => _store = new Store(Path.Combine(_dir, "store.db"));
@@ -165,9 +165,13 @@ public sealed class LaneSinkContractOverARealStore : LaneSinkContract, IDisposab
     protected override string? SessionOf(long lane) => _store.LanesAll().First(l => l.Id == lane).Session;
     protected override string PresenceOf(long lane) => _store.LanesAll().First(l => l.Id == lane).Presence;
 
+    /// <summary>The old comment here blamed "a WAL twin still held" and called the leftover the
+    /// OS's problem. It was neither: `Microsoft.Data.Sqlite` pools connections, so `_store.Dispose()`
+    /// handed `store.db` back to a pool rather than closing it, and this delete failed every single
+    /// run -- 574 of these were on the machine (issue #25).</summary>
     public void Dispose()
     {
         _store.Dispose();
-        try { Directory.Delete(_dir, recursive: true); } catch { /* a WAL twin still held: the temp dir is the OS's problem, not a test failure */ }
+        Dodona.Tests.TempTree.Delete(_dir);
     }
 }

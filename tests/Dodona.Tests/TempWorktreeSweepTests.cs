@@ -35,7 +35,7 @@ public sealed class TempWorktreeSweepTests : IDisposable
 
     public TempWorktreeSweepTests()
     {
-        _root = Path.Combine(Path.GetTempPath(), "dodona-sweeptest-" + Guid.NewGuid().ToString("N")[..8]);
+        _root = Dodona.Tests.TempTree.New("dodona-sweeptest-");
         _repo = Path.Combine(_root, "repo");
         _parent = Path.Combine(_root, "from");
         Directory.CreateDirectory(_repo);
@@ -114,6 +114,10 @@ public sealed class TempWorktreeSweepTests : IDisposable
     {
         foreach (var d in Directory.Exists(_parent) ? Directory.GetDirectories(_parent) : Array.Empty<string>())
             Git.Run(_repo, "worktree", "remove", "--force", d);
-        try { Directory.Delete(_root, recursive: true); } catch { }
+        // `TempTree.Delete`, not `Directory.Delete`: git writes its loose objects READ-ONLY, and a
+        // recursive delete throws `UnauthorizedAccessException` on the first one it meets. This
+        // Dispose looked correct and leaked on every run -- eight of these were on the machine
+        // within a day of the file being written (issue #25).
+        Dodona.Tests.TempTree.Delete(_root);
     }
 }
