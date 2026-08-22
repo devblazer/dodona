@@ -401,15 +401,21 @@ function Doubles-Balanced([string]$text) {
     return ($open -le $close)
 }
 
-# Every type declaration in tracked C# under src\ and tests\, with the attributes attached to it.
+# Every type declaration in C# under src\ and tests\, with the attributes attached to it.
 #
-# TRACKED, which is issue #15 in miniature: a file you have written but not `git add`ed is
-# invisible here, exactly as it is to the rest of Repo-Lint. Add before you lint.
+# TRACKED **AND** UNTRACKED (issue #15), through the same `Lint-Files` as the rest of Repo-Lint.
+# This said "tracked, which is issue #15 in miniature -- add before you lint", and it was not in
+# miniature: rung 1 is a static text scan precisely so that "a text scan cannot miss an assembly"
+# (plan 3.2), and the file list it scanned was undermining that. Demonstrated on the ticket -- a
+# new fake class read `clean: ... every double anchored` while untracked and was correctly refused
+# the moment it was staged, with nothing about the file changed in between. So the ORDINARY
+# sequence shipped the thing the mechanism exists to prevent: write the fake, lint, see clean,
+# commit -- and the file becomes tracked AT the commit, after the last chance to look at it.
 function Doubles-TypeSites {
     $sites = @()
     $decl = '^(?:(?:public|internal|private|protected|sealed|static|abstract|partial|file|new|unsafe|readonly|ref)\s+)*' +
             '(class|struct|interface|record(?:\s+(?:class|struct))?)\s+([A-Za-z_][A-Za-z0-9_]*)'
-    foreach ($rel in @(& git -C $repo ls-files 'src/*.cs' 'tests/*.cs' 2>$null)) {
+    foreach ($rel in @((Lint-Files @('src/*.cs', 'tests/*.cs')).All)) {
         $full = Join-Path $repo $rel
         if (-not (Test-Path $full)) { continue }              # staged-deleted, still listed
         $lines = @([System.IO.File]::ReadAllLines($full))

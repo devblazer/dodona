@@ -195,7 +195,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | `suites` | All seventeen, **three at a time** |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. PROVEN / VACUOUS (rewrite it) / MISSING (it never ran) |
 | `prove <suite>:<check> ...` | Same for MANY: grouped by suite, **one run per suite**. **Default to this form** — Phase 3 ran m0 eleven times to read eleven lines of one run's output, 46 min for what is 40 s |
-| `lint` | Control bytes, dangling `tests\*.ps1` refs in docs, mixed line endings, all of `dev ledger`'s static side, the double ledger's rung 1. ~1.5–2.5 s. **Tracked files only — `git add` first** or it has not seen what you wrote (issue #15) |
+| `lint` | Control bytes, dangling `tests\*.ps1` refs in docs, mixed line endings, all of `dev ledger`'s static side, the double ledger's rung 1, every wire command declared. ~1.5–2.5 s. **Tracked AND untracked** (issue #15) — `.gitignore` is the filter, and the verdict line states its scope |
 | `gate` | The pre-commit gate: the suites plus **ten asserted invariants**. `dev gate <suite>` runs the same machinery over less (~20 s), saying PARTIAL on every line |
 | `ship` | build + suites + publish |
 | `worktree <name>` | a tree of your own (§0.0) |

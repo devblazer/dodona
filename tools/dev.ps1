@@ -157,9 +157,47 @@ function LeakedAgentProcesses {
 
 # ---------------------------------------------------------------- the repo lint (I8, P5.1)
 
-# Two questions about the PROSE, both sub-second, both asked of TRACKED files only -- `git
-# ls-files` is the scope, so bin\, obj\, .dodona\ and other sessions' worktrees are excluded by
-# construction rather than by a pattern somebody has to maintain.
+# WHAT THE LINT LOOKS AT -- TRACKED **AND** UNTRACKED (issue #15).
+#
+# This was `git ls-files` alone, which lists only what git already knows about. So a file you had
+# written but not staged -- the normal state at the exact moment CLAUDE.md 1 tells you to run
+# `dev lint`, "directly after any scripted edit" -- was invisible to every rule, and the verdict
+# line still said `clean`. It was not wrong about what it looked at; it was silent about what it
+# skipped, and silence reads as approval.
+#
+# It put a broken reference on main TWICE IN ELEVEN MINUTES on 2026-08-21, by the same person,
+# minutes after they had written the explanation of the mistake into a commit message -- which is
+# why this is a change to the tool and not a note in the docs. The second instance is the one that
+# matters: `dev lint` had by then taken on the double ledger's rung 1, so an unanchored test double
+# could be written, linted ("every double anchored"), and committed -- and the file becomes tracked
+# AT the commit, so the check never runs again. The one moment the guarantee is needed was the one
+# moment it was blind.
+#
+# `--cached --others --exclude-standard` is the whole fix: the rules are pure functions over file
+# CONTENT and nothing about them needs the file to be tracked, and `.gitignore` is already the
+# right filter -- bin\, obj\, .dodona\, tests\*-output\ and other sessions' worktrees are excluded
+# by construction rather than by a pattern somebody has to maintain. Checking them beats refusing
+# while they exist, which was the other option this ticket offered.
+#
+# AND THE VERDICT LINE STATES ITS SCOPE, for the same reason `dev gate` says "on the 10 assertions
+# above, and only those": an unqualified `clean` is a claim about the repo, and this is a claim
+# about a file set.
+function Lint-Files([string[]]$patterns) {
+    $tracked = @(& git -C $repo ls-files --cached --exclude-standard -- $patterns 2>$null)   # lint-files-ok
+    $untracked = @(& git -C $repo ls-files --others --exclude-standard -- $patterns 2>$null) # lint-files-ok
+    [pscustomobject]@{
+        Tracked   = $tracked
+        Untracked = $untracked
+        All       = @($tracked) + @($untracked)
+    }
+}
+
+# How many files the last Repo-Lint actually opened, for the verdict line. A script variable
+# rather than a second return value because `Repo-Lint` returns problems to two call sites and a
+# shape change there is a change to what a green means.
+$script:LintScope = ''
+
+# Two questions about the PROSE, both sub-second.
 #
 # (i) NO CONTROL BYTES outside tab/CR/LF. This is not tidiness. The rule was written because a
 #     literal 0x08 in CLAUDE.md and in SKILL.md made the `tests\brain-acceptance.ps1` path in
@@ -246,7 +284,9 @@ function Surface-Static {
 
 function Repo-Lint {
     $problems = @()
-    $files = @(git -C $repo ls-files '*.md' '*.ps1' 2>$null)
+    $scope = Lint-Files @('*.md', '*.ps1')
+    $files = @($scope.All)
+    $script:LintScope = "$(@($scope.Tracked).Count) tracked + $(@($scope.Untracked).Count) untracked"
     foreach ($rel in $files) {
         $full = Join-Path $repo $rel
         if (-not (Test-Path $full)) { continue }          # staged-deleted, still listed
@@ -317,6 +357,32 @@ function Repo-Lint {
     $problems += @((Ledger-Static).Problems)
     $problems += @((Doubles-Static).Problems)
     $problems += @((Surface-Static).Problems)
+
+    # ...AND NOBODY ENUMERATES BEHIND `Lint-Files`'S BACK (issue #15).
+    #
+    # The fix for #15 was to make one function decide what the lint looks at. What can undo it is
+    # a THIRD site reaching for `git ls-files` directly -- which is how the two that existed came
+    # to disagree with the verdict line in the first place, and neither author did anything
+    # unreasonable: `ls-files` is the obvious way to ask git for the repo's files, and its silence
+    # about untracked ones is not written on it.
+    #
+    # So the rule is asserted rather than remembered, in the file it is about. `Lint-Files` itself
+    # is the one exemption, by line: it is the definition, and the two calls there are what the
+    # rest of the tooling routes through. Cheap enough to belong in a sub-second lint -- two files,
+    # read once.
+    foreach ($rel in @('tools\dev.ps1', 'tools\dev.ledger.ps1')) {
+        $full = Join-Path $repo $rel
+        if (-not (Test-Path $full)) { continue }
+        $n = 0
+        foreach ($text in @(Get-Content $full -ErrorAction SilentlyContinue)) {
+            $n++
+            # The INVOCATION shape, not the word: this rule's own message names the command.
+            if ($text -notmatch 'git\s+(?:-C\s+\S+\s+)?ls-files') { continue }
+            if ($text -match '^\s*#') { continue }                 # prose about the rule
+            if ($text -match 'lint-files-ok') { continue }          # the marker, spelled out below
+            $problems += ("{0}:{1} calls `git ls-files` directly -- that lists TRACKED files only, which is what made `dev lint` report clean over work it had never opened (issue #15). Go through Lint-Files." -f $rel, $n)   # lint-files-ok: this line NAMES the command it forbids
+        }
+    }
     return $problems
 }
 
@@ -2247,7 +2313,7 @@ function Do-Gate {
     # rung 1 are static parses of tracked files, which is what I8 already is.
     $lint = @(Repo-Lint)
     if ($lint.Count -eq 0) {
-        Say "  PASS  I8  repo lint clean: no control bytes, every named test path real, every ledger row resolves, every double anchored, every wire command declared"
+        Say "  PASS  I8  repo lint clean over $script:LintScope file(s): no control bytes, every named test path real, every ledger row resolves, every double anchored, every wire command declared"
     }
     else {
         Say "  FAIL  I8  repo lint found $($lint.Count) problem(s):"
@@ -2312,7 +2378,7 @@ switch ($Verb) {
         $l = @(Repo-Lint)
         # Readings, NOT assertions (plan 3.4): a number nobody has to keep inside a bound.
         foreach ($r in @((Ledger-Static).Readings) + @((Doubles-Static).Readings)) { Say "  note: $r" }
-        if ($l.Count -eq 0) { Say "clean: no control bytes, every named test path real, every ledger row resolves, every double anchored, every wire command declared" }
+        if ($l.Count -eq 0) { Say "clean over $script:LintScope file(s): no control bytes, every named test path real, every ledger row resolves, every double anchored, every wire command declared" }
         else { foreach ($x in $l) { Say "  $x" }; Say ""; Say "$($l.Count) problem(s)"; exit 1 }
     }
     'gate' { Do-Gate }
