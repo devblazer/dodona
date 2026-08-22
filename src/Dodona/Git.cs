@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 
 namespace Dodona;
 
@@ -113,6 +113,9 @@ static class Git
     public sealed class TempWorktree : IDisposable
     {
         readonly string _repo;
+        /// <summary>Where a cleanup failure gets SAID (issue #24). Optional so the no-op
+        /// instance and every existing caller stay unchanged.</summary>
+        readonly Action<string>? _say;
 
         /// <summary>The checkout, or null when there is none -- either nothing was asked for,
         /// or the checkout failed and <see cref="Error"/> says why.</summary>
@@ -121,36 +124,101 @@ static class Git
         /// <summary>Git's complaint when <see cref="For"/> could not check the ref out.</summary>
         public string Error { get; }
 
-        TempWorktree(string repo, string? path, string error) { _repo = repo; Path = path; Error = error; }
+        TempWorktree(string repo, string? path, string error, Action<string>? say = null) { _repo = repo; Path = path; Error = error; _say = say; }
 
         /// <summary>Nothing to do (returns a no-op) when <paramref name="spec"/> is null or is
         /// already a directory -- <c>--from &lt;worktree&gt;</c> is a tree the caller owns and
         /// must NOT be deleted by us.</summary>
-        public static TempWorktree None(string repo) => new(repo, null, "");
+        public static TempWorktree None(string repo) => new(repo, null, "", null);
 
         /// <summary>Check <paramref name="sha"/> out detached, under the temp directory. On
         /// failure it returns an instance whose <see cref="Path"/> is null and whose
         /// <see cref="Error"/> holds git's complaint -- never null, and never an `out`
         /// parameter, so the caller can keep this in a `using` inside a conditional
         /// expression (which is what an `out` here made impossible: CS0165).</summary>
-        public static TempWorktree For(string repo, string sha, string stamp)
+        public static TempWorktree For(string repo, string sha, string stamp, Action<string>? say = null)
         {
-            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dodona-from", stamp);
+            // `Paths.Home`, NOT `Path.GetTempPath()`. Its own comment is the rule this was
+            // breaking: "DODONA_HOME redirects the whole tree ... every acceptance suite must be
+            // able to [work] WITHOUT touching [what] the operator is using right now (§17)". A
+            // throwaway build tree is Dodona's own state (§5) and it was landing in the machine's
+            // real %TEMP% for every caller including the suites -- which is why nothing could test
+            // the sweep below without risking a force-delete of the operator's own leftovers.
+            // Nothing writes to `%TEMP%\dodona-from` after this commit; the thirteen already there
+            // were removed by hand in the same change.
+            var parent = System.IO.Path.Combine(Paths.Home, "from");
+            Sweep(repo, parent, stamp, say);
+            var dir = System.IO.Path.Combine(parent, stamp);
             var (code, output) = Run(repo, "worktree", "add", "--detach", dir, sha);
-            return code == 0 ? new TempWorktree(repo, dir, "") : new TempWorktree(repo, null, output);
+            return code == 0 ? new TempWorktree(repo, dir, "", say) : new TempWorktree(repo, null, output, say);
+        }
+
+        /// <summary>
+        /// TAKE OUT WHAT AN EARLIER PUBLISH COULD NOT (issue #24).
+        ///
+        /// <see cref="Dispose"/> is best-effort by design, and every failure it had was permanent:
+        /// nothing said so and nothing tried again, so one stuck delete became one leftover PER
+        /// PUBLISH, forever. Thirteen were found on this machine holding 103 MB — and the disk was
+        /// never the point. Git counts every one as a real checkout of the repository, so
+        /// `git worktree list` answered "where is this repo checked out" with thirteen fictional
+        /// entries against two real ones, and that question has already cost this repo a bad
+        /// commit once (§0.0).
+        ///
+        /// SWEEPING ON THE NEXT RUN IS WHAT MAKES IT SELF-HEALING, and it works because the holder
+        /// is TRANSIENT — measured 2026-08-22 rather than assumed, which the ticket asked for:
+        /// `git worktree remove --force` on a two-day-old leftover succeeded instantly, exit 0.
+        /// The publish builds INTO that tree, so MSBuild's reusable build nodes hold handles in its
+        /// `obj\` for a while after the build returns; by the next publish they are long gone.
+        /// A retry inside one publish would therefore have to outwait node reuse (15 minutes by
+        /// default) to buy what one line here buys for nothing.
+        ///
+        /// THE AGE GUARD IS NOT TIDINESS — it is the only thing making a CONCURRENT publish safe.
+        /// The stamp is a timestamp, so two publishes close together are two live directories, and
+        /// a sweep with no guard would delete a tree another process is mid-build in. Fifteen
+        /// minutes is deliberately the same number as node reuse: younger than that and the remove
+        /// would very likely fail anyway, so nothing is lost by leaving it to the next run.
+        /// </summary>
+        internal static void Sweep(string repo, string parent, string mine, Action<string>? say)
+        {
+            if (!Directory.Exists(parent)) return;
+            var cutoff = DateTime.UtcNow.AddMinutes(-15);
+            int gone = 0, stuck = 0;
+            foreach (var dir in Directory.GetDirectories(parent))
+            {
+                if (System.IO.Path.GetFileName(dir) == mine) continue;
+                try { if (Directory.GetCreationTimeUtc(dir) > cutoff) continue; } catch { continue; }
+                // git first: it removes the administrative record too, which `prune` will NOT do
+                // for a directory that still exists (the other half of why these accumulated).
+                if (Run(repo, "worktree", "remove", "--force", dir).Code == 0) { gone++; continue; }
+                try { Directory.Delete(dir, recursive: true); gone++; } catch { stuck++; }
+            }
+            if (gone > 0)
+            {
+                Run(repo, "worktree", "prune");
+                say?.Invoke($"swept {gone} leftover build tree(s) from {parent}");
+            }
+            if (stuck > 0) say?.Invoke($"could not sweep {stuck} leftover build tree(s) in {parent} -- still held; the next publish will try again");
         }
 
         public void Dispose()
         {
             if (Path is null) return;
             // Best effort: a failure here must never turn a good publish into a bad exit code.
-            // `prune` mops up the administrative record even if the directory itself is stuck.
+            // BUT IT MUST NOT BE SILENT ABOUT IT (issue #24). `Run` returns an exit code and this
+            // discarded it, so `git worktree remove` failing was not an exception, never reached
+            // the `catch`, and nobody has ever known it was happening -- the same silence at the
+            // wire as issue #9's ANSWERED NOTHING, one directory over. And `prune` does not cover
+            // it: prune drops the record for a worktree whose DIRECTORY IS GONE, and these are
+            // still there, so it correctly leaves them and the entry survives.
             try
             {
-                Run(_repo, "worktree", "remove", "--force", Path);
+                var (code, output) = Run(_repo, "worktree", "remove", "--force", Path);
                 Run(_repo, "worktree", "prune");
+                if (code != 0)
+                    _say?.Invoke($"could not remove the temporary build tree {Path} " +
+                                 $"({output.Trim()}) -- the publish is fine; the next one sweeps it");
             }
-            catch { }
+            catch (Exception ex) { _say?.Invoke($"could not remove the temporary build tree {Path} ({ex.Message})"); }
         }
     }
 }

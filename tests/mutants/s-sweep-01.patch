@@ -1,0 +1,36 @@
+# S-SWEEP 01. The age guard removed from the leftover sweep (issue #24), so it deletes every
+# defect: `dodona-from` directory it finds regardless of how young. The stamp is a timestamp, so
+# defect: two publishes started close together are two LIVE directories -- and a sweep with no
+# defect: guard takes the tree another process is mid-build in, out from under it.
+#
+# WHY THIS SHAPE. It is the smallest edit that keeps the enumeration and the `catch` intact: the
+# call to GetCreationTimeUtc stays, so an unreadable directory is still skipped and this cannot
+# redden through the error path instead of the guard. Only the comparison goes.
+#
+# THE PAIRED RED (plan 5.3):
+#
+# expects-red: unit:Dodona.Testing.TempWorktreeSweepTests.A_young_leftover_is_left_alone_because_another_publish_may_be_building_in_it
+#
+# THE CONTROLS. This line decides nothing else in the function. If any of these reddens, the
+# mutant is broad and the red above means nothing:
+#
+# expects-green: unit:Dodona.Testing.TempWorktreeSweepTests.An_old_leftover_goes_and_the_sweep_says_how_many
+# expects-green: unit:Dodona.Testing.TempWorktreeSweepTests.The_tree_this_publish_is_about_to_use_is_never_swept
+# expects-green: unit:Dodona.Testing.TempWorktreeSweepTests.Sweeping_a_directory_that_does_not_exist_is_not_an_error
+#
+# MEASURED 2026-08-22 at the commit that added the sweep: unit 427 checks, 1 failed, and the one
+# was the paired red. The other two guards have their own narrow mutants recorded in that commit
+# message (the `mine` skip compared as a full path; the sweep made a no-op), each reddening
+# exactly one check and no other.
+diff --git a/src/Dodona/Git.cs b/src/Dodona/Git.cs
+--- a/src/Dodona/Git.cs
++++ b/src/Dodona/Git.cs
+@@ -186,7 +186,7 @@ static class Git
+             foreach (var dir in Directory.GetDirectories(parent))
+             {
+                 if (System.IO.Path.GetFileName(dir) == mine) continue;
+-                try { if (Directory.GetCreationTimeUtc(dir) > cutoff) continue; } catch { continue; }
++                try { Directory.GetCreationTimeUtc(dir); } catch { continue; }
+                 // git first: it removes the administrative record too, which `prune` will NOT do
+                 // for a directory that still exists (the other half of why these accumulated).
+                 if (Run(repo, "worktree", "remove", "--force", dir).Code == 0) { gone++; continue; }

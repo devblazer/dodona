@@ -974,7 +974,12 @@ int Publish()
     // a publish picks up work that was never meant to ship.
     var from = One("from");
     var fromIsRef = from is not null && !Directory.Exists(from);
-    using var fromWt = fromIsRef ? Git.TempWorktree.For(repo, from!, stamp) : Git.TempWorktree.None(repo);
+    // The `say` is issue #24: cleanup is best-effort and must stay that way, but silence about a
+    // failure is what let thirteen throwaway checkouts of this repository accumulate unnoticed.
+    // Console.Error, not Out: publish's stdout is read by callers, and this is a notice.
+    using var fromWt = fromIsRef
+        ? Git.TempWorktree.For(repo, from!, stamp, m => Console.Error.WriteLine($"dodona: {m}"))
+        : Git.TempWorktree.None(repo);
     if (fromIsRef && fromWt.Path is null)
         return Fail($"--from {from}: could not check it out ({fromWt.Error.Trim()}) -- is it a ref or a directory?");
 
