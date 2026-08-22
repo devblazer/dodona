@@ -1358,7 +1358,7 @@ PRAGMA user_version = 8;
 
     # ---- rung 3: THE SENTENCE NAMES A PROJECT. Code, free, and no model is asked ----------
     P3 @("input", "tidy up the changelog in $($p3.BLeaf)") | Out-Null
-    Wait-Until { (P3Work) -eq $held4Before + 1 } 30000 'the named project gets a lane' | Out-Null
+    Wait-Until { ((P3Work) -eq $held4Before + 1) -and ((P3Cwd (P3NewestWorkLane)) -eq $p3.B) } 30000 'the named project gets a lane, and its cwd lands' | Out-Null
     $nLane = P3NewestWorkLane
     Check 'a_typed_sentence_naming_a_project_opens_a_lane_there' `
         ((P3Cwd $nLane) -eq $p3.B) "cwd='$(P3Cwd $nLane)' want='$($p3.B)'"
@@ -1380,7 +1380,7 @@ PRAGMA user_version = 8;
     # choose between and no model is asked. This is the operator's rung 2 in its common shape.
     $soleBefore = P3Work
     P3 @("input", "routekind:new-task shorten the footer as well") | Out-Null
-    Wait-Until { (P3Work) -eq $soleBefore + 1 } 30000 'the new task joins the live project' | Out-Null
+    Wait-Until { ((P3Work) -eq $soleBefore + 1) -and ((P3Cwd (P3NewestWorkLane)) -eq $p3.B) } 30000 'the new task joins the live project, and its cwd lands' | Out-Null
     $sLane = P3NewestWorkLane
     Check 'a_new_task_joins_the_only_project_with_a_live_lane' `
         ((P3Cwd $sLane) -eq $p3.B) "cwd='$(P3Cwd $sLane)' want='$($p3.B)'"
@@ -1402,7 +1402,7 @@ PRAGMA user_version = 8;
     # this section that names a project therefore names B. Worth knowing before writing another.
     $classBefore = P3Work
     P3 @("input", "routekind:new-task routeproject:2 add the missing footnote") | Out-Null
-    Wait-Until { (P3Work) -eq $classBefore + 1 } 30000 'the cheap tier chooses a project and a lane opens there' | Out-Null
+    Wait-Until { ((P3Work) -eq $classBefore + 1) -and ((P3Cwd (P3NewestWorkLane)) -eq $p3.B) } 30000 'the cheap tier chooses a project and a lane opens there, and its cwd lands' | Out-Null
     $cLane2 = P3NewestWorkLane
     Check 'several_live_projects_reach_the_cheap_tier' ((P3Classified) -ge 1) "classified_project events=$(P3Classified)"
     # The lane COUNT is in the assertion, not only in the wait: a classifier that answered `none`
@@ -1452,7 +1452,7 @@ PRAGMA user_version = 8;
     $taughtBefore = P3Work
     $taughtClassified = P3Classified
     P3 @("input", "the lantern needs a new bulb") | Out-Null
-    Wait-Until { (P3Work) -eq $taughtBefore + 1 } 30000 'the taught handle opens a lane in its project' | Out-Null
+    Wait-Until { ((P3Work) -eq $taughtBefore + 1) -and ((P3Cwd (P3NewestWorkLane)) -eq $p3.B) } 30000 'the taught handle opens a lane in its project, and its cwd lands' | Out-Null
     $tLane = P3NewestWorkLane
     Check 'a_taught_handle_opens_a_lane_in_its_project' `
         (((P3Work) -eq $taughtBefore + 1) -and ((P3Cwd $tLane) -eq $p3.B)) `
@@ -1496,7 +1496,7 @@ PRAGMA user_version = 8;
     $opChosen = [int](P3Rows "SELECT COUNT(*) FROM events WHERE kind='project_chosen'").Trim()
     # The SECOND project again: naming the first would be an assertion no build can fail.
     P3 @("input", "routekind:new-task $($p3.BLeaf) needs a changelog entry of its own") | Out-Null
-    Wait-Until { (P3Work) -eq $opBefore + 1 } 30000 'the operator-shaped sentence opens a lane' | Out-Null
+    Wait-Until { ((P3Work) -eq $opBefore + 1) -and ((P3Cwd (P3NewestWorkLane)) -eq $p3.B) } 30000 'the operator-shaped sentence opens a lane, and its cwd lands' | Out-Null
     $opLane = P3NewestWorkLane
     Check 'the_project_ladder_is_live_on_the_path_the_operator_uses' `
         (((P3Work) -eq $opBefore + 1) -and ((P3Cwd $opLane) -eq $p3.B)) `
@@ -1521,7 +1521,7 @@ PRAGMA user_version = 8;
     # assertion no build can fail -- the rule four VACUOUS verdicts taught this section.
     $ansBefore = P3Work
     $ans4 = P3 @("answer", $q4id, $p3.BLeaf)
-    Wait-Until { (P3Work) -eq $ansBefore + 1 } 30000 'answering the route question opens a lane' | Out-Null
+    Wait-Until { ((P3Work) -eq $ansBefore + 1) -and ((P3Cwd (P3NewestWorkLane)) -eq $p3.B) } 30000 'answering the route question opens a lane, and its cwd lands' | Out-Null
     $aLane = P3NewestWorkLane
     $aLaneId = if ($aLane -match '^\d+$') { $aLane } else { '-1' }
     # THE LANE COUNT IS PART OF THE ASSERTION, not only of the wait: this section keeps choosing
