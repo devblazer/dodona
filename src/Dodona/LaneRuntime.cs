@@ -10,8 +10,11 @@ namespace Dodona;
 /// and forwards user messages. If the daemon dies, the shim buffers; on reconnect the
 /// replay lands here and the store's UNIQUE(lane_id, seq) makes it exactly-once.
 ///
-/// M0 note: seq is per-shim-lifetime. A lane keeps one shim for its whole life in M0;
-/// per-connection epochs come with agent replacement (M1+).
+/// seq is per-shim-lifetime — the shim numbers by its own buffer index, so a NEW shim starts
+/// again at 0. This note used to end "a lane keeps one shim for its whole life in M0;
+/// per-connection epochs come with agent replacement (M1+)", and agent replacement arrived
+/// without the epoch: every line a respawned agent wrote collided with the dead one's rows and
+/// was dropped in silence. Built 2026-08-22 — <see cref="ILaneSink.SeqBase"/> has the incident.
 /// </summary>
 sealed class LaneRuntime
 {
@@ -22,6 +25,10 @@ sealed class LaneRuntime
     // shaped to hold them). See LaneSink.cs for why an interface was cheaper than either
     // a second parser or a schema bump.
     readonly ILaneSink _store;
+    /// <summary>Where THIS shim's numbering starts in the store (ILaneSink.SeqBase). Set from the
+    /// hello, before a single line is parsed, because the very first thing a fresh agent writes is
+    /// its `system init` at seq 0 — the row that used to vanish.</summary>
+    long _seqBase;
     StreamWriter? _writer;
     public volatile bool Connected;
     /// <summary>What this shim's wire says it speaks — read from the hello line, checked
@@ -73,7 +80,13 @@ sealed class LaneRuntime
             var hello = await helloTask;                       // "!hello proto=… shim=… child=… delivered=… buffered=…"
             var proto = System.Text.RegularExpressions.Regex.Match(hello ?? "", @"proto=(\d+)");
             if (proto.Success) ShimProtocol = int.Parse(proto.Groups[1].Value);
-            _store.Event("lane_connected", Id, hello);
+            // WHICH SHIM LIFETIME THIS IS — the question the seq epoch turns on (ILaneSink.SeqBase).
+            // Both pids together, not just the shim's: a pid is recycled by the OS eventually, and
+            // the pair colliding is the cost of a wrong answer here. Missing => empty => no rebase.
+            var sh = System.Text.RegularExpressions.Regex.Match(hello ?? "", @"shim=(\d+)");
+            var ch = System.Text.RegularExpressions.Regex.Match(hello ?? "", @"child=(\d+)");
+            _seqBase = _store.SeqBase(Id, sh.Success ? $"{sh.Groups[1].Value}:{(ch.Success ? ch.Groups[1].Value : "?")}" : "");
+            _store.Event("lane_connected", Id, $"{hello} seqbase={_seqBase}");
             Connected = true;
 
             _ = Task.Run(async () =>
@@ -226,7 +239,11 @@ sealed class LaneRuntime
         }
         catch { /* unparseable stays kind=wire, body=raw */ }
 
-        var rowId = _store.PaneEventId(Id, kind, body, seq, raw);
+        // OFFSET BY THIS SHIM'S EPOCH (ILaneSink.SeqBase). The shim numbers from its own buffer
+        // index, which restarts at 0 for every new process; the stored seq must keep rising for
+        // the lane, or UNIQUE(lane_id, seq) reads a fresh agent's first line as a duplicate of a
+        // dead one's and INSERT OR IGNORE drops it without a word.
+        var rowId = _store.PaneEventId(Id, kind, body, _seqBase + seq, raw);
 
         // The row is already written and the pane can already show it. Compression is a
         // later, optional improvement to a row that is complete without it (§5).

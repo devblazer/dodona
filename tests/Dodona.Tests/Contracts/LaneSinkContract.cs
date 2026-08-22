@@ -61,6 +61,55 @@ public abstract class LaneSinkContract
             "two null-seq rows must both land with distinct ids, got " + a + " and " + b);
     }
 
+    /// <summary>
+    /// A REPLACEMENT AGENT'S FIRST LINE IS NOT THE DEAD ONE'S FIRST LINE.
+    ///
+    /// The dedup case above is what makes shim replay exactly-once, and it is also what silently
+    /// ate every line a respawned agent wrote: a new shim numbers from its own buffer index, so
+    /// it opens at 0, and `INSERT OR IGNORE` on `UNIQUE(lane_id, seq)` read that as a redelivery.
+    /// Measured 2026-08-22 through `m3:wake_revives_the_lane` — a lane rendering alive, connected
+    /// and permanently mute, its `system init` row missing too.
+    ///
+    /// Three rungs, and the middle one is the reason this cannot just be "always rebase": the
+    /// SAME shim reconnecting after the daemon died is the replay the dedup exists for, and it
+    /// must get the same base back or every buffered line doubles.
+    /// </summary>
+    [Fact]
+    public void A_new_shim_numbers_above_the_dead_ones_rows_and_a_reconnect_does_not()
+    {
+        var lane = NewLane("WATER");
+        var first = Sink.SeqBase(lane, "100:200");
+        Assert.Equal(0, first);
+        Assert.True(Sink.PaneEventId(lane, "system", "init", first + 0, "{}") > 0);
+        Assert.True(Sink.PaneEventId(lane, "result", "water ready", first + 1, "{}") > 0);
+
+        // The SAME shim reconnecting: same base, so its replay still dedupes to nothing.
+        Assert.Equal(first, Sink.SeqBase(lane, "100:200"));
+        Assert.Equal(0, Sink.PaneEventId(lane, "result", "water ready", first + 1, "{}"));
+
+        // A REPLACEMENT shim: above everything stored, so its own seq 0 lands.
+        var second = Sink.SeqBase(lane, "300:400");
+        Assert.True(second > 1, $"a new shim must start above seq 1, got {second}");
+        Assert.True(Sink.PaneEventId(lane, "system", "init", second + 0, "{}") > 0,
+            "the replacement agent's first line was dropped as a duplicate -- this is the bug");
+        Assert.True(Sink.PaneEventId(lane, "result", "woke up fine", second + 1, "{}") > 0);
+
+        // A hello naming no shim rebases nothing: duplicates are worse than the bug (ILaneSink).
+        Assert.Equal(second, Sink.SeqBase(lane, ""));
+    }
+
+    /// <summary>NULL seqs are the daemon's own rows -- announcements, user_input -- and they must
+    /// not push a replacement shim's base, or the two numbering schemes start interfering.</summary>
+    [Fact]
+    public void A_null_seq_row_does_not_move_the_next_shims_base()
+    {
+        var lane = NewLane("SKY");
+        var first = Sink.SeqBase(lane, "1:2");
+        Assert.True(Sink.PaneEventId(lane, "result", "hello", first + 0, "{}") > 0);
+        for (var i = 0; i < 5; i++) Assert.True(Sink.PaneEventId(lane, "announcement", $"a{i}", null, null) > 0);
+        Assert.Equal(1, Sink.SeqBase(lane, "3:4"));
+    }
+
     [Fact]
     public void PaneEvent_agrees_with_PaneEventId()
     {

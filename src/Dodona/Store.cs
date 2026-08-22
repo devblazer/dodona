@@ -909,6 +909,40 @@ sealed class Store : IDisposable, ILaneSink
     public void LaneProject(long id, string project) => Set("UPDATE lanes SET project = $v WHERE id = $id;", id, project);
     public void LaneTitle(long id, string title) => Set("UPDATE lanes SET title = $v WHERE id = $id;", id, title);
 
+    /// <summary>See <see cref="ILaneSink.SeqBase"/> for what this is for and why it must persist.
+    ///
+    /// KV RATHER THAN A `lanes` COLUMN, DELIBERATELY. A schema bump is the one thing that makes a
+    /// hot swap not seamless (§14) — it makes the running daemon back up the store and migrate
+    /// before it can take the new build — and this needs nothing a column would buy. It is
+    /// bookkeeping about one shim's numbering, not a fact about the lane: `git revert` of this
+    /// commit leaves two stale kv rows nothing reads, where a column would leave a store the
+    /// previous build refuses to open.
+    ///
+    /// MAX(seq) is over the seq ALREADY OFFSET by an earlier base, so +1 is above everything
+    /// stored for this lane whatever numbering wrote it. NULL seqs — every daemon-written row,
+    /// announcements and user_input among them — are ignored by MAX, which is correct: they were
+    /// never part of the shim's numbering and cannot collide with it.</summary>
+    public long SeqBase(long laneId, string shimKey)
+    {
+        var kShim = $"seqshim:{laneId}";
+        var kBase = $"seqbase:{laneId}";
+        var recorded = long.TryParse(KvGet(kBase), out var kept) ? kept : 0L;
+        // Same shim lifetime => same base, so a reconnect's replay still dedupes exactly-once.
+        // No shim key => rebase nothing (see the interface: duplicates are worse than the bug).
+        if (shimKey.Length == 0 || KvGet(kShim) == shimKey) return recorded;
+        long next;
+        lock (_lock)
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = "SELECT COALESCE(MAX(seq), -1) + 1 FROM pane_events WHERE lane_id = $l;";
+            c.Parameters.AddWithValue("$l", laneId);
+            next = Convert.ToInt64(c.ExecuteScalar() ?? 0L);
+        }
+        KvSet(kShim, shimKey);
+        KvSet(kBase, next.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return next;
+    }
+
     public void KvSet(string key, string value)
     {
         lock (_lock)

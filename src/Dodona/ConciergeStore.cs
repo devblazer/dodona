@@ -160,6 +160,27 @@ sealed class ConciergeStore : IDisposable, ILaneSink
         },
         c => Convert.ToInt64(c.ExecuteScalar() ?? 0L));
 
+    /// <summary>See <see cref="ILaneSink.SeqBase"/>. The concierge's `wire` table carries the
+    /// SAME `UNIQUE(tier_id, seq)` dedup as the workspace store's `pane_events`, so it had the
+    /// same silent loss the moment a tier was respawned — and a tier is a long-lived management
+    /// session with a FIXED id (TierLo/TierHi, so the pipe name is stable across restarts), which
+    /// makes a replacement process land on exactly the same rows. Same fix, same kv reasoning,
+    /// same three lines.</summary>
+    public long SeqBase(long tierId, string shimKey)
+    {
+        var kShim = $"seqshim:{tierId}";
+        var kBase = $"seqbase:{tierId}";
+        var recorded = long.TryParse(KvGet(kBase), out var kept) ? kept : 0L;
+        if (shimKey.Length == 0 || KvGet(kShim) == shimKey) return recorded;
+        var next = Read(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM wire WHERE tier_id = $t;",
+            c => c.Parameters.AddWithValue("$t", tierId),
+            c => Convert.ToInt64(c.ExecuteScalar() ?? 0L));
+        KvSet(kShim, shimKey);
+        KvSet(kBase, next.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return next;
+    }
+
     public void LaneSession(long id, string session) =>
         Set("UPDATE tiers SET session_id = $v WHERE id = $id;", id, session);
 

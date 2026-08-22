@@ -616,6 +616,20 @@ paths already ensured first; the third, carrying the most traffic, did not. **St
 lives inside `DaemonClient.Send`**, so no call site can forget it — the same correction the routing
 ladder needed (§3: *ensure at the point of use*).
 
+**A RESPAWNED LANE WAS PERMANENTLY MUTE, AND LOOKED PERFECTLY HEALTHY** (2026-08-22). A shim numbers
+its lines by its own buffer index, so a **new** shim restarts at seq 0 — and `pane_events` dedupes
+shim replay with `UNIQUE(lane_id, seq)` + `INSERT OR IGNORE`. So every line a replacement agent wrote
+collided with the dead one's rows and was **dropped in silence**, its own `system init` included;
+`state`, `presence` and `session` are not seq-keyed, so the tile read alive-and-connected throughout.
+Hit `lane-respawn` (a lane-tile button) and the wake-after-a-night path, real agents and fake alike.
+`LaneRuntime`'s header had named the gap since M0 (*"per-connection epochs come with agent
+replacement (M1+)"*) and it was never built. Fixed by a per-shim-lifetime **seq base**
+(`ILaneSink.SeqBase`, keyed on the hello's `shim:child` pids, persisted in `kv` — **not** a column,
+because a schema bump is the one thing that makes a hot swap not seamless, §14). The concierge's
+`wire` table had the identical bug and the identical fix. **It survived a year of green gates because
+`m3:wake_revives_the_lane` asserted on `you> …` — the echo of the script the test had just sent, not
+on anything the agent said** (see `m3-acceptance.ps1`'s `PaneSaid`): the check could not fail.
+
 It survived because none of the five lane actions had a `ui` verb at all: **unreachable, not merely
 untested.** Second instance of the general rule: **an affordance no verb can reach is where the next
 defect will live**, because it is the one place a suite is physically unable to look. If you add

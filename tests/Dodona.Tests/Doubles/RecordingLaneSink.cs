@@ -87,6 +87,24 @@ sealed class RecordingLaneSink : ILaneSink
         return id;
     }
 
+    /// <summary>`Store.SeqBase`, in memory, and the same three rungs in the same order: a known
+    /// shim key gets its base back (a reconnect's replay must still dedupe), an empty key rebases
+    /// nothing, and anything else starts above every seq already recorded for this lane. NULL
+    /// seqs are skipped exactly as SQLite's MAX does — they were never the shim's numbering.</summary>
+    public long SeqBase(long laneId, string shimKey)
+    {
+        var kShim = $"seqshim:{laneId}";
+        var kBase = $"seqbase:{laneId}";
+        var recorded = Kv.TryGetValue(kBase, out var kept) && long.TryParse(kept, out var v) ? v : 0L;
+        if (shimKey.Length == 0 || (Kv.TryGetValue(kShim, out var prev) && prev == shimKey)) return recorded;
+        long max = -1;
+        foreach (var p in Panes) if (p.LaneId == laneId && p.Seq is { } s && s > max) max = s;
+        var next = max + 1;
+        Kv[kShim] = shimKey;
+        Kv[kBase] = next.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return next;
+    }
+
     public void LaneSession(long id, string session) => Sessions[id] = session;
 
     public void LanePresence(long id, string presence) => Presences.Add((id, presence));
