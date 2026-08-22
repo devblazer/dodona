@@ -1017,3 +1017,158 @@ prose.
 should redden the wire's owner, and an owner that stays green under a defect in its own wire is a
 finding, not a nuisance -- write it down and re-point the row. `dev prove --with` makes that
 mechanical, and it is exactly how E7 was caught.
+
+## The two gaps wave-1 slices hit, and what a slice writes now
+
+Both were found by slices doing other work, and both had the same shape: a disposition the
+vocabulary could not express, so the honest row could not be written and the work was left
+undone. Neither is a new decision -- 5.4 already decided the harness row, and `renamed`
+already existed. What was missing was a legal ROW.
+
+### GAP 1 -- an IN-SUITE rename now has a destination form of its own
+
+`renamed` was hard-wired to a `unit:` / `ui-unit:` destination, i.e. *"the name changed on the
+way DOWN a layer"*. A check whose NAME must change while it stays in its acceptance suite had
+no expressible disposition at all, so the slice that found one wrote nothing.
+
+That case is not hypothetical: three checks at `m1-acceptance.ps1:285-288` are named after a
+**fail-open path that no longer exists** (issue #4 enumerated every `return` in `GateHook` and
+there is none) and a **merge backstop that was retired** (D-R5 / R3). Their ASSERTIONS are
+sound -- `GateAllowedUnchecked` really is still called at `Program.cs:1029`/`:1038`, *"for the
+trace only; the verdict is below"* -- so deleting them loses coverage and moving them is not
+what is wrong with them. Only the names are wrong. `S-GATE` performs those renames; this is
+the row it writes.
+
+**The shape: `destination = suite:<suite>:<new_check>`**, on the existing `renamed`
+disposition.
+
+| decision | why this and not the alternative |
+|---|---|
+| a third DESTINATION form, not an eighth disposition word | the vocabulary is closed and 5.2 lists it; `suite:<suite>:<check>` is already the shape `merged` and `obsolete / duplicate-of` use to name a live check, so the reader learns one form, not two |
+| `old_check` still carries the OLD name | `baseline.tsv` is keyed on the check name and is FROZEN. The old name has to keep resolving there, or a rename reads as a removal -- which is the one thing the integrity rung exists to refuse |
+| the new name is carried in `destination`, so both names are in the row | the moves row is the only place the two names ever sit side by side; `baseline.tsv` cannot hold the new one and `added.tsv` must not (below) |
+| counted on its own `--verdict` line, apart from a rename that went down a layer | they are different events. One has a C# method behind it; the other has a check still running in its suite. A single `renamed` count would say neither |
+
+Four rungs refuse a bad one, and three of them are rungs that already existed pointed at a new
+subject:
+
+- the **reachability** rung, aimed at the NEW name: a rename to a name no suite registers is a
+  deletion with a row over it;
+- the **suite** clause: the named suite must be the one that registers the new name -- "in-suite"
+  is a claim the tool can check, so it checks it;
+- the **mirror** rung, the same one `obsolete` has: a row whose OLD name a suite still registers
+  is a rename declared and never performed, and then BOTH names run, which a name-keyed census
+  cannot hold;
+- the destination **shape**, and the unit-destination refusal now names the third form, so an
+  author who reaches for the wrong one is told the right one exists.
+
+**The new name is DECLARED BY ITS MOVES ROW on the `--live` side, not by `added.tsv`.** A
+rename is not growth: the frozen baseline row is the old name and the new one runs in its
+place. Putting it in `added.tsv` would report a rename as coverage going UP, in the one block
+whose entire job is arithmetic nobody can fudge.
+
+### GAP 2 -- the harness row is disposed of GLOBALLY, and no slice may claim it
+
+`no_process_left_in_the_build_output` is written by `tests\_workspace.ps1` into EVERY suite's
+results, so one name is **fifteen** `baseline.tsv` rows. The baseline has keyed it `suite`+`check`
+since W2 (`Ledger-Key`); the `claimed` set in the moves rung did **not** -- it keyed the bare
+name. So the first slice to put that row in `moves\<slice>.tsv` would have disposed of all
+fifteen suites' rows with one line and locked the other fourteen out of a name that was never
+one slice's to give away. Two wave-1 slices noticed and deliberately left the row alone; that
+is a landmine being walked around, not defused.
+
+Both halves are fixed, and they are two different fixes:
+
+1. **`claimed` keys on `Ledger-Key`**, like the other three sites that key a name. A suite check
+   still keys bare (W6's suite rename stays free); a `unit` row keys `unit/<name>`, so a suite
+   check and its unit descendant are two disposals rather than one.
+2. **A moves row naming a harness name is REFUSED**, and the refusal names the global rule. The
+   plan already disposed of these rows (5.4: `stays / harness-hygiene`, *"not deduplicable"*), so
+   `dev ledger` applies that decision ITSELF: the fifteen rows come out of `unaccounted` and are
+   reported on a `harness (global)` line of their own. Derived from `Ledger-HarnessNames`, like
+   the uniqueness exemption -- nothing is hand-listed, so a second harness row is handled the day
+   it appears.
+
+Measured on this tree: `unaccounted` went **915 -> 900**, which is exactly the fifteen rows
+moving from "nobody has dealt with this" to "dealt with, here, and printed".
+
+### The refusals, each produced by hand against this tree, verbatim
+
+`dev prove` cannot judge `dev.ps1`, so the same standard as W2's rungs: a fixture
+`moves\z-rename-fixture.tsv` / `moves\z-harness-fixture.tsv` carried the rows, the output was
+copied out, and both files were deleted afterwards (`git status` clean of them). Every run
+exits **1**.
+
+| what was wrong | the literal refusal |
+|---|---|
+| a slice claiming the harness row | `moves\z-harness-fixture.tsv:2 claims 'no_process_left_in_the_build_output', which is a HARNESS row -- tests\_workspace.ps1 writes it into EVERY suite's results, so it is 15 baseline row(s) under one name. It is disposed of GLOBALLY (plan 5.4: stays / harness-hygiene, not deduplicable) and dev ledger accounts for it itself -- see the 'harness (global)' line in --verdict. A per-slice row claims the bare name and LOCKS OUT every other suite's row, so there is no such thing as one slice's share of it` |
+| an in-suite rename to a name no suite registers | `moves\z-rename-fixture.tsv:2 is an IN-SUITE rename to 'a_check_nobody_registers_any_more', which no suite registers -- the new name must EXIST, or the rename is a deletion with a row over it (the reachability rung, D-T6)` |
+| an in-suite rename whose OLD name is still registered | `moves\z-rename-fixture.tsv:3 is an IN-SUITE rename of 'gate_denies_a_plain_lane_writing_the_shared_checkout', which a suite STILL registers -- the row is written in the commit that performs the rename, so this one was declared and never done. Both names would run and baseline.tsv, keyed on the CHECK NAME, can hold only one` |
+| the destination naming the wrong suite | `moves\z-rename-fixture.tsv:4 says the rename lands in suite 'm0', but 'an_async_land_still_advances_main' is registered in m1 -- an IN-SUITE rename changes the NAME and not the suite` |
+| a malformed in-suite destination | `moves\z-rename-fixture.tsv:5 destination 'suite:m1' must be 'suite:<suite>:<new_check>' for an IN-SUITE rename -- the suite the check still runs in, and the name it runs under now` |
+| a destination with an unknown prefix, on a `renamed` row | `moves\z-rename-fixture.tsv:6 destination 'm1:an_async_land_still_advances_main' must be 'unit:<FQN>' or 'ui-unit:<FQN>' -- two prefixes because dev prove --with has to know which project to build, or 'suite:<suite>:<new_check>' for an IN-SUITE rename, which changes the name and not the layer` |
+
+### The controls -- what did NOT go red
+
+A refusal that fires on everything is worth nothing, so a correct row was run beside them. One
+row, `m1:event_land_conflict` renamed to `suite:m1:an_async_land_still_advances_main`:
+
+```
+clean: 691 registration site(s), no duplicate name, every ledger row resolves
+```
+
+exit **0**, and it is counted on its own line and printed by `--slice`:
+
+```
+  renamed to unit     1   (the name changed on the way down; the method exists)
+  renamed in suite    1   (the name changed, the LAYER did not; both names recorded)
+...
+  unaccounted           899   <- MUST BE 0
+```
+
+```
+  renamed (1)
+    m1:event_land_conflict                                     RENAMED IN SUITE -> an_async_land_still_advances_main
+```
+
+`unaccounted` fell by one against the 900 above, which is the row doing its job.
+
+**The control had to borrow the same thing the `obsolete` control borrowed, and for the same
+reason.** A correct in-suite rename needs a baseline name that **no suite registers any more**,
+and at this commit every such name is already claimed by a `moves\` row -- a name is disposed
+of exactly once. The one available family is the 22 **loop-generated** names (`event_*`,
+`resolution_recorded_*`), which the static scanner cannot see at all, so the mirror rung is
+satisfied over one. That is a documented gap (5.4: reachability for a loop-generated name is
+satisfied on `--live` only) being used as a fixture, and it does not weaken the other three
+rungs, which are all about the new name and fired.
+
+### The `--live` declaration, and how it was read
+
+Proved by contrast rather than by a clean run, because at this commit **no registered suite
+check is absent from `baseline.tsv`** (688 live names, 0 missing) -- so no fixture can produce
+"a name ran that the baseline does not have" without also being a name no suite registers,
+which the static rung refuses on its own account. A synthetic `tests\m1-output\results.json`
+(gitignored, no daemon, nothing started) carrying one unknown name gives:
+
+```
+1 name(s) ran and are in neither baseline.tsv nor added.tsv: m1:z_fixture_live_name. Growth is
+DECLARED, so a loss cannot hide inside it
+```
+
+Add a `renamed` row whose destination is `suite:m1:z_fixture_live_name` and **that line is
+gone**, leaving only the static rung's own refusal of the fabricated name. The undeclared line
+disappearing is the reading: the moves row is what declared it. Both fixtures were deleted.
+
+### What is NOT done
+
+- **The in-suite rename does not require a mutant or a red.** A rename changes no assertion, so
+  a paired red would be proving something the row does not claim -- and the existing `renamed`
+  row (`s-publish.tsv`, a rename on the way down) carries one only because the MOVE needed it.
+  If a slice ever renames AND narrows in one row, nothing here catches that; reading the diff
+  does, and 5.3 already says co-sensitivity is not equivalence.
+- **`--verdict`'s `stays` line still reports `harness-hygiene 0`.** The fifteen harness rows are
+  on their own line and are deliberately not folded into the `stays` reason breakdown, because
+  `stays` counts moves ROWS and there are none for them. The two numbers are consistent; they
+  are just not the same number.
+- **Nothing asserts that the fifteen harness baseline rows are one per suite.** They are, today.
+  It is a reading nobody has needed yet.

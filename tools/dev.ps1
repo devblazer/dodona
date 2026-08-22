@@ -2843,6 +2843,12 @@ function Ledger-Static {
         $out.Problems += "$(Split-Path -Leaf $p.File):$($p.Line) will not parse -- $($p.ParseError)"
     }
     $out.Problems += (Ledger-DupProblems $sites)
+    # Hoisted out of the baseline block: the moves rung keys names too, and it has to key them
+    # the SAME way (Ledger-Key), which needs this set. Four sites key a name now -- the capture,
+    # the integrity rung, the live rung and the moves rung -- and the last one used to key on
+    # the bare check while the baseline keyed harness rows suite+check. That disagreement is
+    # what made ONE slice able to claim a fifteen-row name.
+    $harness = Ledger-HarnessNames $sites
 
     $baseline = Ledger-ReadTsv (Join-Path $dir 'baseline.tsv') @('check', 'suite', 'cases')
     $added = Ledger-ReadTsv (Join-Path $dir 'added.tsv') @('check', 'suite', 'reason')
@@ -2893,7 +2899,6 @@ function Ledger-Static {
         # integrity rung, and this one still built its own case-insensitive key, so the very
         # baseline the fixed capture produced was rejected by the static rung on the next run.
         $seen = Ledger-NewSet
-        $harness = Ledger-HarnessNames $sites
         foreach ($r in $baseline.Rows) {
             $key = Ledger-Key $r.suite $r.check $harness
             if ($seen.ContainsKey($key)) { $out.Problems += "baseline.tsv:$($r._line) repeats the key '$key'" }
@@ -2951,10 +2956,27 @@ function Ledger-Static {
                     $out.Problems += "$at disposition '$($r.disposition)' is outside the closed vocabulary [$($dispositions -join ' ')] -- so it cannot become a shrug (D-T21)"
                     continue
                 }
-                if ($claimed.ContainsKey($r.old_check)) {
-                    $out.Problems += "$at claims '$($r.old_check)', already claimed by $($claimed[$r.old_check]) -- a name is disposed of exactly once"
+                # THE HARNESS ROW IS DISPOSED OF GLOBALLY, AND NO SLICE OWNS A SHARE OF IT.
+                # tests\_workspace.ps1 writes one name into EVERY suite's results, so that one
+                # name is fifteen baseline rows. `claimed` keyed the BARE name, so the first
+                # slice to write the row would have disposed of all fifteen and locked the other
+                # fourteen suites out of a name that is not theirs to give away -- two wave-1
+                # slices spotted it and left the row alone rather than take that bet. The
+                # decision the plan already made (5.4: stays / harness-hygiene, not
+                # deduplicable) is applied by the tool itself, on --verdict's own line.
+                if ($harness.ContainsKey($r.old_check)) {
+                    $hrows = if ($baseline.Present) { @($baseline.Rows | Where-Object { $_.check -eq $r.old_check }).Count } else { 0 }
+                    $out.Problems += "$at claims '$($r.old_check)', which is a HARNESS row -- tests\_workspace.ps1 writes it into EVERY suite's results, so it is $hrows baseline row(s) under one name. It is disposed of GLOBALLY (plan 5.4: stays / harness-hygiene, not deduplicable) and dev ledger accounts for it itself -- see the 'harness (global)' line in --verdict. A per-slice row claims the bare name and LOCKS OUT every other suite's row, so there is no such thing as one slice's share of it"
+                    continue
                 }
-                $claimed[$r.old_check] = $at
+                # The SAME key the baseline is keyed on (Ledger-Key), so the two cannot
+                # disagree: a suite check keys bare, a unit method keys unit/<name>, which is
+                # what lets a suite check and its unit descendant be disposed of separately.
+                $claimKey = Ledger-Key $r.old_suite $r.old_check $harness
+                if ($claimed.ContainsKey($claimKey)) {
+                    $out.Problems += "$at claims '$claimKey', already claimed by $($claimed[$claimKey]) -- a name is disposed of exactly once"
+                }
+                $claimed[$claimKey] = $at
                 if ($baseline.Present -and @($baseline.Rows | Where-Object { $_.check -eq $r.old_check }).Count -eq 0) {
                     $out.Problems += "$at names '$($r.old_check)', which is in no baseline.tsv row"
                 }
@@ -3036,10 +3058,49 @@ function Ledger-Static {
                     $out.Problems += "$at is '$($r.disposition)' with no destination"
                     continue
                 }
+                # AN IN-SUITE RENAME -- the third destination form, and the gap it closes is a
+                # real one: `renamed` was hard-wired to a unit:/ui-unit: destination, so a check
+                # that must change its NAME while staying in its acceptance suite had no legal
+                # row at all, and the slice that hit that left the work undone rather than write
+                # an illegal one. (The case: three m1 checks named after a fail-open path issue
+                # #4 established does not exist and a merge backstop D-R5 retired, whose
+                # ASSERTIONS are still sound -- so they must be renamed in place, never deleted
+                # and never moved.) The form is suite:<suite>:<new_check>, the same shape
+                # `merged` and `obsolete / duplicate-of` already use to name a live check, and
+                # it is what makes both names recorded: old_check keeps resolving against the
+                # FROZEN baseline, so a rename can never read as a removal.
+                $inSuiteRename = ($r.disposition -eq 'renamed' -and $r.destination -like 'suite:*')
+                if ($inSuiteRename) {
+                    $parts = @($r.destination -split ':', 3)
+                    if ($parts.Count -ne 3 -or $parts[1] -eq '' -or $parts[2] -eq '') {
+                        $out.Problems += "$at destination '$($r.destination)' must be 'suite:<suite>:<new_check>' for an IN-SUITE rename -- the suite the check still runs in, and the name it runs under now"
+                        continue
+                    }
+                    $newSuite = $parts[1]; $newCheck = $parts[2]
+                    # The reachability rung, pointed at the NEW name. Same authority the
+                    # kept/stays rung uses on the old one: a rename whose new name no suite
+                    # registers is a deletion with a row over it.
+                    $reg = @($sites | Where-Object { -not $_.Dynamic -and $_.Check -eq $newCheck })
+                    if ($reg.Count -eq 0) {
+                        $out.Problems += "$at is an IN-SUITE rename to '$newCheck', which no suite registers -- the new name must EXIST, or the rename is a deletion with a row over it (the reachability rung, D-T6)"
+                    }
+                    elseif (@($reg | Where-Object { $_.Suite -eq $newSuite }).Count -eq 0) {
+                        $out.Problems += "$at says the rename lands in suite '$newSuite', but '$newCheck' is registered in $(($reg | Select-Object -ExpandProperty Suite -Unique) -join ', ') -- an IN-SUITE rename changes the NAME and not the suite"
+                    }
+                    # THE MIRROR, and it is the same one `obsolete` has: the row is written in
+                    # the commit that PERFORMS the rename. An old name a suite still registers
+                    # is a rename declared and not done -- and then both names run, which the
+                    # census, keyed on the check name, cannot hold.
+                    if ($stillThere) {
+                        $out.Problems += "$at is an IN-SUITE rename of '$($r.old_check)', which a suite STILL registers -- the row is written in the commit that performs the rename, so this one was declared and never done. Both names would run and baseline.tsv, keyed on the CHECK NAME, can hold only one"
+                    }
+                    continue
+                }
                 if (@('moved', 'renamed') -contains $r.disposition) {
                     $parts = @($r.destination -split ':', 2)
                     if ($parts.Count -ne 2 -or @('unit', 'ui-unit') -notcontains $parts[0]) {
-                        $out.Problems += "$at destination '$($r.destination)' must be 'unit:<FQN>' or 'ui-unit:<FQN>' -- two prefixes because dev prove --with has to know which project to build"
+                        $third = if ($r.disposition -eq 'renamed') { ", or 'suite:<suite>:<new_check>' for an IN-SUITE rename, which changes the name and not the layer" } else { '' }
+                        $out.Problems += "$at destination '$($r.destination)' must be 'unit:<FQN>' or 'ui-unit:<FQN>' -- two prefixes because dev prove --with has to know which project to build$third"
                         continue
                     }
                     $leaf = @($parts[1] -split '\.')[-1]
@@ -3173,6 +3234,16 @@ function Ledger-Live($static) {
         foreach ($r in $static.Baseline.Rows) { $base[(Ledger-Key $r.suite $r.check $harness)] = $r }
         $declared = Ledger-NewSet
         if ($static.Added.Present) { foreach ($r in $static.Added.Rows) { $declared[(Ledger-Key $r.suite $r.check $harness)] = $r } }
+        # AN IN-SUITE RENAME'S NEW NAME IS DECLARED BY ITS MOVES ROW, not by added.tsv. It is
+        # not growth: the frozen baseline row is the OLD name and the new one runs in its place,
+        # so counting it as `added (declared)` would report a rename as coverage going up, in
+        # the one block whose whole job is arithmetic nobody can fudge. baseline.tsv is frozen,
+        # so the new name cannot go there either -- the moves row is the only place both names
+        # exist side by side, which is why it carries both.
+        foreach ($m in @($static.Moves | Where-Object { $_.disposition -eq 'renamed' -and $_.destination -like 'suite:*' })) {
+            $p = @($m.destination -split ':', 3)
+            if ($p.Count -eq 3) { $declared[(Ledger-Key $p[1] $p[2] $harness)] = $m }
+        }
         $undeclared = @()
         foreach ($s in @($out.Suite.Keys)) {
             foreach ($k in $out.Suite[$s].Keys) {
@@ -3289,6 +3360,11 @@ function Ledger-Slice($static, [string]$name) {
                 'moved' { if ($r.red_old -and $r.red_new -and $r.mutation) { "PAIRED RED under $($r.mutation)" } else { 'NOT PROVED' } }
                 'merged' { "into $($r.destination) on $($r.wire)" }
                 'obsolete' { "COVERAGE REMOVED -- $(@($r.note -split '[ :,]')[0])" }
+                # The two renames read differently on purpose: one changed layer, one did not.
+                'renamed' {
+                    if ($r.destination -like 'suite:*') { "RENAMED IN SUITE -> $(@($r.destination -split ':', 3)[2])" }
+                    else { "RENAMED DOWN -> $($r.destination)" }
+                }
                 default { if ($r.wire) { "on $($r.wire)" } else { $r.note } }
             }
             Say ("    {0,-58} {1}" -f "$($r.old_suite):$($r.old_check)", $proof)
@@ -3303,10 +3379,31 @@ function Ledger-Verdict($static) {
     $liveNames = @($sites | Select-Object -ExpandProperty Check -Unique)
     $by = @{}
     foreach ($d in @(Ledger-Dispositions)) { $by[$d] = @($moves | Where-Object { $_.disposition -eq $d }).Count }
-    $accounted = @{}
-    foreach ($r in $moves) { $accounted[$r.old_check] = $true }
-    $unaccounted = 0
-    if ($b.Present) { $unaccounted = @($b.Rows | Where-Object { -not $accounted.ContainsKey($_.check) }).Count }
+    # The two renames are counted apart, because they are different events: one took the name
+    # DOWN A LAYER (there is a C# method behind it), the other changed a name inside its own
+    # acceptance suite (the check is still there, running, under the new name). A single
+    # `renamed` count would hide which of the two happened, and this block is the one place the
+    # arithmetic is read.
+    $renamedRows = @($moves | Where-Object { $_.disposition -eq 'renamed' })
+    $renInSuite = @($renamedRows | Where-Object { $_.destination -like 'suite:*' }).Count
+    $renDown = $renamedRows.Count - $renInSuite
+    # ORDINAL, and Ledger-Key -- the fourth site that keys a name, and the one that used to
+    # disagree with the other three (a bare, case-insensitive @{}). It matters twice over: a
+    # unit row and a suite row of the same name are two disposals, and `A_x` is not `a_x`.
+    $harness = Ledger-HarnessNames $static.Sites
+    $accounted = Ledger-NewSet
+    foreach ($r in $moves) { $accounted[(Ledger-Key $r.old_suite $r.old_check $harness)] = $true }
+    $unaccounted = 0; $harnessRows = 0
+    if ($b.Present) {
+        # HARNESS ROWS ARE ACCOUNTED FOR HERE and never in a moves file. One name written by
+        # tests\_workspace.ps1 into every suite's results is one baseline row per suite, so no
+        # slice can own it: the plan already disposed of it (5.4, stays / harness-hygiene, not
+        # deduplicable) and this line is that disposition being reported rather than re-argued.
+        $harnessRows = @($b.Rows | Where-Object { $harness.ContainsKey($_.check) }).Count
+        $unaccounted = @($b.Rows | Where-Object {
+                -not $harness.ContainsKey($_.check) -and -not $accounted.ContainsKey((Ledger-Key $_.suite $_.check $harness))
+            }).Count
+    }
 
     $reasonCounts = @{}
     foreach ($r in @($moves | Where-Object { $_.disposition -eq 'stays' })) {
@@ -3348,6 +3445,8 @@ function Ledger-Verdict($static) {
     Say ("  baseline            {0} names, frozen at {1}   ({2} suite + {3} unit methods; {4} cases)" -f $baseCount, $frozenAt, $suiteRows, $unitRows, $cases)
     Say ("  live in suite       {0}" -f $liveNames.Count)
     Say ("  moved to unit       {0}   (each with a mutant and two recorded reds)" -f $by['moved'])
+    Say ("  renamed to unit     {0}   (the name changed on the way down; the method exists)" -f $renDown)
+    Say ("  renamed in suite    {0}   (the name changed, the LAYER did not; both names recorded)" -f $renInSuite)
     Say ("  merged into         {0}   (each naming a LIVE survivor and a wire)" -f $by['merged'])
     $rs = @()
     foreach ($w in @('process-fact', 'git-ref-mutation', 'real-window', 'timing', 'absence-of-process', 'wire-shape', 'harness-hygiene')) {
@@ -3360,6 +3459,9 @@ function Ledger-Verdict($static) {
     foreach ($w in @(Ledger-ObsoleteEvidence)) { $os += "$w $(if ($obsCounts.ContainsKey($w)) { $obsCounts[$w] } else { 0 })" }
     Say ("  obsolete              {0}   <- REDUCES COVERAGE, never folded into moved or stays." -f $by['obsolete'])
     Say ("                            by evidence: {0}" -f ($os -join ', '))
+    Say ("  harness (global)     {0}   <- one baseline row per suite, written by tests\_workspace.ps1;" -f $harnessRows)
+    Say  "                            disposed of HERE and never in a moves file (plan 5.4:"
+    Say  "                            stays / harness-hygiene, not deduplicable)"
     Say ("  unaccounted           {0}   <- MUST BE 0" -f $unaccounted)
     Say ("  added (declared)      {0}" -f $addedCount)
     Say "INTEGRATION CHECKS"
