@@ -62,10 +62,26 @@ sealed class Registry : IDisposable
 {
     readonly SqliteConnection _db;
 
-    public Registry()
+    /// <summary>The live registry: the one machine-wide file under DODONA_HOME. Production
+    /// reaches the constructor below through THIS line and no other, which is the property
+    /// that stops an overload becoming a second implementation (the `Trees.Locate` shape,
+    /// docs/testarch/seams.md).</summary>
+    public Registry() : this(Paths.Registry) { }
+
+    /// <summary>The same registry over a NAMED file - seam S5 (docs/testarch/seams.md), and
+    /// what it buys is two isolated registries in ONE process. That is not a convenience: it
+    /// is what `the_registry_under_dodona_home_is_the_live_one` actually asserts - open the
+    /// path the binary reported, in a second connection, and find the workspace the first one
+    /// wrote. A `HashSet` stand-in could never answer it, because the thing being asked about
+    /// is the file (plan 3.5: never fake `Registry`; the partial unique index is the real
+    /// arbiter, and a fake enforces something else).
+    ///
+    /// Behaviour-neutral: `Path.GetDirectoryName(Paths.Registry)` IS `Paths.ConciergeDir`, so
+    /// the parameterless path creates exactly the directory it always did.</summary>
+    public Registry(string dbPath)
     {
-        Directory.CreateDirectory(Paths.ConciergeDir);
-        _db = new SqliteConnection($"Data Source={Paths.Registry}");
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath) ?? Paths.ConciergeDir);
+        _db = new SqliteConnection($"Data Source={dbPath}");
         _db.Open();
         Exec("PRAGMA journal_mode=WAL;");
         Exec("PRAGMA synchronous=FULL;");

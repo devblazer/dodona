@@ -40,8 +40,17 @@ static class Repos
     static readonly HashSet<string> Skip = new(StringComparer.OrdinalIgnoreCase)
         { ".dodona", ".git", "node_modules", "bin", "obj", "packages", "vendor", ".vs", ".idea", "target", "dist" };
 
-    static bool LooksLikeRepo(string dir) =>
-        Directory.Exists(Path.Combine(dir, ".git")) || File.Exists(Path.Combine(dir, ".git"));
+    static bool LooksLikeRepo(string dir, Func<string, bool> dirExists, Func<string, bool> fileExists) =>
+        dirExists(Path.Combine(dir, ".git")) || fileExists(Path.Combine(dir, ".git"));
+
+    /// <summary>The real directory listing, carrying the unreadable-directory swallow that
+    /// <see cref="Under"/> has always had. Named rather than inlined so the live overloads
+    /// below bind one thing instead of repeating a lambda three times.</summary>
+    static string[] ListDirs(string dir)
+    {
+        try { return Directory.GetDirectories(dir); }
+        catch { return Array.Empty<string>(); }
+    }
 
     /// <summary>
     /// Every repository in the workspace, named workspace-relatively.
@@ -58,10 +67,21 @@ static class Repos
     /// become a claim-routing collision, which is a correctness problem rather than a
     /// cosmetic one. (Decision recorded in WORKSPACES-CONCIERGE.md §2.1.)
     /// </summary>
-    public static List<RepoRef> Discover(List<Member> members, int maxDepth = 2)
+    public static List<RepoRef> Discover(List<Member> members, int maxDepth = 2) =>
+        Discover(members, maxDepth, Directory.Exists, File.Exists, ListDirs);
+
+    /// <summary>The same discovery over an INJECTED filesystem - seam S10
+    /// (docs/testarch/seams.md), the `Trees.Locate` shape: production binds the real
+    /// predicates in the overload above and therefore keeps exactly ONE path, while the naming
+    /// rules (the member prefix, the `leaf~2` de-collision, the degenerate ".") become
+    /// answerable without a `git init` per case. Those rules are not cosmetic - a display
+    /// collision becomes a claim-routing collision, which is the P0.1 incident.</summary>
+    public static List<RepoRef> Discover(List<Member> members, int maxDepth,
+                                         Func<string, bool> dirExists, Func<string, bool> fileExists,
+                                         Func<string, string[]> listDirs)
     {
         if (members.Count == 0) return new List<RepoRef>();
-        if (members.Count == 1) return Under(members[0].Path, "", maxDepth);
+        if (members.Count == 1) return Under(members[0].Path, "", maxDepth, dirExists, fileExists, listDirs);
 
         var found = new List<RepoRef>();
         var usedLeaves = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -71,32 +91,37 @@ static class Repos
             if (leaf.Length == 0) leaf = m.Path.Replace('\\', '-').Replace(':', '-').Trim('-');
             var unique = leaf;
             for (int n = 2; !usedLeaves.Add(unique); n++) unique = $"{leaf}~{n}";
-            found.AddRange(Under(m.Path, unique, maxDepth));
+            found.AddRange(Under(m.Path, unique, maxDepth, dirExists, fileExists, listDirs));
         }
         return found.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     /// <summary>Single-root discovery — the shape this method has always had. `prefix` is
     /// empty for a one-member workspace, which is what makes that case unchanged.</summary>
-    public static List<RepoRef> Under(string root, string prefix = "", int maxDepth = 2)
+    public static List<RepoRef> Under(string root, string prefix = "", int maxDepth = 2) =>
+        Under(root, prefix, maxDepth, Directory.Exists, File.Exists, ListDirs);
+
+    /// <summary>The same walk over an INJECTED filesystem (seam S10). The overload above is
+    /// the only thing production calls; see `Discover` for why that matters.</summary>
+    public static List<RepoRef> Under(string root, string prefix, int maxDepth,
+                                      Func<string, bool> dirExists, Func<string, bool> fileExists,
+                                      Func<string, string[]> listDirs)
     {
         // A repository's insides are its own business: if the root is one, that is the
         // whole answer, and anything below is a submodule or a vendored copy.
-        if (LooksLikeRepo(root))
+        if (LooksLikeRepo(root, dirExists, fileExists))
             return new List<RepoRef> { new(prefix.Length == 0 ? "." : prefix, root, root) };
 
         var found = new List<RepoRef>();
         void Walk(string dir, int depth)
         {
             if (depth > maxDepth) return;
-            string[] children;
-            try { children = Directory.GetDirectories(dir); }
-            catch { return; }
+            var children = listDirs(dir);
             foreach (var child in children)
             {
                 var name = Path.GetFileName(child);
                 if (name.Length == 0 || Skip.Contains(name)) continue;
-                if (LooksLikeRepo(child))
+                if (LooksLikeRepo(child, dirExists, fileExists))
                 {
                     var rel = Path.GetRelativePath(root, child).Replace('\\', '/');
                     found.Add(new RepoRef(prefix.Length == 0 ? rel : $"{prefix}/{rel}", child, root));

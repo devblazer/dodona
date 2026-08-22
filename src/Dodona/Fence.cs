@@ -38,7 +38,17 @@ static class Fence
     /// <summary>Where rung 3 may look. Deduped case-insensitively, and deliberately NOT
     /// including drive roots: `C:\` as a member's parent would turn the fence into the
     /// filesystem, so a member sitting directly on a drive root contributes nothing.</summary>
-    public static List<string> Roots(Registry reg, IEnumerable<string> configured)
+    public static List<string> Roots(Registry reg, IEnumerable<string> configured) =>
+        Roots(reg.All().SelectMany(w => w.Members).Select(m => m.Path), configured, Directory.Exists);
+
+    /// <summary>The same derivation over MEMBER PATHS and an injected probe - seam S10
+    /// (docs/testarch/seams.md), the `Trees.Locate` shape, so production keeps exactly one
+    /// path (the overload above). What it makes answerable in a millisecond is the rule the
+    /// design's rejection list is about: the fence is the members' PARENTS, never the members
+    /// themselves and never a drive root - because a fence that widens itself is a filesystem
+    /// crawl wearing a bounded lookup's name.</summary>
+    public static List<string> Roots(IEnumerable<string> memberPaths, IEnumerable<string> configured,
+                                     Func<string, bool> dirExists)
     {
         var roots = new List<string>();
         void Add(string? p)
@@ -48,13 +58,11 @@ static class Fence
             // A drive root ("C:") has no parent and is not a place to search — it is every
             // place. Excluded so that one carelessly-placed member cannot silently widen the
             // fence to the whole volume.
-            if (full.Length <= 3 || !Directory.Exists(full)) return;
+            if (full.Length <= 3 || !dirExists(full)) return;
             if (!roots.Any(r => r.Equals(full, StringComparison.OrdinalIgnoreCase))) roots.Add(full);
         }
 
-        foreach (var w in reg.All())
-            foreach (var m in w.Members)
-                Add(Path.GetDirectoryName(m.Path));
+        foreach (var m in memberPaths) Add(Path.GetDirectoryName(m));
         foreach (var c in configured) Add(c);
         return roots;
     }
