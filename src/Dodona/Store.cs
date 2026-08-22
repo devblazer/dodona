@@ -28,9 +28,29 @@ sealed class Store : IDisposable, ILaneSink
     /// <summary>The schema this store was on when it was opened. 0 for a brand-new file.</summary>
     public long SchemaAtOpen { get; private set; }
 
-    public Store(string path)
+    /// <summary>The clock this store reads. Every timestamp it writes and every lease it
+    /// judges comes from here, so a test can move time instead of sleeping through it —
+    /// `m1`'s lease-expiry pair was this suite's only real `Start-Sleep -Seconds 2`, which is
+    /// a guess about the slowest machine that ever ran it paid in full on every machine since
+    /// (CLAUDE.md §1). Defaulted, so PRODUCTION HAS EXACTLY ONE PATH: the shape is
+    /// `Trees.Locate`'s (`Trees.cs:44` + `:77`), where the defaulted overload binds the real
+    /// thing and a drifting stand-in is unreachable from any real call site.</summary>
+    readonly Func<DateTime> _utcNow;
+
+    /// <param name="utcNow">Leave null for the real clock. See <see cref="_utcNow"/>.</param>
+    public Store(string path, Func<DateTime>? utcNow = null)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        // A BARE FILENAME AND `:memory:` BOTH YIELD AN EMPTY DIRECTORY NAME, and
+        // `Directory.CreateDirectory("")` throws `ArgumentException` — so the store could
+        // only ever be opened at a path with a parent. That was never a rule anybody wanted;
+        // it was `Path.GetDirectoryName` returning "" and nothing checking. Guarding it is
+        // seam S2 (`docs/testarch/seams.md`): `:memory:` is a REAL `Store` — real SQLite, real
+        // transactions, real migration ladder — with no disk, which is what plan §3.5 means by
+        // *"never fake `Store`, because the properties ARE the transactions"* while still
+        // fitting the operator's one-to-two-second unit budget.
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
         _db = new SqliteConnection($"Data Source={path}");
         _db.Open();
         Exec("PRAGMA journal_mode=WAL;");
@@ -717,7 +737,7 @@ sealed class Store : IDisposable, ILaneSink
         return report;
     }
 
-    static string Now() => DateTime.UtcNow.ToString("o");
+    string Now() => _utcNow().ToString("o");
 
     void Exec(string sql)
     {
@@ -1401,7 +1421,7 @@ sealed class Store : IDisposable, ILaneSink
                             r2.IsDBNull(2) ? null : r2.GetString(2), r2.IsDBNull(3) ? null : r2.GetString(3));
     }
 
-    static bool Expired(TokenRow t) => t.ExpiresTs is not null && DateTime.Parse(t.ExpiresTs).ToUniversalTime() < DateTime.UtcNow;
+    bool Expired(TokenRow t) => t.ExpiresTs is not null && DateTime.Parse(t.ExpiresTs).ToUniversalTime() < _utcNow();
 
     /// <summary>Request the merge token. Lease + FIFO in one transaction. An expired
     /// holder is reclaimed here — a crashed holder cannot wedge the queue (§7, §12).</summary>
@@ -1459,7 +1479,7 @@ sealed class Store : IDisposable, ILaneSink
                 c.Parameters.AddWithValue("$t", ticketId);
                 c.Parameters.AddWithValue("$p", repo.Path);
                 c.Parameters.AddWithValue("$ts", Now());
-                c.Parameters.AddWithValue("$exp", DateTime.UtcNow.AddSeconds(leaseSec).ToString("o"));
+                c.Parameters.AddWithValue("$exp", _utcNow().AddSeconds(leaseSec).ToString("o"));
                 c.Parameters.AddWithValue("$sha", sha);
                 c.ExecuteNonQuery();
                 var gen = ReadToken(tx, repo).Generation;
@@ -1496,7 +1516,7 @@ sealed class Store : IDisposable, ILaneSink
             using var c = _db.CreateCommand();
             c.Transaction = tx;
             c.CommandText = "UPDATE merge_token SET expires_ts = $exp WHERE repo_path = $p;";
-            c.Parameters.AddWithValue("$exp", DateTime.UtcNow.AddSeconds(leaseSec).ToString("o"));
+            c.Parameters.AddWithValue("$exp", _utcNow().AddSeconds(leaseSec).ToString("o"));
             c.Parameters.AddWithValue("$p", repo.Path);
             c.ExecuteNonQuery();
             tx.Commit();
