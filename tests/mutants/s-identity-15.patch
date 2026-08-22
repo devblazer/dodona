@@ -1,0 +1,38 @@
+# S-IDENTITY 15. A lone project that IS a repository is called "" instead of ".".
+#
+# defect: `Repos.Under` drops the `prefix.Length == 0 ? "." : prefix` fallback, so the degenerate
+# defect: single-member case -- the shape the operator's own machine is in -- names its one
+# defect: repository with the empty string.
+#
+# WHY THAT IS NOT COSMETIC. `RepoRef.IsRoot` is `Name == "."` and `Claims.Prefix(".")` is empty,
+# which is exactly what makes a one-project workspace byte-for-byte what it always was. An empty
+# name is a repository that answers no to `IsRoot`, so `ForPath` stops swallowing every path and
+# the whole pre-workspace claim namespace shifts underneath every open ticket. That is P0.1's
+# mechanism arrived at from the other end, and P0.1 shipped.
+#
+# THE MAIN FIXTURE SURVIVES IT, which is why this is observable at all: the suite's primary
+# workspace root is NOT itself a repository, so it takes the walk branch and is untouched. Only
+# the `drift` fixture below -- one member that IS a repo -- reaches this line.
+#
+# expects-red: workspace:a_lone_project_that_is_a_repo_is_still_named_dot
+# expects-red: unit:Dodona.Tests.RepoDiscoveryTests.a_lone_project_that_is_a_repo_is_still_named_dot
+# expects-green: workspace:discovers_repos
+# expects-green: unit:Dodona.Tests.RepoDiscoveryTests.discovers_repos
+# expects-green: unit:Dodona.Tests.RepoDiscoveryTests.multi_member_repo_names_are_member_prefixed
+#
+# The controls are the two NON-degenerate paths: a walked root, and a multi-member prefix. Their
+# surviving says this red is about the one-project case specifically, which is the case that
+# matters most because it is the only one the operator actually runs.
+diff --git a/src/Dodona/Repos.cs b/src/Dodona/Repos.cs
+index 68f21d8..7b72db1 100644
+--- a/src/Dodona/Repos.cs
++++ b/src/Dodona/Repos.cs
+@@ -110,7 +110,7 @@ static class Repos
+         // A repository's insides are its own business: if the root is one, that is the
+         // whole answer, and anything below is a submodule or a vendored copy.
+         if (LooksLikeRepo(root, dirExists, fileExists))
+-            return new List<RepoRef> { new(prefix.Length == 0 ? "." : prefix, root, root) };
++            return new List<RepoRef> { new(prefix, root, root) };
+ 
+         var found = new List<RepoRef>();
+         void Walk(string dir, int depth)

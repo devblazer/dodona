@@ -1,0 +1,29 @@
+# S-IDENTITY 09. A move deletes the member and puts it back where it came from.
+#
+# defect: `Registry.Move`'s INSERT binds `from.Id` instead of `toId`, inside the one transaction.
+# defect: The command still reports success, the repo is still in exactly one workspace, and it is
+# defect: still in the WRONG one.
+#
+# WHY NOT "the move does nothing". Because a move that visibly failed would be caught by anything.
+# The interesting failure is the one that reports `moved`, leaves the invariant intact (one owner,
+# never two and never none) and quietly ignores the destination -- after which the refusal that
+# pointed at `workspace-move` as the way out has stopped being a way out, while still being
+# printed.
+#
+# expects-red: workspace:move_reassigns_the_repo
+# expects-red: unit:Dodona.Tests.RegistryIdentityTests.move_reassigns_the_repo
+# expects-green: unit:Dodona.Tests.RegistryExclusivityTests.repo_in_two_workspaces_refused
+# expects-green: unit:Dodona.Tests.RegistryIdentityTests.forget_removes_the_registry_row
+diff --git a/src/Dodona/Workspaces.cs b/src/Dodona/Workspaces.cs
+index 1b8c994..9019a8f 100644
+--- a/src/Dodona/Workspaces.cs
++++ b/src/Dodona/Workspaces.cs
+@@ -492,7 +492,7 @@ sealed class Registry : IDisposable
+         {
+             ins.Transaction = tx;
+             ins.CommandText = "INSERT INTO members(workspace_id, path, key, is_git, added_ts) VALUES ($w,$p,$k,$g,$t);";
+-            ins.Parameters.AddWithValue("$w", toId);
++            ins.Parameters.AddWithValue("$w", from.Id);
+             ins.Parameters.AddWithValue("$p", full);
+             ins.Parameters.AddWithValue("$k", key);
+             ins.Parameters.AddWithValue("$g", isGit ? 1 : 0);

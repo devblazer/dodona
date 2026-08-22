@@ -1,0 +1,44 @@
+# S-IDENTITY 13. The registry constructor opens a file the product never reports.
+#
+# defect: `Registry()` binds a hard-coded path instead of `Paths.Registry`. `dodona where` still
+# defect: reports `Paths.Registry`, a path under DODONA_HOME, and there is nothing there.
+#
+# THE PATH IS UNDER %TEMP% AND THAT IS DELIBERATE. The real defect this guards against reaches for
+# %LOCALAPPDATA% -- the way `Ver.BinRoot` legitimately does one file over -- and RUNNING that
+# version of this mutant would write into the operator's real registry, which is the exact harm
+# the check exists to prevent (CLAUDE.md section 5: a suite that tests the repo-exclusivity
+# refusal could then refuse one of their real repos). A hard-coded temp path is the same defect --
+# the constructor ignoring the path the product names -- with none of the blast radius. Do not
+# "fix" this back to LocalApplicationData.
+#
+# expects-red: unit:Dodona.Tests.ConciergeTerritoryTests.the_registry_under_dodona_home_is_the_live_one
+# expects-green: unit:Dodona.Tests.ConciergeTerritoryTests.registry_is_reported_under_dodona_home
+#
+# THE CONTROL IS THE WHOLE ARGUMENT FOR THREE CHECKS RATHER THAN ONE. The reported path is still
+# under DODONA_HOME and still looks right; only the second and third checks -- a file is really
+# there, and it is the LIVE one -- can tell. Mutant 14 is the mirror: the reported path is wrong
+# and the file is live, and then this control goes red while those two stay green.
+# NO `concierge:` CHECK IS IN THESE LISTS, AND THE REASON IS A GOOD ONE. tests/_workspace.ps1
+# carries a HARNESS PRECONDITION that refuses to start the suite when the registry is not under
+# DODONA_HOME -- "REFUSING TO RUN: the registry is not under DODONA_HOME, so this suite would
+# write into t...". Under either of these defects that guard fires FIRST and aborts the whole
+# suite, so the three registry_* checks report MISSING rather than red. They cannot be seen red
+# in the suite AT ALL, because something stricter than they are already stopped the run.
+#
+# That is the guard working, not a gap: it fails CLOSED, before any write, where the checks would
+# only have reported afterwards. But it does mean step B0 can never observe those three, so none
+# of them was moved. They stay in concierge untouched, and the unit methods here are declared
+# growth in tests/ledger/added.tsv.
+diff --git a/src/Dodona/Workspaces.cs b/src/Dodona/Workspaces.cs
+index 1b8c994..e328f6c 100644
+--- a/src/Dodona/Workspaces.cs
++++ b/src/Dodona/Workspaces.cs
+@@ -66,7 +66,7 @@ sealed class Registry : IDisposable
+     /// reaches the constructor below through THIS line and no other, which is the property
+     /// that stops an overload becoming a second implementation (the `Trees.Locate` shape,
+     /// docs/testarch/seams.md).</summary>
+-    public Registry() : this(Paths.Registry) { }
++    public Registry() : this(Path.Combine(Path.GetTempPath(), "dodona-mutant-elsewhere", "registry.db")) { }
+ 
+     /// <summary>The same registry over a NAMED file - seam S5 (docs/testarch/seams.md), and
+     /// what it buys is two isolated registries in ONE process. That is not a convenience: it

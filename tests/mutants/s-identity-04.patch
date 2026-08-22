@@ -1,0 +1,43 @@
+# S-IDENTITY 04. `--repo X` refuses a stray claim without saying which repository it meant.
+#
+# defect: `Repos.CheckClaims` still refuses, and its refusal no longer names the repository the
+# defect: caller asked for. The operator is told some claims "do not belong here" with no way to
+# defect: tell which "here" was meant -- which, for the one command whose entire purpose is that
+# defect: the caller NAMED a repository, is the diagnosis deleted.
+#
+# WHY THE WORDING IS WHAT THIS CHECK IS ABOUT. P0.6 was a silent disagreement: `--repo tools`
+# with a claim over `engine` produced a ticket in `tools`, and the gate, the merge backstop and
+# the land each then talked about a different repository. The check's own assertion is the
+# refusal TEXT naming both sides -- `not in repository tools`, and `engine` -- because naming both
+# sides is what makes the disagreement visible at all. A defect that inverted the comparison
+# instead would create a ticket and shift every hardcoded ticket id in the rest of the file, which
+# is the fixture-chain problem mutant 01's header records.
+#
+# expects-red: workspace:named_repo_still_validates_its_claims
+# expects-red: unit:Dodona.Tests.RepoResolutionTests.named_repo_still_validates_its_claims
+# expects-green: workspace:named_repo_accepts_its_own_claims
+#
+# NOT a control, and it was declared as one on the first run: workspace:claim_extend_cannot_
+# cross_repositories reddens under this too, because `claim-extend` reaches THE SAME
+# `CheckClaims` refusal and matches the same phrase. dev prove said OVERBROAD, correctly. It is
+# a sibling of the check above rather than an independent path, so it is named here and left
+# undeclared -- its own disposition belongs to whoever moves the claim-extend family.
+# expects-green: unit:Dodona.Tests.RepoResolutionTests.cross_repo_ticket_refused
+#
+# `named_repo_accepts_its_own_claims` is a declared control here for a reason that outlives this
+# mutant: it survives EVERY narrow defect in `CheckClaims`, because all it asserts is that the
+# reply mentions the repository's leaf -- and every refusal mentions it too. That is recorded as a
+# `vacuous-guard` row in this slice's ledger rather than smoothed over.
+diff --git a/src/Dodona/Repos.cs b/src/Dodona/Repos.cs
+index 68f21d8..0e44e64 100644
+--- a/src/Dodona/Repos.cs
++++ b/src/Dodona/Repos.cs
+@@ -196,7 +196,7 @@ static class Repos
+                 strays.Add($"{Claims.Spec(kind, value)} is in repository {r.Name}");
+         }
+         if (strays.Count == 0) return null;
+-        return $"these claims are not in repository {named.Name}: {string.Join("; ", strays)} — " +
++        return $"some claims do not belong here: {string.Join("; ", strays)} — " +
+                "a ticket lands by fast-forwarding one repository, so its claims must all live in that one";
+     }
+ 

@@ -68,15 +68,12 @@ try {
         -RedirectStandardOutput "$out\daemon.out" -RedirectStandardError "$out\daemon.err"
     Wait-Daemon $ws.CtlPipe | Out-Null
 
-    # ---- discovery: the workspace knows its repositories ----
-    $repos = Dodona @("repos")
-    Check 'discovers_repos' ($repos -match 'engine' -and $repos -match 'tools' -and $repos -notmatch 'docs') $repos
+    # (moved to unit:Dodona.Tests.RepoDiscoveryTests.discovers_repos -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
 
     # ---- a ticket infers its repository from its claim paths ----
     $t1 = Dodona @("ticket-create", "--title", "ENGINE", "--claim", "subtree:engine/src")
-    Check 'infers_repo_from_claims' ($t1 -match 'ticket 1 repo engine') $t1
     $t2 = Dodona @("ticket-create", "--title", "TOOLS", "--claim", "subtree:tools/src")
-    Check 'second_repo_ticket' ($t2 -match 'ticket 2 repo tools') $t2
+    # (moved to unit:Dodona.Tests.RepoResolutionTests -- infers_repo_from_claims, second_repo_ticket -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
 
     # the worktree is a worktree OF THAT REPO, branched from its own main
     $wt1 = "$root\.dodona\wt\t1"
@@ -87,11 +84,11 @@ try {
 
     # ---- a ticket spanning repositories is refused, with the reason ----
     $span = Dodona @("ticket-create", "--title", "SPAN", "--claim", "path:engine/src/a.cs", "--claim", "path:tools/src/b.cs")
-    Check 'cross_repo_ticket_refused' ($DODONA_EXIT -ne 0 -and $span -match 'span 2 repositories' -and $span -match 'cannot be atomic') $span
+    # (moved to unit:Dodona.Tests.RepoResolutionTests.cross_repo_ticket_refused -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
 
     # ---- a claim in no repository is refused, and says what there is ----
     $homeless = Dodona @("ticket-create", "--title", "DOCS", "--claim", "path:docs/notes.md")
-    Check 'claim_outside_any_repo_refused' ($DODONA_EXIT -ne 0 -and $homeless -match 'no repository covers' -and $homeless -match 'engine') $homeless
+    # (moved to unit:Dodona.Tests.RepoResolutionTests.claim_outside_any_repo_refused -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
 
     # ---- the claim gate works in workspace terms (worktree path -> workspace path) ----
     $covered = Dodona @("claim-check", "1", "$wt1\src\main.cs")
@@ -125,8 +122,7 @@ try {
     # `engine`. Every one of those disagreed silently. The inference path has always refused a
     # cross-repo claim; naming the repo went straight past the refusal.
     $wrongRepo = Dodona @("ticket-create", "--title", "WRONGREPO", "--repo", "tools", "--claim", "path:engine/src/main.cs")
-    Check 'named_repo_still_validates_its_claims' `
-        ($DODONA_EXIT -ne 0 -and $wrongRepo -match 'not in repository tools' -and $wrongRepo -match 'engine') $wrongRepo
+    # (moved to unit:Dodona.Tests.RepoResolutionTests.named_repo_still_validates_its_claims -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
     # (the ordinary case -- a claim that IS in the named repo -- is asserted in the `pair`
     # fixture below, where creating a ticket cannot shift the ticket ids these checks hardcode)
 
@@ -246,8 +242,7 @@ for r in db.execute('''SELECT detail FROM events WHERE kind='ticket_created' ORD
     # =====================================================================================
 
     # ---- identity is a generated slug, and the store left the project folder ----
-    Check 'identity_is_a_slug_not_a_path_hash' `
-        ($ws.Id -match '^[a-z0-9-]+-[0-9a-f]{4}$' -and $ws.Id -match 'dodona-ws') "id=$($ws.Id)"
+    # (moved to unit:Dodona.Tests.RegistryIdentityTests.identity_is_a_slug_not_a_path_hash -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
     Check 'store_lives_in_workspace_territory' `
         ($storeDb.StartsWith($dodonaHome) -and (Test-Path $storeDb)) $storeDb
     Check 'store_is_not_under_the_project_root' (-not (Test-Path "$root\.dodona\store.db")) ''
@@ -313,23 +308,21 @@ for r in db.execute('''SELECT detail FROM events WHERE kind='ticket_created' ORD
     # FALSE RED and every bit as costly as a false green. Never regex across a space in captured
     # native stderr without collapsing it first.
     $stealFlat = ($steal -replace '\s+', ' ')
-    Check 'repo_in_two_workspaces_refused' ($DODONA_EXIT -ne 0 -and $stealFlat -match 'already belongs to workspace') $stealFlat
-    Check 'refusal_says_why_two_tokens_is_the_problem' ($steal -match 'two merge tokens over one main') $steal
-    Check 'refusal_offers_the_move_affordance' ($steal -match 'dodona workspace-move --member') $steal
+    # (moved to unit:Dodona.Tests.RegistryExclusivityTests -- repo_in_two_workspaces_refused,
+    #  refusal_says_why_two_tokens_is_the_problem, refusal_offers_the_move_affordance -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
 
     # A BARE FOLDER is exempt and must stay exempt: there is no merge token to split, and
     # a shared notes folder in two workspaces harms nobody.
     $b1 = DodonaBare @("workspace-attach", "--member", $shared, "--workspace", "rival")
     $b2 = DodonaBare @("workspace-attach", "--member", $shared, "--workspace", $soloWs.Id)
-    Check 'bare_folder_may_be_shared' ($b1 -notmatch 'error' -and $b2 -notmatch 'error') "$b1 | $b2"
+    # (moved to unit:Dodona.Tests.RegistryExclusivityTests.bare_folder_may_be_shared -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
 
     # Reassignment is legitimate — that is what the refusal points at — and it is atomic:
     # the repo is never in two workspaces and never in none.
     $moved = DodonaBare @("workspace-move", "--member", $solo, "--workspace", "rival")
     $wsList = DodonaBare @("workspaces", "--json") | ConvertFrom-Json
     $ownersOfSolo = @($wsList | Where-Object { $_.members.path -contains (Resolve-Path $solo).Path })
-    Check 'move_reassigns_the_repo' ($moved -match 'moved' -and $ownersOfSolo.Count -eq 1 -and $ownersOfSolo[0].name -eq 'rival') `
-        "owners=$($ownersOfSolo.Count) $($ownersOfSolo.name -join ',')"
+    # (moved to unit:Dodona.Tests.RegistryIdentityTests.move_reassigns_the_repo -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
 
     $rival = ($wsList | Where-Object { $_.name -eq 'rival' }).id
 
@@ -347,6 +340,14 @@ for r in db.execute('''SELECT detail FROM events WHERE kind='ticket_created' ORD
     DodonaBare @("workspace-create", "--name", "drift-b", "--member", $drift) | Out-Null
     $driftA = ((DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.name -eq 'drift-a' }).id
     $driftB = ((DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.name -eq 'drift-b' }).id
+    # VACUOUS-GUARD (S-IDENTITY, and MEASURED rather than guessed). This asserts only that two
+    # workspaces exist. `workspace-create --member <folder>` still CREATES the workspace when the
+    # attach is REFUSED, so it passes with the bare-folder exemption deleted underneath it: it was
+    # declared expects-red on tests\mutants\s-identity-07.patch, which makes every folder look
+    # like a repository, and dev prove answered `VACUOUS ... PASS`. Its NAME promises a membership
+    # it never reads. KEPT, because plan 5.4.1's question answers yes -- a `workspace-create` that
+    # stopped creating anything would still fail here -- and the membership half now runs as
+    # unit:Dodona.Tests.RegistryExclusivityTests.bare_folder_in_two_workspaces_is_allowed.
     Check 'bare_folder_in_two_workspaces_is_allowed' ($null -ne $driftA -and $null -ne $driftB) "a=$driftA b=$driftB"
 
     # ...and NOW it becomes a repo, behind the registry's back.
@@ -580,7 +581,7 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
     # ---- creating a workspace cannot quietly take an owned repo with it ----
     DodonaBare @("workspace-create", "--name", "twin", "--member", $solo) | Out-Null
     # the workspace IS created; the attach inside it is what gets refused
-    Check 'creating_a_workspace_cannot_steal_an_owned_repo' ($DODONA_EXIT -ne 0) ''
+    # (moved to unit:Dodona.Tests.RegistryExclusivityTests.creating_a_workspace_cannot_steal_an_owned_repo -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
     $twin = ((DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.name -eq 'twin' }).id
 
     # ---- multi-member: repo names gain a member prefix only when they must ----
@@ -650,8 +651,7 @@ for r in db.execute('''SELECT kind FROM events WHERE kind='ticket_repo_not_exclu
     $driftStore = (& $dodona where --workspace $drift --json | Out-String | ConvertFrom-Json).store
     StartDaemonFor $drift | Out-Null
     $dt1 = DodonaBare @("ticket-create", "--title", "DRIFT1", "--claim", "subtree:src/one", "--workspace", $drift)
-    Check 'a_lone_project_that_is_a_repo_is_still_named_dot' `
-        ((Invoke-StoreSql $driftStore "SELECT repo FROM tickets WHERE id = 1").Trim() -eq '.') $dt1
+    # (moved to unit:Dodona.Tests.RepoDiscoveryTests.a_lone_project_that_is_a_repo_is_still_named_dot -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
 
     # THE ATTACH. Nothing about the repository changed; only what discovery calls it.
     DodonaBare @("workspace-attach", "--member", $driftB, "--workspace", $drift) | Out-Null
@@ -1573,9 +1573,8 @@ PRAGMA user_version = 8;
 
     # ---- forget removes the registry rows and keeps every transcript (§12) ----
     $forgotten = DodonaBare @("workspace-forget", "--workspace", $twin)
-    Check 'forget_removes_the_registry_row' `
-        ($forgotten -match 'forgotten' -and -not (@(DodonaBare @("workspaces", "--json") | ConvertFrom-Json) | Where-Object { $_.id -eq $twin })) $forgotten
-    Check 'forget_keeps_the_store_directory' (Test-Path (Join-Path $dodonaHome "workspaces\$twin")) ''
+    # (moved to unit:Dodona.Tests.RegistryIdentityTests -- forget_removes_the_registry_row,
+    #  forget_keeps_the_store_directory -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
 
     # ---- P2.7: FORGETTING A LIVE WORKSPACE MUST NOT LEAVE AGENTS BEHIND ------------------
     # Phase 2 wired `workspace-detach` and `workspace-move` to `project-gone` and DEFERRED this

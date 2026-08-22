@@ -1,0 +1,48 @@
+# S-IDENTITY 08. A rename re-derives the id from the new name.
+#
+# defect: `Registry.Rename` writes `SET name = $n, id = $n`, so the workspace id becomes the
+# defect: display name -- which is precisely the identity model docs/WORKSPACES-CONCIERGE.md
+# defect: section 1 replaced.
+#
+# WHY THIS IS THE DEFECT WORTH AIMING AT. The store directory, the control pipe and the OS mutex
+# are all keyed on the id. An id that MEANS the name has to move a SQLite database to change one,
+# and a live daemon reachable at `dodona-<id>-ctl` is stranded mid-session the moment somebody
+# renames its workspace. The four checks below are four different ways of noticing that, which is
+# why they are four names and not one.
+#
+# NO `workspace:` CHECK IS IN THIS LIST, AND THAT IS THE FINDING. All four suite checks read one
+# `DodonaBare @("where", "--workspace", $rival, "--json") | ConvertFrom-Json`, and every observable
+# they compare -- the id, the store path, the ctl pipe -- is DERIVED FROM THE ID. So the only
+# defect that could change any of their answers is one that changes the id, and that is exactly
+# the defect under which `where --workspace <old id>` stops resolving: the command errors, the
+# reply is not JSON, `ConvertFrom-Json` throws an ArgumentException that escapes the try block,
+# and the suite prints no tally at all. dev prove reported all four MISSING, not red.
+#
+# A MISSING is not a red, and treating it as one would be a false red -- which costs exactly what
+# a false green costs. So these four were NOT moved; they stay in the suite untouched, and the
+# four unit methods below are declared GROWTH in tests/ledger/added.tsv rather than destinations.
+# The suspect worth filing: a check that pipes a CLI reply straight into ConvertFrom-Json cannot
+# report anything about the failure it exists to catch (CLAUDE.md 0.2's ConvertFrom-Json trap,
+# one step further on).
+# expects-red: unit:Dodona.Tests.RegistryIdentityTests.rename_keeps_the_id
+# expects-red: unit:Dodona.Tests.RegistryIdentityTests.rename_keeps_the_store_path
+# expects-red: unit:Dodona.Tests.RegistryIdentityTests.rename_keeps_the_ctl_pipe
+# expects-red: unit:Dodona.Tests.RegistryIdentityTests.new_name_resolves
+# expects-green: unit:Dodona.Tests.RegistryIdentityTests.identity_is_a_slug_not_a_path_hash
+# expects-green: unit:Dodona.Tests.RegistryIdentityTests.forget_removes_the_registry_row
+#
+# The controls say the generator and the rest of the registry are untouched: ids are still
+# generated slugs at CREATE time, and every other write still finds its row.
+diff --git a/src/Dodona/Workspaces.cs b/src/Dodona/Workspaces.cs
+index 1b8c994..0f02a4c 100644
+--- a/src/Dodona/Workspaces.cs
++++ b/src/Dodona/Workspaces.cs
+@@ -379,7 +379,7 @@ sealed class Registry : IDisposable
+         { error = $"\"{clean}\" is already {clash.Label}"; return false; }
+         var was = ById(id)?.Name ?? "?";
+         using var c = _db.CreateCommand();
+-        c.CommandText = "UPDATE workspaces SET name = $n WHERE id = $i;";
++        c.CommandText = "UPDATE workspaces SET name = $n, id = $n WHERE id = $i;";
+         c.Parameters.AddWithValue("$n", clean);
+         c.Parameters.AddWithValue("$i", id);
+         if (c.ExecuteNonQuery() == 0) { error = $"no workspace {id}"; return false; }

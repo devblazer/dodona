@@ -1,0 +1,35 @@
+# S-IDENTITY 05. A folder that is not a repository is discovered as one.
+#
+# defect: `Repos.Under`'s walk accepts any directory it lists, not only one carrying a `.git`.
+# defect: `docs` -- a perfectly ordinary folder -- becomes a repository the workspace believes it
+# defect: can create a ticket in and land a branch onto.
+#
+# WHY THIS AIM. `discovers_repos` asserts two things and the second is the one with teeth: engine
+# and tools are found AND `docs` is NOT. A defect that made discovery find NOTHING would redden it
+# for the wrong reason and would also take the suite's whole fixture with it (mutant 01's header).
+# Finding too much is the failure that actually reaches production quietly: a ticket created
+# against a folder with no `main` to fast-forward, discovered at land time.
+#
+# expects-red: workspace:discovers_repos
+# expects-red: unit:Dodona.Tests.RepoDiscoveryTests.discovers_repos
+# expects-green: unit:Dodona.Tests.RepoDiscoveryTests.a_lone_project_that_is_a_repo_is_still_named_dot
+# expects-green: unit:Dodona.Tests.RepoDiscoveryTests.multi_member_repo_names_are_member_prefixed
+# expects-green: unit:Dodona.Tests.RepoDiscoveryTests.the_tilde_name_is_recycled_onto_the_new_project
+#
+# COLLATERAL, NAMED RATHER THAN LEFT TO BE FOUND: in the `workspace` suite this also reddens
+# `claim_outside_any_repo_refused`, because with `docs` promoted the claim `path:docs/notes.md` IS
+# covered. That is not an over-broad mutant hiding -- it is the same defect seen from the check
+# next door, whose own proof is mutant 03.
+diff --git a/src/Dodona/Repos.cs b/src/Dodona/Repos.cs
+index 68f21d8..a57b605 100644
+--- a/src/Dodona/Repos.cs
++++ b/src/Dodona/Repos.cs
+@@ -121,7 +121,7 @@ static class Repos
+             {
+                 var name = Path.GetFileName(child);
+                 if (name.Length == 0 || Skip.Contains(name)) continue;
+-                if (LooksLikeRepo(child, dirExists, fileExists))
++                if (LooksLikeRepo(child, dirExists, fileExists) || dirExists(child))
+                 {
+                     var rel = Path.GetRelativePath(root, child).Replace('\\', '/');
+                     found.Add(new RepoRef(prefix.Length == 0 ? rel : $"{prefix}/{rel}", child, root));

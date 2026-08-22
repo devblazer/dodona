@@ -1,0 +1,31 @@
+# S-IDENTITY 11. The workspace id is a hash again.
+#
+# defect: `Registry.NewId` builds its slug from a SHA-256 of the name instead of from the name's
+# defect: own characters. The id still has the right SHAPE -- lowercase hex, a dash, four hex --
+# defect: so anything asserting only the pattern stays green. It is simply no longer readable, and
+# defect: no longer says which workspace it belongs to.
+#
+# WHY THE SHAPE IS PRESERVED ON PURPOSE. The old check asserts the regex AND that the id carries
+# the name in it. A mutant that broke the regex too would prove the weaker half. This one leaves
+# the regex satisfied so the red can only come from the half that matters -- DEBUGGING.md's
+# "short enough to read in a pipe name", and the reason `dodona ps` output is diagnosable at all.
+#
+# expects-red: workspace:identity_is_a_slug_not_a_path_hash
+# expects-red: unit:Dodona.Tests.RegistryIdentityTests.identity_is_a_slug_not_a_path_hash
+# expects-green: unit:Dodona.Tests.RegistryIdentityTests.rename_keeps_the_id
+# expects-green: unit:Dodona.Tests.RegistryIdentityTests.forget_removes_the_registry_row
+diff --git a/src/Dodona/Workspaces.cs b/src/Dodona/Workspaces.cs
+index 1b8c994..fa543d2 100644
+--- a/src/Dodona/Workspaces.cs
++++ b/src/Dodona/Workspaces.cs
+@@ -334,8 +334,8 @@ sealed class Registry : IDisposable
+     /// </summary>
+     public static string NewId(string name, Func<string, bool> taken)
+     {
+-        var slug = new string(name.ToLowerInvariant()
+-            .Select(ch => char.IsAsciiLetterOrDigit(ch) ? ch : '-').ToArray());
++        var slug = Convert.ToHexString(SHA256.HashData(
++            System.Text.Encoding.UTF8.GetBytes(name.ToLowerInvariant())))[..12].ToLowerInvariant();
+         while (slug.Contains("--")) slug = slug.Replace("--", "-");
+         slug = slug.Trim('-');
+         if (slug.Length > 24) slug = slug[..24].Trim('-');

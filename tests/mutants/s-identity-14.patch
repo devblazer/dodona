@@ -1,0 +1,40 @@
+# S-IDENTITY 14. The reported registry path leaves DODONA_HOME.
+#
+# defect: `Paths.Registry` no longer derives from `Paths.Home`. Everything then agrees with itself
+# defect: -- the constructor opens the reported path, the file is there, it holds the live
+# defect: workspaces -- and the one thing that is wrong is that none of it is inside the directory
+# defect: every suite and every isolation guarantee is built on.
+#
+# %TEMP% RATHER THAN %LOCALAPPDATA%, for mutant 13's reason: the real defect writes into the
+# operator's own registry and running it would do the harm the check exists to prevent.
+#
+# expects-red: unit:Dodona.Tests.ConciergeTerritoryTests.registry_is_reported_under_dodona_home
+# expects-green: unit:Dodona.Tests.ConciergeTerritoryTests.the_registry_under_dodona_home_is_the_live_one
+#
+# The controls are mutant 13's expects-red, and that inversion is the point: parts two and three
+# are satisfied by a self-consistent registry anywhere on the disk, so part one is not redundant
+# with them. Three checks, three different things, demonstrated by two defects.
+# NO `concierge:` CHECK IS IN THESE LISTS, AND THE REASON IS A GOOD ONE. tests/_workspace.ps1
+# carries a HARNESS PRECONDITION that refuses to start the suite when the registry is not under
+# DODONA_HOME -- "REFUSING TO RUN: the registry is not under DODONA_HOME, so this suite would
+# write into t...". Under either of these defects that guard fires FIRST and aborts the whole
+# suite, so the three registry_* checks report MISSING rather than red. They cannot be seen red
+# in the suite AT ALL, because something stricter than they are already stopped the run.
+#
+# That is the guard working, not a gap: it fails CLOSED, before any write, where the checks would
+# only have reported afterwards. But it does mean step B0 can never observe those three, so none
+# of them was moved. They stay in concierge untouched, and the unit methods here are declared
+# growth in tests/ledger/added.tsv.
+diff --git a/src/Dodona/Paths.cs b/src/Dodona/Paths.cs
+index 944c5a3..f06235e 100644
+--- a/src/Dodona/Paths.cs
++++ b/src/Dodona/Paths.cs
+@@ -45,7 +45,7 @@ static class Paths
+     /// store and config sit beside the workspaces rather than inside one.</summary>
+     public static string ConciergeDir => Path.Combine(Home, "concierge");
+ 
+-    public static string Registry => Path.Combine(ConciergeDir, "registry.db");
++    public static string Registry => Path.Combine(Path.GetTempPath(), "dodona-mutant-elsewhere", "registry.db");
+ 
+     public static string ConciergeStore => Path.Combine(ConciergeDir, "store.db");
+ 

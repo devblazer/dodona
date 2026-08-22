@@ -1,0 +1,55 @@
+# S-IDENTITY 16. Multi-member discovery forgets the member prefix, and with it the de-collision.
+#
+# defect: `Repos.Discover`'s multi-member branch passes an EMPTY prefix to `Repos.Under` instead
+# defect: of the member's leaf, so the `leaf` / `leaf~2` computation above it becomes dead and
+# defect: every member's repository is named as though it were the only one -- several of them
+# defect: called ".", in one workspace.
+#
+# WHY ONE HUNK REACHES BOTH RULES, AND WHY THAT IS HONEST RATHER THAN CONVENIENT. The prefix IS
+# the de-collision: `twin~2` exists only because two members' leaves collided, and with no prefix
+# there is nothing to collide. They are one mechanism, so one edit is the whole defect.
+#
+# WHAT IT COSTS. Two repositories both named "." in one workspace, each claiming the entire
+# workspace namespace, while `tickets.repo` was written once and never updated. That is two rows
+# over one `main` -- two agents each told "granted", both able to fast-forward the same branch --
+# and the `workspace` suite's own banner says a red in this section is a correctness incident
+# rather than a test problem.
+#
+# NO `workspace:` CHECK IS IN THIS LIST. Run with them declared, the suite emitted three
+# PowerShell error records and no tally: with every members repository named ".", the `pair`
+# fixtures `--repo <leaf>` lookup resolves to nothing, the ticket the next twenty checks are
+# built on is never created, and an `Invoke-StoreSql` reading its row dies inside python. All
+# four came back MISSING, which is NOT a red -- so they were not moved. They stay, and the four
+# unit methods below are declared growth in tests/ledger/added.tsv.
+#
+# THE GENERAL SHAPE, WHICH IS THE PART WORTH CARRYING: workspace-acceptance.ps1 is ONE FIXTURE
+# CHAIN, and the naming rules are the foundation everything above them stands on. A defect deep
+# enough to change a repositorys NAME is a defect deep enough to stop the suite reaching the
+# check about it. That is not a reason to weaken the mutant -- a mutant weakened until the suite
+# survives is proving something other than the defect it names.
+# expects-red: unit:Dodona.Tests.RepoDiscoveryTests.multi_member_repo_names_are_member_prefixed
+# expects-red: unit:Dodona.Tests.RepoDiscoveryTests.attaching_a_second_project_renames_the_first_repository
+# expects-red: unit:Dodona.Tests.RepoDiscoveryTests.a_colliding_leaf_gets_the_tilde_name
+# expects-red: unit:Dodona.Tests.RepoDiscoveryTests.the_tilde_name_is_recycled_onto_the_new_project
+# expects-green: unit:Dodona.Tests.RepoDiscoveryTests.discovers_repos
+# expects-green: unit:Dodona.Tests.RepoDiscoveryTests.a_lone_project_that_is_a_repo_is_still_named_dot
+#
+# The controls are the ONE-member branch and the walk itself, neither of which this touches. That
+# is what separates "the prefix rule broke" from "discovery broke".
+diff --git a/src/Dodona/Repos.cs b/src/Dodona/Repos.cs
+index 68f21d8..7772232 100644
+--- a/src/Dodona/Repos.cs
++++ b/src/Dodona/Repos.cs
+@@ -87,11 +87,7 @@ static class Repos
+         var usedLeaves = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+         foreach (var m in members)
+         {
+-            var leaf = Path.GetFileName(m.Path);
+-            if (leaf.Length == 0) leaf = m.Path.Replace('\\', '-').Replace(':', '-').Trim('-');
+-            var unique = leaf;
+-            for (int n = 2; !usedLeaves.Add(unique); n++) unique = $"{leaf}~{n}";
+-            found.AddRange(Under(m.Path, unique, maxDepth, dirExists, fileExists, listDirs));
++            found.AddRange(Under(m.Path, "", maxDepth, dirExists, fileExists, listDirs));
+         }
+         return found.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ToList();
+     }

@@ -1,0 +1,30 @@
+# S-IDENTITY 12. The fence forgets the members.
+#
+# defect: `Fence.Roots` stops deriving anything from member paths, so the search fence is whatever
+# defect: was explicitly configured and nothing else -- which, on a machine that configured
+# defect: nothing, is empty.
+#
+# WHY NOT "the fence uses the member instead of its parent", WHICH IS THE DEFECT THE CHECK'S NAME
+# DESCRIBES. Because the old check cannot see that one: it asserts the status line CONTAINS the
+# fence root, and a member path contains its own parent as a prefix, so the substring match
+# succeeds either way. That is a real weakness in the check as written and it is recorded in this
+# slice's report rather than smoothed over. The check that replaces it asserts the roots ARE the
+# parents and are NOT the members, which is strictly stronger; this mutant is the defect both
+# versions can see, so the paired red is honest for the pair that actually exists.
+#
+# expects-red: concierge:fence_is_derived_from_member_parents
+# expects-red: unit:Dodona.Tests.ConciergeTerritoryTests.fence_is_derived_from_member_parents
+# expects-green: concierge:concierge_answers_its_pipe
+# expects-green: concierge:sole_workspace_needs_no_model
+diff --git a/src/Dodona/Fence.cs b/src/Dodona/Fence.cs
+index 11154a7..533e845 100644
+--- a/src/Dodona/Fence.cs
++++ b/src/Dodona/Fence.cs
+@@ -62,7 +62,6 @@ static class Fence
+             if (!roots.Any(r => r.Equals(full, StringComparison.OrdinalIgnoreCase))) roots.Add(full);
+         }
+ 
+-        foreach (var m in memberPaths) Add(Path.GetDirectoryName(m));
+         foreach (var c in configured) Add(c);
+         return roots;
+     }

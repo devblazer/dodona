@@ -1,0 +1,33 @@
+# S-IDENTITY 10. Forget deletes the transcripts and keeps the row.
+#
+# defect: `Registry.Forget` deletes the workspace's STORE DIRECTORY and stops deleting its
+# defect: `workspaces` row -- exactly inverted. It still answers "forgotten".
+#
+# WHY BOTH HALVES IN ONE DEFECT. They are one decision, written down in the method's own comment:
+# *the registry rows go, the store directory does NOT*, because "undo a workspace I made by
+# accident" must never be able to mean "delete six lanes of history" (design section 12). A mutant
+# that only did one half would leave the other check green and make the pair look like two facts
+# when they are one rule read from both sides.
+#
+# expects-red: workspace:forget_removes_the_registry_row
+# expects-red: workspace:forget_keeps_the_store_directory
+# expects-red: unit:Dodona.Tests.RegistryIdentityTests.forget_removes_the_registry_row
+# expects-red: unit:Dodona.Tests.RegistryIdentityTests.forget_keeps_the_store_directory
+# expects-green: unit:Dodona.Tests.RegistryIdentityTests.rename_keeps_the_id
+# expects-green: unit:Dodona.Tests.RegistryExclusivityTests.repo_in_two_workspaces_refused
+diff --git a/src/Dodona/Workspaces.cs b/src/Dodona/Workspaces.cs
+index 1b8c994..e164698 100644
+--- a/src/Dodona/Workspaces.cs
++++ b/src/Dodona/Workspaces.cs
+@@ -526,9 +526,9 @@ sealed class Registry : IDisposable
+         var ws = ById(id);
+         if (ws is null) { error = $"no workspace {id}"; return false; }
+         using var tx = _db.BeginTransaction();
++        try { Directory.Delete(Paths.WorkspaceDir(id), true); } catch { }
+         foreach (var sql in new[] { "DELETE FROM members WHERE workspace_id = $i;",
+-                                    "DELETE FROM aliases WHERE workspace_id = $i;",
+-                                    "DELETE FROM workspaces WHERE id = $i;" })
++                                    "DELETE FROM aliases WHERE workspace_id = $i;" })
+         {
+             using var c = _db.CreateCommand();
+             c.Transaction = tx;

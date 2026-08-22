@@ -1,0 +1,45 @@
+# S-IDENTITY 07. Every folder looks like a git repository to the registry.
+#
+# defect: `Registry.LooksLikeRepo` answers `Directory.Exists(dir)` instead of asking for a `.git`,
+# defect: so the exclusivity rule -- which is deliberately PARTIAL -- starts applying to bare
+# defect: folders that have no merge token to split.
+#
+# WHY THE EXEMPTION MATTERS ENOUGH TO PIN. A shared notes folder in two workspaces harms nobody,
+# and the exemption is what creates the drift case the point-of-use backstop exists for: two
+# workspaces legitimately hold one bare folder, and then somebody runs `git init` in it behind the
+# registry's back. Lose the exemption and that whole third layer is answering a question that can
+# no longer be asked.
+#
+# expects-red: workspace:bare_folder_may_be_shared
+#
+# `workspace:bare_folder_in_two_workspaces_is_allowed` IS NOT IN THAT LIST, AND FINDING OUT WHY
+# IS WHAT THIS RUN WAS FOR. It was declared expects-red on the first run and dev prove answered
+# `VACUOUS ... PASS`. The check asserts `$null -ne $driftA -and $null -ne $driftB` -- that two
+# workspaces exist -- and `workspace-create --member <folder>` still CREATES the workspace when
+# the attach is refused, so it passes with the bare-folder exemption deleted underneath it. Its
+# name promises a membership it never reads. Kept and labelled as a `vacuous-guard` row in this
+# slice's ledger, with this line as the measurement; the unit method of the same name below is
+# the version that can see it.
+# expects-red: unit:Dodona.Tests.RegistryExclusivityTests.bare_folder_may_be_shared
+# expects-red: unit:Dodona.Tests.RegistryExclusivityTests.bare_folder_in_two_workspaces_is_allowed
+# expects-green: workspace:repo_in_two_workspaces_refused
+# expects-green: unit:Dodona.Tests.RegistryExclusivityTests.repo_in_two_workspaces_refused
+# expects-green: unit:Dodona.Tests.RegistryExclusivityTests.refusal_offers_the_move_affordance
+#
+# The controls are the exact mirror of mutant 06's: there the rule vanished and the exemption
+# stayed; here the exemption vanishes and the rule stays. Between them the two say the partial
+# index is doing both halves of its job.
+diff --git a/src/Dodona/Workspaces.cs b/src/Dodona/Workspaces.cs
+index 1b8c994..0ca8a32 100644
+--- a/src/Dodona/Workspaces.cs
++++ b/src/Dodona/Workspaces.cs
+@@ -318,8 +318,7 @@ sealed class Registry : IDisposable
+     /// <summary>Is this folder a git repository? The same filesystem-only test Repos uses
+     /// — a `.git` directory, or a `.git` FILE, which is what a worktree and a submodule
+     /// have.</summary>
+-    public static bool LooksLikeRepo(string dir) =>
+-        Directory.Exists(Path.Combine(dir, ".git")) || File.Exists(Path.Combine(dir, ".git"));
++    public static bool LooksLikeRepo(string dir) => Directory.Exists(dir);
+ 
+     /// <summary>
+     /// The workspace id: a readable slug plus four hex. Generated, NOT derived from the

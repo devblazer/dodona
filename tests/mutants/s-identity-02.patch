@@ -1,0 +1,32 @@
+# S-IDENTITY 02. Claims spanning two repositories are no longer called out as spanning.
+#
+# defect: `Repos.ForClaims`'s span guard is off by one (`hits.Count > 2`), so a two-repository
+# defect: ticket falls past it into the generic "say which repository with --repo" tail. It is
+# defect: still refused -- and the refusal no longer says the one thing that matters.
+#
+# WHY THE MESSAGE IS THE SUBJECT. `cross_repo_ticket_refused` asserts two phrases, `span 2
+# repositories` and `cannot be atomic`, and it asserts them because a refusal is the whole of what
+# the operator gets: there is no later screen to explain it. "Say which repository with --repo" is
+# ACTIVELY WRONG here -- it invites the operator to name one, which cannot help, because a change
+# spanning repositories is two tickets and sequencing them is a judgement call. An off-by-one in a
+# `Count` guard is also the most plausible way this actually breaks.
+#
+# expects-red: workspace:cross_repo_ticket_refused
+# expects-red: unit:Dodona.Tests.RepoResolutionTests.cross_repo_ticket_refused
+# expects-green: workspace:infers_repo_from_claims
+# expects-green: workspace:claim_outside_any_repo_refused
+# expects-green: unit:Dodona.Tests.RepoResolutionTests.infers_repo_from_claims
+# expects-green: unit:Dodona.Tests.RepoResolutionTests.claim_outside_any_repo_refused
+diff --git a/src/Dodona/Repos.cs b/src/Dodona/Repos.cs
+index 68f21d8..d30285c 100644
+--- a/src/Dodona/Repos.cs
++++ b/src/Dodona/Repos.cs
+@@ -232,7 +232,7 @@ static class Repos
+             else hits[r.Name] = r;
+         }
+ 
+-        if (hits.Count > 1)
++        if (hits.Count > 2)
+             return (null, $"claims span {hits.Count} repositories ({string.Join(", ", hits.Keys)}) — " +
+                           "a ticket lands by fast-forwarding one repository, and two fast-forwards cannot be atomic; " +
+                           "split it into one ticket per repository");

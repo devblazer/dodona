@@ -1,0 +1,58 @@
+# S-IDENTITY 06. Repo exclusivity is removed at BOTH layers.
+#
+# defect: two hunks, because the invariant is enforced twice on purpose and a defect in one alone
+# defect: is caught by the other:
+# defect:   * `Registry.Attach`'s layer-2 lookup never finds another owner (`other` is null), so
+# defect:     the loud refusal that carries the move command never fires;
+# defect:   * the partial `UNIQUE(members.key) WHERE is_git = 1` index -- the class comment calls
+# defect:     it "the real arbiter" -- is created NON-unique, so the insert succeeds.
+#
+# WHAT IT COSTS. A git repo in two workspaces is TWO MERGE TOKENS OVER ONE MAIN: two agents each
+# told "granted", both able to fast-forward the same branch. CLAUDE.md section 5 says a red in
+# these checks is a correctness incident rather than a flaky test, and this is the defect that
+# sentence is about.
+#
+# WHY THE INDEX HUNK IS NEEDED AT ALL. With only the first hunk the index still refuses, and the
+# error text changes rather than disappearing -- which is a genuinely different defect (the
+# affordance is lost, the guarantee is not). Removing both is what makes this "the invariant is
+# gone" instead of "the message is worse".
+#
+# expects-red: workspace:repo_in_two_workspaces_refused
+# expects-red: workspace:refusal_says_why_two_tokens_is_the_problem
+# expects-red: workspace:refusal_offers_the_move_affordance
+# expects-red: workspace:creating_a_workspace_cannot_steal_an_owned_repo
+# expects-red: unit:Dodona.Tests.RegistryExclusivityTests.repo_in_two_workspaces_refused
+# expects-red: unit:Dodona.Tests.RegistryExclusivityTests.refusal_says_why_two_tokens_is_the_problem
+# expects-red: unit:Dodona.Tests.RegistryExclusivityTests.refusal_offers_the_move_affordance
+# expects-red: unit:Dodona.Tests.RegistryExclusivityTests.creating_a_workspace_cannot_steal_an_owned_repo
+# expects-green: workspace:bare_folder_may_be_shared
+# expects-green: workspace:bare_folder_in_two_workspaces_is_allowed
+# expects-green: unit:Dodona.Tests.RegistryExclusivityTests.bare_folder_may_be_shared
+# expects-green: unit:Dodona.Tests.RegistryExclusivityTests.bare_folder_in_two_workspaces_is_allowed
+#
+# The controls are the EXEMPTION: a bare folder was always allowed in two workspaces, and it still
+# is. A mutant that reddened those too would be proving "attach stopped working" rather than "the
+# repo rule stopped being enforced".
+diff --git a/src/Dodona/Workspaces.cs b/src/Dodona/Workspaces.cs
+index 1b8c994..a59f021 100644
+--- a/src/Dodona/Workspaces.cs
++++ b/src/Dodona/Workspaces.cs
+@@ -114,7 +114,7 @@ sealed class Registry : IDisposable
+                 -- The invariant, made structural. Partial index: bare folders are exempt
+                 -- (no merge token exists to split, and a shared notes folder in two
+                 -- workspaces harms nothing), git repos are not.
+-                CREATE UNIQUE INDEX members_repo_exclusive ON members(key) WHERE is_git = 1;
++                CREATE INDEX members_repo_exclusive ON members(key) WHERE is_git = 1;
+                 CREATE TABLE aliases(
+                     alias TEXT PRIMARY KEY,             -- lowercased
+                     display TEXT NOT NULL,
+@@ -428,8 +428,7 @@ sealed class Registry : IDisposable
+ 
+         if (isGit)
+         {
+-            var other = All().FirstOrDefault(w => !w.Id.Equals(id, StringComparison.OrdinalIgnoreCase)
+-                                                  && w.Members.Any(m => m.Key == key));
++            Workspace? other = null;
+             if (other is not null)
+             {
+                 error = $"{full} already belongs to workspace \"{other.Name}\" ({other.Id})\n" +

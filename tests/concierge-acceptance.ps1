@@ -207,7 +207,7 @@ try {
     $cxStore = Join-Path $dodonaHome 'concierge\store.db'
     function CxDiscoveryEvents() { [int](Invoke-StoreSql $cxStore "SELECT COUNT(*) FROM events WHERE kind LIKE 'discovery%'").Trim() }
     $st = Dx @('concierge-status')
-    Check 'fence_is_derived_from_member_parents' ($st -match [regex]::Escape($fenceRoot)) $st
+    # (moved to unit:Dodona.Tests.ConciergeTerritoryTests.fence_is_derived_from_member_parents -- S-IDENTITY, tests/ledger/moves/s-identity.tsv)
 
     # THE DEMOTION ITSELF, and the whole decision rests on this check: an unresolvable sentence
     # must reach `ask` WITHOUT the fence having run. `discovery_miss` and

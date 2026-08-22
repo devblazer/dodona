@@ -1,0 +1,43 @@
+# S-IDENTITY 01. A ticket is created in a repository its claims are not in.
+#
+# defect: `Repos.ForClaims` resolves the claims correctly and then returns a DIFFERENT repository
+# defect: -- any other one in the workspace. The ticket is created, the worktree appears, the
+# defect: command exits 0, and the only thing that is wrong is which `main` this work will
+# defect: eventually be fast-forwarded onto.
+#
+# WHY THIS SHAPE AND NOT "resolution stops working". Aimed at a foundational function, a defect
+# that REFUSES tears the suite's fixture chain out from under itself: no ticket, no worktree, and
+# `Get-Content "$wt2\src\main.cs"` throws a PathNotFound record that escapes the try block, so
+# the suite prints no tally and `dev prove` reports every check MISSING instead of red. A mutant
+# has to leave the fixture standing to be observable at all. It is also the more honest defect:
+# P0.6 is the record of exactly this shape shipping -- a ticket in `tools` holding a claim over
+# `engine`, after which the gate, the merge backstop and the land each silently disagreed.
+#
+# expects-red: workspace:infers_repo_from_claims
+# expects-red: workspace:second_repo_ticket
+# expects-red: unit:Dodona.Tests.RepoResolutionTests.infers_repo_from_claims
+# expects-red: unit:Dodona.Tests.RepoResolutionTests.second_repo_ticket
+# expects-green: workspace:cross_repo_ticket_refused
+# expects-green: workspace:claim_outside_any_repo_refused
+# expects-green: unit:Dodona.Tests.RepoResolutionTests.cross_repo_ticket_refused
+# expects-green: unit:Dodona.Tests.RepoResolutionTests.claim_outside_any_repo_refused
+#
+# The controls are the two REFUSALS, both reached before this branch. Their surviving is what
+# says the red belongs to "which repository was chosen" rather than to resolution generally --
+# and `second_repo_ticket` is in the red list beside its twin for the same reason: a mutant that
+# always answered `engine` would satisfy the first check and fail only the second.
+diff --git a/src/Dodona/Repos.cs b/src/Dodona/Repos.cs
+index 68f21d8..bba3d20 100644
+--- a/src/Dodona/Repos.cs
++++ b/src/Dodona/Repos.cs
+@@ -238,7 +238,9 @@ static class Repos
+                           "split it into one ticket per repository");
+         if (hits.Count == 1 && homeless.Count > 0)
+             return (null, $"these claims are in no repository: {string.Join(", ", homeless)}");
+-        if (hits.Count == 1) return (hits.Values.First(), null);
++        if (hits.Count == 1)
++            return (repos.FirstOrDefault(r => !r.Name.Equals(hits.Keys.First(), StringComparison.OrdinalIgnoreCase))
++                    ?? hits.Values.First(), null);
+ 
+         if (homeless.Count > 0)
+             return (null, $"no repository covers {string.Join(", ", homeless)} — " +

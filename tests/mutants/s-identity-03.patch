@@ -1,0 +1,33 @@
+# S-IDENTITY 03. The homeless-claim refusal stops naming what there is.
+#
+# defect: `Repos.ForClaims`'s no-repository branch returns a bare sentence instead of naming the
+# defect: claims and listing the repositories that DO exist. It still refuses; it stops being
+# defect: actionable.
+#
+# WHY THAT IS A DEFECT AND NOT A STYLE PREFERENCE. CLAUDE.md 0.1: a refusal names what un-sticks
+# it, and "never hung, halted, stuck" is a standing directive. An operator who typed
+# `--claim path:docs/notes.md` in a workspace whose repositories are `engine` and `tools` has
+# almost certainly mistyped a prefix; the list is the fix. Without it the next move is to go and
+# read `dodona repos`, which is a wait with no condition that ends it.
+#
+# expects-red: workspace:claim_outside_any_repo_refused
+# expects-red: unit:Dodona.Tests.RepoResolutionTests.claim_outside_any_repo_refused
+# expects-green: workspace:cross_repo_ticket_refused
+# expects-green: workspace:infers_repo_from_claims
+# expects-green: unit:Dodona.Tests.RepoResolutionTests.cross_repo_ticket_refused
+# expects-green: unit:Dodona.Tests.RepoResolutionTests.infers_repo_from_claims
+diff --git a/src/Dodona/Repos.cs b/src/Dodona/Repos.cs
+index 68f21d8..c3027f6 100644
+--- a/src/Dodona/Repos.cs
++++ b/src/Dodona/Repos.cs
+@@ -240,9 +240,7 @@ static class Repos
+             return (null, $"these claims are in no repository: {string.Join(", ", homeless)}");
+         if (hits.Count == 1) return (hits.Values.First(), null);
+ 
+-        if (homeless.Count > 0)
+-            return (null, $"no repository covers {string.Join(", ", homeless)} — " +
+-                          $"repositories here: {string.Join(", ", repos.Select(r => r.Name))}");
++        if (homeless.Count > 0) return (null, "these claims are in no repository");
+         // Symbol-only claims in a single-repo workspace: no ambiguity to resolve.
+         return repos.Count == 1 ? (repos[0], null)
+             : (null, $"say which repository with --repo (one of: {string.Join(", ", repos.Select(r => r.Name))})");
