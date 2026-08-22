@@ -1334,7 +1334,18 @@ function Do-Prove {
     $mutant = $null
     if ($with) {
         $wp = if ([System.IO.Path]::IsPathRooted($with)) { $with } else { Join-Path $repo $with }
-        if (-not (Test-Path $wp)) { Abort "no patch at $wp" "mutants are CHECKED IN at tests\mutants\<slice>-NN.patch (plan W3 delta 6)" }
+        if (-not (Test-Path $wp)) {
+            # NAME THE REAL CAUSE. A bash/git-bash caller typing the documented
+            # `--with tests\mutants\s-wire-01.patch` has its backslashes eaten before dev.ps1
+            # ever runs, and the argument arrives as `testsmutantss-wire-01.patch`. The refusal
+            # was correct and unreadable; every slice after the pilot types this command.
+            $hint = if ($with -notmatch '[\\/]' -and $with -match 'mutants') {
+                "that path has NO separator in it -- a POSIX shell ate the backslashes. Use forward slashes: dev prove --with tests/mutants/<slice>-NN.patch"
+            } else {
+                "mutants are CHECKED IN at tests\mutants\<slice>-NN.patch (plan W3 delta 6)"
+            }
+            Abort "no patch at $wp" $hint
+        }
         $mutant = Read-Mutant $wp
         if ($argv.Count -eq 0) { $argv = @($mutant.ExpectsRed) }
     }
@@ -3265,10 +3276,30 @@ function Ledger-Verdict($static) {
     Say ("  wires.tsv rows       {0}{1}" -f $wireRows, $wireNote)
     Say ("  harness rows         {0}   (one per surviving suite; not deduplicable)" -f $surviving)
     Say ("  live integration     {0}   target {1}   <- MUST BE <= target" -f $liveNames.Count, $target)
+    # READ THE REAL NUMBERS. These three lines said "W4 builds the double ledger; there is
+    # nothing to read yet" for one commit AFTER W4 built it -- while `dev lint`, on the same
+    # tree, printed "doubles: 2 anchored by attribute, 1 by corpus". A verdict block that
+    # contradicts the lint beside it teaches people to trust neither, which is the same disease
+    # as a gate that is always green. It went stale because W5's commit B is scoped to tests    # and could not reach this file; that is a good rule and this is its cost, paid here.
+    $dbl = Doubles-Static
+    # The SAME reader and the SAME column list as the lint rung (see Doubles-Static's use of
+    # double-assemblies.tsv), so the two readings cannot drift apart. The first draft of this
+    # block called a Doubles-Assemblies that does not exist: PowerShell resolved it to nothing,
+    # the corpus count came back 0, and the verdict contradicted the lint on the same tree --
+    # which is the exact defect this block was rewritten to remove.
+    $asmRows = Ledger-ReadTsv (Join-Path (Ledger-Dir) 'double-assemblies.tsv') @('project', 'assembly', 'rung2', 'note')
+    $anch = @($dbl.Rows).Count
+    $corp = 0
+    if ($asmRows.Present) { $corp = @($asmRows.Rows | Where-Object { $_.rung2 -eq 'corpus' }).Count }
+    $known = @($dbl.Rows | Where-Object { $_.KnownDivergence -ne '' -and $_.Issue -gt 0 })
+    $seamOnly = @($dbl.Rows | Where-Object { $_.SeamOnlyInterface -gt 0 })
     Say "DOUBLES"
-    Say "  anchored              -   <- W4 builds the double ledger; there is nothing to read yet"
-    Say "  known divergence      -"
-    Say "  unwitnessed shapes    -"
+    Say ("  anchored              {0}   ({1} by attribute, {2} by corpus)" -f ($anch + $corp), $anch, $corp)
+    Say ("  known divergence      {0}{1}   <- each MUST carry an open issue" -f $known.Count,
+         $(if ($known.Count -gt 0) { "  " + (($known | ForEach-Object { '#' + $_.Issue }) -join ' ') } else { '' }))
+    Say ("  seam-only interface   {0}{1}" -f $seamOnly.Count,
+         $(if ($seamOnly.Count -gt 0) { "  " + (($seamOnly | ForEach-Object { '#' + $_.SeamOnlyInterface }) -join ' ') } else { '' }))
+    Say "  unwitnessed shapes    -   <- issue #18: the corpus witnesses 6 of the parser's ~10 shapes"
     Say "VERDICT: on the accounting above, and only that."
 }
 
