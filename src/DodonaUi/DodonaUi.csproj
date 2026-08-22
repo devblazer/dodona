@@ -96,6 +96,16 @@
          typeof(Ver).Assembly, so compiled in here it reports the UI's identity, not the
          daemon's — which is the whole point when the two can differ. -->
     <Compile Include="..\Dodona\Ver.cs" Link="Ver.cs" />
+    <!-- The double ledger's attribute (docs/TEST-ARCHITECTURE-PLAN.md 3.2, W4). Linked rather
+         than referenced for a reason this project is the proof of: TWO OF THE THREE DOUBLES
+         THIS REPO ALREADY HAS LIVE HERE, in src\DodonaUi - FakeRecognizer (Recognizer.cs) and
+         Poses (Poses.cs). An attribute that only a test project could carry would be an
+         attribute they could not carry, and the first design of the ledger enumerated exactly
+         that empty population and went green. It has no behaviour at all: one enum and one
+         Attribute with five settable properties, read by a text scan in Repo-Lint and by
+         reflection in tests\Dodona.Ui.Tests. Deliberately NOT linked into DodonaFakeAgent
+         (D-B7, D-T27): that project references nothing, and its anchor is the corpus. -->
+    <Compile Include="..\Dodona\Testing\DoubleAttribute.cs" Link="Testing\DoubleAttribute.cs" />
   </ItemGroup>
 
   <!-- The window's pure-logic tests (tests\Dodona.Ui.Tests, net8.0-windows) reach

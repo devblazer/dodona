@@ -51,7 +51,22 @@ function Abort([string]$why, [string]$fix) {
 function AllSuites {
     # 'unit' first: it is the cheapest thing that can fail, so a full run finds a broken
     # claim algebra in under a second instead of four minutes in.
-    'unit', 'm0', 'm1', 'm2', 'm3', 'm4', 'workspace', 'voice', 'compression', 'brain', 'concierge', 'publish',
+    #
+    # 'ui-unit' JOINED THIS LIST AT W4, and W3 left the decision here on purpose: it was created
+    # with one trivial fact in it, and *"widening the default gate is W4's call to make when it
+    # has something to assert"*. It now has. Rung 2 of the double ledger over the DodonaUi
+    # assembly lives ONLY there -- tests\Dodona.Tests is net8.0 and cannot load a net8.0-windows
+    # assembly at all -- and so does RecognizerContract, which runs the real DeepgramRecognizer
+    # against a closed loopback port. Leaving it out would mean the half of the mechanism that
+    # covers two of this repo's three doubles ran only when somebody typed the command, which is
+    # the routing ladder's failure in a new costume.
+    #
+    # THE COST, MEASURED 2026-08-22 ON THIS MACHINE: 4.4-4.5 s warm, and it is SOLO (it compiles
+    # DodonaUi, and every window suite copies its binaries out of that directory), so it is 4.5 s
+    # of SERIALIZED wall clock added to a full run that measured 258-312 s against a 300 s budget.
+    # That is ~1.5 %, it is model-free, it opens no window and no microphone, and it is not a
+    # candidate for widening back out: the budget pressure is issue #1, not this.
+    'unit', 'ui-unit', 'm0', 'm1', 'm2', 'm3', 'm4', 'workspace', 'voice', 'compression', 'brain', 'concierge', 'publish',
     # `ui-use` was one 1221-line, 130-check, 88.8 s suite that had to run alone. Split at its
     # four fixture boundaries 2026-08-21 (issue #2); see SoloSuites below for the measurement.
     'ui-grid', 'ui-shell', 'ui-ask', 'ui-wake'
@@ -210,6 +225,27 @@ function Repo-Lint {
             }
         }
     }
+
+    # ============================ THE FOLD (D-T23, plan 3.4 and review finding 15) ============
+    #
+    # `dev ledger`'s STATIC rungs and the double ledger's rung 1 are asserted HERE, inside I8,
+    # and deliberately not as gate assertions of their own. The gate's count STAYS AT TEN.
+    #
+    # Why that matters rather than being bookkeeping: the plan's first draft said the count
+    # stayed at ten, then made `dev ledger` an eleventh assertion, then conceded in its own risk
+    # list that it had -- three statements and no reconciliation. A lint row is the correct home
+    # anyway. I8 is already one of the ten, already asserted by `gate`, and is by definition a
+    # sub-second static parse of tracked files, which is exactly what these rungs are.
+    #
+    # W2 could not do this fold: it would have made baseline.tsv's absence a GATE FAILURE, and
+    # only a green gate can capture a baseline. The census exists now (964 rows), so it lands.
+    #
+    # THE COST, said out loud: `dev lint` is no longer sub-second. It is ~1-2 s, because
+    # Ledger-Static AST-parses fifteen suite files and Doubles-Static reads every tracked .cs
+    # under src\ and tests\. That is still the cheapest verification in this repo by two orders
+    # of magnitude, and it is the one that catches a check name colliding with another suite's.
+    $problems += @((Ledger-Static).Problems)
+    $problems += @((Doubles-Static).Problems)
     return $problems
 }
 
@@ -2114,9 +2150,13 @@ function Do-Gate {
     }
 
     # I8: the prose does not lie about itself. Last of RECOVERY-PHASES section 2's rows.
+    #
+    # AND, SINCE W4, THE LEDGER RUNGS TOO -- folded in rather than added beside (D-T23). The
+    # assertion count stays at TEN on purpose: the ledger's static rungs and the double ledger's
+    # rung 1 are static parses of tracked files, which is what I8 already is.
     $lint = @(Repo-Lint)
     if ($lint.Count -eq 0) {
-        Say "  PASS  I8  repo lint clean: no control bytes, every named test path real"
+        Say "  PASS  I8  repo lint clean: no control bytes, every named test path real, every ledger row resolves, every double anchored"
     }
     else {
         Say "  FAIL  I8  repo lint found $($lint.Count) problem(s):"
@@ -2124,6 +2164,12 @@ function Do-Gate {
         $bad++
     }
 
+    Say ""
+    # READINGS, OUTSIDE THE ASSERTION LIST AND SAID TO BE (plan 3.4, D-T13). A count that
+    # reddens on a date fails for a non-defect, reddens every historical commit under bisect,
+    # and teaches people to re-run instead of read. These are numbers to LOOK at.
+    Say "-- readings (not assertions) --"
+    foreach ($r in @((Doubles-Static).Readings)) { Say "  $r" }
     Say ""
     # No "not covered yet" list any more: RECOVERY-PHASES section 2's rows are all asserted above.
     # That is NOT the same as "the gate proves the system works" -- it proves these ten things, and
@@ -2265,7 +2311,7 @@ function Ledger-ScanChecks {
     $sites = @()
     $files = @()
     foreach ($s in (AllSuites)) {
-        if ($s -eq 'unit') { continue }                      # xunit; the TRX is its census
+        if ((UnitSuites) -contains $s) { continue }          # xunit; the TRX is its census
         $f = "$repo\tests\$s-acceptance.ps1"
         if (Test-Path $f) { $files += [pscustomobject]@{ Suite = $s; Path = $f } }
     }
@@ -2424,7 +2470,10 @@ function Ledger-NewSet { , (New-Object 'System.Collections.Hashtable' ([System.S
 #     is the plan's end state for a wire (keep one integration check, add unit tests beneath
 #     it), and step B1 names the new C# method after the old check verbatim.
 function Ledger-Key([string]$suite, [string]$check, $harness) {
-    if ($suite -eq 'unit') { return "unit/$check" }
+    # BOTH unit suites, since W4 put ui-unit in AllSuites. Namespaced for the reason the
+    # comment above gives about `unit`, and for a second one that is specific to the pair: the
+    # two projects are different assemblies and a method name may legitimately exist in both.
+    if ((UnitSuites) -contains $suite) { return "$suite/$check" }
     if ($null -ne $harness -and $harness.ContainsKey($check)) { return "$suite/$check" }
     return $check
 }
@@ -2498,6 +2547,260 @@ function Ledger-WireBody([string]$wireId) {
 }
 
 # ---- the static rungs ---------------------------------------------------------------
+
+# ---- the double ledger, RUNG 1: population -------------------------------------------
+#
+# docs/TEST-ARCHITECTURE-PLAN.md 3.2, and it is the half the first design got fatally wrong.
+#
+# THE QUESTION IS "WHICH TYPES IN THIS REPOSITORY ARE DOUBLES", AND IT IS ANSWERED BY READING
+# THE REPO. The first design asked `Assembly.GetExecutingAssembly().GetTypes()` from
+# Dodona.Tests, whose one ProjectReference is src\Dodona -- so its population contained NONE of
+# the three doubles that already existed: FakeRecognizer and Poses are in src\DodonaUi (a net8.0
+# project cannot load a net8.0-windows one at all) and DodonaFakeAgent is a standalone exe. It
+# would have gone green because it was looking at an empty set, which is the routing ladder's
+# own failure shape in the mechanism written to prevent it.
+#
+# A TEXT SCAN CANNOT MISS AN ASSEMBLY, because it never asks the runtime what is loaded. It also
+# runs on a tree that will not compile, which is what this script exists for (CLAUDE.md 1) and
+# which reflection can never have. The SEMANTIC questions -- how many implementers an interface
+# has, whether a contract resolves -- a text scan answers badly, and those are rung 2, in
+# tests\Dodona.Tests\Doubles and tests\Dodona.Ui.Tests.
+
+# ---- SEEN RED, EACH ONE, BEFORE ANY OF IT WAS BELIEVED ----------------------------------
+#
+# CLAUDE.md 0.3: a check is worth nothing until it has been seen red against the code it is meant
+# to catch. `dev prove` cannot judge dev.ps1 itself, so each of these was broken by hand against
+# this tree and the refusal copied out verbatim. tests\ledger\README.md carries all eight of W4's
+# reds together with the rung-2 ones; these are the five this function produced.
+#
+#   assertion 1  src\Dodona\RED01.cs:3 class 'FakeThingA' is a test double by its NAME and carries
+#                no [Double(...)] -- every double declares what keeps it honest (plan 3.2 rung 1,
+#                assertion 1)
+#                ...and the same refusal from src\DodonaUi\RED02.cs, which is the point: ONE scan,
+#                and src\ is inside its population. The first design's was not.
+#   assertion 2  src\Dodona\RED04.cs:3 class 'MockThingD' is named Stub*/Mock*, which is refused
+#                anywhere in the repo -- name it Fake*/Recording* and anchor it with [Double(...)]
+#   assertion 3  src\DodonaUi\Recognizer.cs:93 [Double] on 'FakeRecognizer' names Wire
+#                'voice:clicking_the_mic_toggles_listening', which resolves to no
+#                tests\ledger\wires.tsv row -- the wire was deleted, renamed, or misspelled
+#   assertion 4  src\DodonaShim\RED03.cs:6 declares [Double] on 'FakeThingC' but project
+#                'src\DodonaShim' is in NO tests\ledger\double-assemblies.tsv row -- no reflection
+#                test loads that assembly, so the anchor would never be checked
+#   the issue    src\Dodona\RED08.cs:6 [Double] on 'FakeThingE' declares a KnownDivergence with no
+#                Issue -- a divergence is visibility, not a catch, and an untracked gap is one
+#                nobody will ever close
+#
+# THE CONTROL, because a refusal that fires on everything is worth nothing: the same scan over the
+# real tree is clean, and prints what it found rather than only what it refused.
+
+# A `[` that is still open across a line break, so a multi-line attribute is read whole.
+# String spans are blanked first: Wire = "a[b]" must not count as a bracket.
+function Doubles-Balanced([string]$text) {
+    $s = [regex]::Replace($text, '"(?:[^"\\]|\\.)*"', '""')
+    $open = @([regex]::Matches($s, '\[')).Count
+    $close = @([regex]::Matches($s, '\]')).Count
+    return ($open -le $close)
+}
+
+# Every type declaration in tracked C# under src\ and tests\, with the attributes attached to it.
+#
+# TRACKED, which is issue #15 in miniature: a file you have written but not `git add`ed is
+# invisible here, exactly as it is to the rest of Repo-Lint. Add before you lint.
+function Doubles-TypeSites {
+    $sites = @()
+    $decl = '^(?:(?:public|internal|private|protected|sealed|static|abstract|partial|file|new|unsafe|readonly|ref)\s+)*' +
+            '(class|struct|interface|record(?:\s+(?:class|struct))?)\s+([A-Za-z_][A-Za-z0-9_]*)'
+    foreach ($rel in @(& git -C $repo ls-files 'src/*.cs' 'tests/*.cs' 2>$null)) {
+        $full = Join-Path $repo $rel
+        if (-not (Test-Path $full)) { continue }              # staged-deleted, still listed
+        $lines = @([System.IO.File]::ReadAllLines($full))
+        $block = $false; $attrs = @(); $buf = ''
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $t = "$($lines[$i])".Trim()
+            if ($block) { if ($t -match '\*/') { $block = $false }; continue }
+            if ($t -eq '') { continue }
+            if ($t.StartsWith('//')) { continue }             # covers /// too
+            if ($t.StartsWith('/*')) { if ($t -notmatch '\*/') { $block = $true }; continue }
+            if ($buf -ne '') {
+                $buf = $buf + ' ' + $t
+                if (Doubles-Balanced $buf) { $attrs += $buf; $buf = '' }
+                continue
+            }
+            if ($t.StartsWith('[')) {
+                if (Doubles-Balanced $t) { $attrs += $t } else { $buf = $t }
+                continue
+            }
+            $m = [regex]::Match($t, $decl)
+            if ($m.Success) {
+                $sites += [pscustomobject]@{
+                    File = ($rel -replace '/', '\'); Line = $i + 1
+                    Kind = $m.Groups[1].Value; Name = $m.Groups[2].Value; Attrs = @($attrs)
+                }
+            }
+            # Any other code line ends the run of attributes -- they belonged to whatever it was.
+            $attrs = @()
+        }
+    }
+    return $sites
+}
+
+# The C# project a file belongs to, as a repo-relative path: the nearest ancestor holding a
+# .csproj. This is what rung-1 assertion 4 resolves against double-assemblies.tsv.
+function Doubles-Project([string]$rel) {
+    $dir = Split-Path -Parent (Join-Path $repo $rel)
+    while ($dir -and $dir.Length -gt $repo.Length) {
+        if (@(Get-ChildItem -Path $dir -Filter '*.csproj' -File -ErrorAction SilentlyContinue).Count -gt 0) {
+            return $dir.Substring($repo.Length).TrimStart('\')
+        }
+        $dir = Split-Path -Parent $dir
+    }
+    return ''
+}
+
+function Doubles-Field([string]$attr, [string]$name) {
+    $m = [regex]::Match($attr, $name + '\s*=\s*"((?:[^"\\]|\\.)*)"')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ''
+}
+
+function Doubles-Number([string]$attr, [string]$name) {
+    $m = [regex]::Match($attr, $name + '\s*=\s*(-?\d+)')
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+    return 0
+}
+
+function Doubles-Static {
+    # Cached: Repo-Lint asserts on it and Do-Gate reads it for the reading line, and scanning
+    # the tree twice to print one sentence is the kind of tax CLAUDE.md 0.1 is about.
+    if ($null -ne $script:_doublesStatic) { return $script:_doublesStatic }
+
+    $out = [pscustomobject]@{ Problems = @(); Readings = @(); Rows = @() }
+    $dir = Ledger-Dir
+    $anchors = @('Interface', 'Corpus', 'Landing')
+
+    # ---- double-assemblies.tsv: the list a rung-2 reflection test actually loads ----
+    $asm = Ledger-ReadTsv (Join-Path $dir 'double-assemblies.tsv') @('project', 'assembly', 'rung2', 'note')
+    $out.Problems += @($asm.Problems)
+    $known = Ledger-NewSet
+    if (-not $asm.Present) {
+        $out.Problems += "tests\ledger\double-assemblies.tsv is MISSING -- rung-1 assertion 4 has nothing to resolve a project against, and that is the assertion that closes 'put the fake in a project the ledger does not look at'"
+    }
+    else {
+        foreach ($r in $asm.Rows) {
+            $at = "double-assemblies.tsv:$($r._line)"
+            if ($known.ContainsKey($r.project)) { $out.Problems += "$at repeats project '$($r.project)'" }
+            $known[$r.project] = $r
+            if (-not (Test-Path (Join-Path $repo $r.project))) {
+                $out.Problems += "$at names project '$($r.project)', which is not a directory in this repo"
+            }
+            elseif (@(Get-ChildItem -Path (Join-Path $repo $r.project) -Filter '*.csproj' -File -ErrorAction SilentlyContinue).Count -eq 0) {
+                $out.Problems += "$at names project '$($r.project)', which holds no .csproj -- assertion 4 resolves a FILE to its nearest .csproj, so a row naming anything else can never be matched"
+            }
+            if ($r.rung2 -ne 'corpus' -and -not (Test-Path (Join-Path $repo $r.rung2))) {
+                $out.Problems += "$at names rung2 '$($r.rung2)', which is neither a directory in this repo nor the word 'corpus' (plan 3.4: a file-based anchor)"
+            }
+        }
+    }
+
+    $wires = Ledger-ReadTsv (Join-Path $dir 'wires.tsv') @('wire_id', 'owner_suite', 'owner_check', 'owner_body_sha', 'what_it_proves', 'why_real_machinery')
+
+    # ---- the four assertions of plan 3.2 ----
+    $sites = Doubles-TypeSites
+    foreach ($s in $sites) {
+        $carries = @($s.Attrs | Where-Object { $_ -match '\[\s*Double\s*\(' })
+
+        # 1. every Fake*/Recording* type carries a [Double(...)].
+        if ($s.Name -match '^(Fake|Recording)' -and $carries.Count -eq 0) {
+            $out.Problems += "$($s.File):$($s.Line) $($s.Kind) '$($s.Name)' is a test double by its NAME and carries no [Double(...)] -- every double declares what keeps it honest (plan 3.2 rung 1, assertion 1)"
+        }
+
+        # 2. nothing is named Stub* or Mock*, anywhere. Not a style rule: those words name a
+        #    thing with no anchor at all, and this repo's word for a double that is anchored is
+        #    Fake or Recording.
+        if ($s.Name -match '^(Stub|Mock)') {
+            $out.Problems += "$($s.File):$($s.Line) $($s.Kind) '$($s.Name)' is named Stub*/Mock*, which is refused anywhere in the repo -- name it Fake*/Recording* and anchor it with [Double(...)] (plan 3.2 rung 1, assertion 2)"
+        }
+
+        if ($carries.Count -eq 0) { continue }
+        $attr = $carries[0]
+        $at = "$($s.File):$($s.Line)"
+
+        $anchor = ''
+        $am = [regex]::Match($attr, '\[\s*Double\s*\(\s*Anchor\s*\.\s*([A-Za-z]+)')
+        if ($am.Success) { $anchor = $am.Groups[1].Value }
+        if ($anchors -notcontains $anchor) {
+            $out.Problems += "$at [Double] on '$($s.Name)' does not open with a known anchor -- expected Anchor.[$($anchors -join ' ')]"
+        }
+
+        $wire = Doubles-Field $attr 'Wire'
+        $contract = Doubles-Field $attr 'Contract'
+        $divergence = Doubles-Field $attr 'KnownDivergence'
+        $issue = Doubles-Number $attr 'Issue'
+        $seam = Doubles-Number $attr 'SeamOnlyInterface'
+
+        $out.Rows += [pscustomobject]@{
+            File = $s.File; Line = $s.Line; Name = $s.Name; Anchor = $anchor
+            Wire = $wire; Contract = $contract; KnownDivergence = $divergence; Issue = $issue; SeamOnlyInterface = $seam
+        }
+
+        # 3. Wire resolves to a wires.tsv row. EVERY double names a wire it does not replace
+        #    (plan 3.1's second hard rule against the self-fulfilling lookup).
+        if ($wire -eq '') {
+            $out.Problems += "$at [Double] on '$($s.Name)' names no Wire -- every double names a wire it DOES NOT replace, still proved against the real machinery (plan 3.1)"
+        }
+        elseif (-not $wires.Present) {
+            $out.Problems += "$at [Double] on '$($s.Name)' names Wire '$wire' but tests\ledger\wires.tsv does not exist"
+        }
+        else {
+            $parts = @($wire -split ':', 2)
+            if ($parts.Count -ne 2 -or $parts[0] -eq '' -or $parts[1] -eq '') {
+                $out.Problems += "$at [Double] on '$($s.Name)' has Wire '$wire', which must be '<suite>:<check>'"
+            }
+            elseif (@($wires.Rows | Where-Object { $_.owner_suite -eq $parts[0] -and $_.owner_check -eq $parts[1] }).Count -eq 0) {
+                $out.Problems += "$at [Double] on '$($s.Name)' names Wire '$wire', which resolves to no tests\ledger\wires.tsv row -- the wire was deleted, renamed, or misspelled"
+            }
+        }
+
+        # 4. the project declaring it has rung-2 coverage. THIS IS THE ASSERTION THE FIRST DESIGN
+        #    COULD NOT HAVE, and the escape it closes is where two of the three doubles live.
+        $proj = Doubles-Project $s.File
+        if ($proj -eq '') {
+            $out.Problems += "$at declares [Double] on '$($s.Name)' but the file is under no .csproj"
+        }
+        elseif (-not $known.ContainsKey($proj)) {
+            $out.Problems += "$at declares [Double] on '$($s.Name)' but project '$proj' is in NO tests\ledger\double-assemblies.tsv row -- no reflection test loads that assembly, so the anchor would never be checked. Give the project a rung-2 row, or move the double (plan 3.2 rung 1, assertion 4)"
+        }
+
+        # ---- and the declarations that make a gap named rather than silent ----
+        if ($divergence -ne '' -and $issue -le 0) {
+            $out.Problems += "$at [Double] on '$($s.Name)' declares a KnownDivergence with no Issue -- a divergence is visibility, not a catch, and an untracked gap is one nobody will ever close (plan 3.2)"
+        }
+        if ($divergence -eq '' -and $issue -gt 0) {
+            $out.Problems += "$at [Double] on '$($s.Name)' sets Issue = $issue with no KnownDivergence to explain -- the issue number belongs to a sentence"
+        }
+        if ($seam -lt 0 -or ($seam -eq 0 -and $attr -match 'SeamOnlyInterface')) {
+            $out.Problems += "$at [Double] on '$($s.Name)' sets SeamOnlyInterface to a value that is not an open issue number -- the shortfall it declares is counted in the gate reading, so it has to be tracked"
+        }
+        if ($seam -gt 0 -and $anchor -ne 'Interface') {
+            $out.Problems += "$at [Double] on '$($s.Name)' sets SeamOnlyInterface on a $anchor anchor -- it declares a shortfall in the Interface implementer count and means nothing anywhere else"
+        }
+    }
+
+    # ---- the readings, which are NOT assertions (plan 3.4) ----
+    $anchored = @($out.Rows).Count
+    # Issue -gt 0 as well as a sentence: a divergence with no issue is REFUSED above, and a
+    # reading that printed '#0' beside it would be the tool describing a state it just refused.
+    $div = @($out.Rows | Where-Object { $_.KnownDivergence -ne '' -and $_.Issue -gt 0 })
+    $seams = @($out.Rows | Where-Object { $_.SeamOnlyInterface -gt 0 })
+    $corpus = @()
+    if ($asm.Present) { $corpus = @($asm.Rows | Where-Object { $_.rung2 -eq 'corpus' }) }
+    $divWords = if ($div.Count -gt 0) { " (issues " + (($div | ForEach-Object { '#' + $_.Issue }) -join ' ') + ")" } else { '' }
+    $seamWords = if ($seams.Count -gt 0) { " (issues " + (($seams | ForEach-Object { '#' + $_.SeamOnlyInterface }) -join ' ') + ")" } else { '' }
+    $out.Readings += "doubles: $anchored anchored by attribute, $($corpus.Count) by corpus; $($div.Count) with a known divergence$divWords; $($seams.Count) on a seam-only interface$seamWords"
+
+    $script:_doublesStatic = $out
+    return $out
+}
 
 function Ledger-Static {
     $dir = Ledger-Dir
@@ -2708,10 +3011,34 @@ function Ledger-Static {
 # of what a run actually wrote into $results, which is the only authority that agrees with
 # dev.ps1's tally-is-authority rule. A name that exists in a file but never ran counts as
 # nothing -- this repo has been bitten by both halves of that.
+# One TRX, read into an ORDINAL set of fully-qualified method names against their case count.
+# A [Theory] row's testName is the method's FQN with a parenthesised argument list appended, and
+# stripping at the FIRST '(' is safe because a C# method name cannot contain one -- so no argument
+# value can be mistaken for the name however it is spelled (tests\ledger\README.md, W3).
+function Ledger-Trx([string]$path) {
+    $r = [pscustomobject]@{ Present = $false; Methods = (Ledger-NewSet); Failed = @() }
+    if (-not (Test-Path $path)) { return $r }
+    $r.Present = $true
+    $xml = [xml](Get-Content $path -Raw)
+    foreach ($row in @($xml.TestRun.Results.UnitTestResult)) {
+        if ($null -eq $row) { continue }
+        $name = "$($row.testName)"
+        $method = ($name -replace '\(.*$', '')
+        if (-not $r.Methods.ContainsKey($method)) { $r.Methods[$method] = 0 }
+        $r.Methods[$method] = $r.Methods[$method] + 1
+        if ("$($row.outcome)" -ne 'Passed') { $r.Failed += $name }
+    }
+    return $r
+}
+
 function Ledger-Live($static) {
+    # Unit is keyed by SUITE now, because there are two xunit projects since W3 and ui-unit
+    # joined AllSuites at W4. W3's own note said teaching the census about the second project
+    # belonged in "the commit that gives it rows to count", and this is that commit.
     $out = [pscustomobject]@{ Problems = @(); Readings = @(); Suite = @{}; Unit = @{}; Missing = @() }
+    foreach ($u in (UnitSuites)) { $out.Unit[$u] = (Ledger-NewSet) }
     foreach ($s in (AllSuites)) {
-        if ($s -eq 'unit') { continue }
+        if ((UnitSuites) -contains $s) { continue }
         $f = "$repo\tests\$s-output\results.json"
         if (-not (Test-Path $f)) { $out.Missing += $s; continue }
         # ConvertFrom-Json on a JSON OBJECT gives one PSCustomObject; enumerate its
@@ -2723,27 +3050,20 @@ function Ledger-Live($static) {
         $fails = @($props | Where-Object { "$($_.Value)" -like 'FAIL*' } | ForEach-Object { $_.Name })
         $out.Suite[$s] = [pscustomobject]@{ Keys = $keys; Fails = $fails; When = (Get-Item $f).LastWriteTime }
     }
-    $trx = "$repo\tests\unit-output\unit.trx"
-    if (Test-Path $trx) {
-        $xml = [xml](Get-Content $trx -Raw)
-        $methods = Ledger-NewSet    # fully-qualified C# names; case is significant
-        $failed = @()
-        foreach ($r in @($xml.TestRun.Results.UnitTestResult)) {
-            if ($null -eq $r) { continue }
-            $name = "$($r.testName)"
-            $method = ($name -replace '\(.*$', '')             # a theory row is Method(arg: 1)
-            if (-not $methods.ContainsKey($method)) { $methods[$method] = 0 }
-            $methods[$method] = $methods[$method] + 1
-            if ("$($r.outcome)" -ne 'Passed') { $failed += $name }
+    foreach ($u in (UnitSuites)) {
+        # Both TRXes land in tests\unit-output\ (Run-Unit passes --results-directory there, and
+        # the reason is not cosmetic: dotnet test's default is tests\<project>\TestResults\,
+        # which is TRACKED, and dev gate asserts that a suite run dirtied nothing).
+        $t = Ledger-Trx "$repo\tests\unit-output\$u.trx"
+        if (-not $t.Present) {
+            $out.Readings += "$u.trx: ABSENT at tests\unit-output\$u.trx -- run 'dev test $u' (Run-Unit writes it)"
+            continue
         }
-        $out.Unit = $methods
-        $cases = (@($methods.Values) | Measure-Object -Sum).Sum
+        $out.Unit[$u] = $t.Methods
+        $cases = (@($t.Methods.Values) | Measure-Object -Sum).Sum
         if ($null -eq $cases) { $cases = 0 }
-        $out.Readings += "unit.trx: $($methods.Count) methods, $cases executed cases, $($failed.Count) not passed"
-        if ($failed.Count -gt 0) { $out.Readings += "unit.trx: NOT PASSED -- $(($failed | Select-Object -First 5) -join ', ')" }
-    }
-    else {
-        $out.Readings += "unit.trx: ABSENT at tests\unit-output\unit.trx -- run 'dev test unit' (Run-Unit writes it)"
+        $out.Readings += "$u.trx: $($t.Methods.Count) methods, $cases executed cases, $($t.Failed.Count) not passed"
+        if ($t.Failed.Count -gt 0) { $out.Readings += "$u.trx: NOT PASSED -- $(($t.Failed | Select-Object -First 5) -join ', ')" }
     }
     if ($out.Missing.Count -gt 0) {
         $out.Readings += "no results.json for: $($out.Missing -join ', ') -- those suites did not run"
@@ -2776,11 +3096,13 @@ function Ledger-Live($static) {
                 $undeclared += "${s}:$k"
             }
         }
-        foreach ($m in @($out.Unit.Keys)) {
-            $leaf = @($m -split '\.')[-1]
-            $key = Ledger-Key 'unit' $leaf $harness
-            if ($base.ContainsKey($key) -or $declared.ContainsKey($key)) { continue }
-            $undeclared += "unit:$m"
+        foreach ($u in (UnitSuites)) {
+            foreach ($m in @($out.Unit[$u].Keys)) {
+                $leaf = @($m -split '\.')[-1]
+                $key = Ledger-Key $u $leaf $harness
+                if ($base.ContainsKey($key) -or $declared.ContainsKey($key)) { continue }
+                $undeclared += "${u}:$m"
+            }
         }
         if ($undeclared.Count -gt 0) {
             $tail = if ($undeclared.Count -gt 8) { ' ...' } else { '' }
@@ -2794,12 +3116,14 @@ function Ledger-Live($static) {
 
 function Ledger-Capture($static) {
     $live = Ledger-Live $static
-    $expected = @((AllSuites) | Where-Object { $_ -ne 'unit' })
+    $expected = @((AllSuites) | Where-Object { (UnitSuites) -notcontains $_ })
     if ($live.Missing.Count -gt 0) {
         Abort "capture needs a FULL run: no results.json for $($live.Missing -join ', ')" "powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 gate"
     }
-    if ($live.Unit.Count -eq 0) {
-        Abort "capture needs the unit TRX: tests\unit-output\unit.trx is absent or empty" "powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit"
+    foreach ($u in (UnitSuites)) {
+        if ($live.Unit[$u].Count -eq 0) {
+            Abort "capture needs the $u TRX: tests\unit-output\$u.trx is absent or empty" "powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test $u"
+        }
     }
     $red = @()
     foreach ($s in $expected) { if ($live.Suite[$s].Fails.Count -gt 0) { $red += "${s}: $($live.Suite[$s].Fails -join ', ')" } }
@@ -2831,26 +3155,28 @@ function Ledger-Capture($static) {
     # A unit leaf that two FQNs share is a REAL collapse and must be reported, not skipped in
     # silence: `A_trailing_separator_is_not_a_different_folder` exists in both
     # InstanceCanonicalTests and ProjectResolutionTests, and the census can hold one row.
-    $seenLeaf = Ledger-NewSet
-    foreach ($m in @($live.Unit.Keys | Sort-Object)) {
-        $leaf = @($m -split '\.')[-1]
-        if ($seenLeaf.ContainsKey($leaf)) {
-            Say "  NOTE two unit methods share the leaf name '$leaf' ($($seenLeaf[$leaf]) and $m) -- the census holds one row; rename one to count both"
-            continue
+    foreach ($u in (UnitSuites)) {
+        $seenLeaf = Ledger-NewSet          # per PROJECT: two assemblies may hold one leaf name
+        foreach ($m in @($live.Unit[$u].Keys | Sort-Object)) {
+            $leaf = @($m -split '\.')[-1]
+            if ($seenLeaf.ContainsKey($leaf)) {
+                Say "  NOTE two $u methods share the leaf name '$leaf' ($($seenLeaf[$leaf]) and $m) -- the census holds one row; rename one to count both"
+                continue
+            }
+            $seenLeaf[$leaf] = $m
+            $key = Ledger-Key $u $leaf $harness
+            if ($existing.ContainsKey($key)) { continue }
+            $existing[$key] = $true
+            $rows += [pscustomobject]@{ check = $leaf; suite = $u; cases = "$($live.Unit[$u][$m])" }
+            $new++
         }
-        $seenLeaf[$leaf] = $m
-        $key = Ledger-Key 'unit' $leaf $harness
-        if ($existing.ContainsKey($key)) { continue }
-        $existing[$key] = $true
-        $rows += [pscustomobject]@{ check = $leaf; suite = 'unit'; cases = "$($live.Unit[$m])" }
-        $new++
     }
     New-Item -ItemType Directory -Force (Ledger-Dir) | Out-Null
     Ledger-WriteTsv (Join-Path (Ledger-Dir) 'baseline.tsv') @('check', 'suite', 'cases') @($rows | Sort-Object suite, check)
     $cases = (@($rows | ForEach-Object { [int]("0" + $_.cases) }) | Measure-Object -Sum).Sum
     Say "captured $(@($rows).Count) name(s) into tests\ledger\baseline.tsv ($new new)"
-    Say "  suite checks:   $(@($rows | Where-Object { $_.suite -ne 'unit' }).Count)"
-    Say "  unit methods:   $(@($rows | Where-Object { $_.suite -eq 'unit' }).Count)"
+    Say "  suite checks:   $(@($rows | Where-Object { (UnitSuites) -notcontains $_.suite }).Count)"
+    foreach ($u in (UnitSuites)) { Say "  $u methods:$(' ' * [Math]::Max(1, 8 - $u.Length))$(@($rows | Where-Object { $_.suite -eq $u }).Count)" }
     Say "  executed cases: $cases"
     Say ""
     Say "COMMIT IT. A baseline that is not in git has nothing to be frozen against, and the"
@@ -3074,7 +3400,9 @@ switch ($Verb) {
     'lint' {
         Say "== lint =="
         $l = @(Repo-Lint)
-        if ($l.Count -eq 0) { Say "clean: no control bytes, every named test path real" }
+        # Readings, NOT assertions (plan 3.4): a number nobody has to keep inside a bound.
+        foreach ($r in @((Ledger-Static).Readings) + @((Doubles-Static).Readings)) { Say "  note: $r" }
+        if ($l.Count -eq 0) { Say "clean: no control bytes, every named test path real, every ledger row resolves, every double anchored" }
         else { foreach ($x in $l) { Say "  $x" }; Say ""; Say "$($l.Count) problem(s)"; exit 1 }
     }
     'gate' { Do-Gate }

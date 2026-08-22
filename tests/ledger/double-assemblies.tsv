@@ -1,0 +1,18 @@
+# WHICH ASSEMBLIES THE DOUBLE LEDGER LOOKS AT, and what looks at them.
+#
+# docs/TEST-ARCHITECTURE-PLAN.md 3.2, rung-1 assertion 4. This file is the answer to the escape
+# the first design could not close: "put the fake in a project the ledger does not look at".
+# Adding a [Double] to a project with no row here reddens `dev lint` until either the project is
+# given rung-2 coverage or the double moves. The scan that reads this is TEXT, not reflection, so
+# it cannot miss an assembly the way a runtime enumeration silently did.
+#
+# rung2 is the test project whose DoubleLedgerTests loads that assembly, or the literal word
+# `corpus` for a double anchored by recorded bytes rather than by types.
+#
+# ASCII, CRLF, no BOM, tab-separated. tests\ledger\README.md says why.
+project	assembly	rung2	note
+src\Dodona	dodona	tests\Dodona.Tests	net8.0. Holds Testing\DoubleAttribute.cs itself, and will hold RecordingLaneSink (W5).
+src\DodonaUi	DodonaUi	tests\Dodona.Ui.Tests	net8.0-windows, so tests\Dodona.Tests CANNOT LOAD IT AT ALL - that is why this row exists and why W3 stood the second test project up. FakeRecognizer and Poses live here.
+src\DodonaFakeAgent	DodonaFakeAgent	corpus	D-T27: a program, not a type. Anchoring a 545-line exe by reflecting over one of its classes asserts nothing about the wire shapes it emits, which is the only thing anyone cares about. Its anchor is MANIFEST.json + dev wire-sample + lint row I9, file-based end to end, so [Double] is NOT linked in here (D-B7).
+tests\Dodona.Tests	Dodona.Tests	tests\Dodona.Tests	itself: fixtures and contract classes that carry [Double] are enumerated by the same facts.
+tests\Dodona.Ui.Tests	Dodona.Ui.Tests	tests\Dodona.Ui.Tests	itself, for the same reason.

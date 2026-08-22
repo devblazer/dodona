@@ -587,6 +587,36 @@ nothing closes D2 and the plan says so with a number in the gate output. **If th
 the honest response is fewer doubles, not a stronger-sounding attribute** — which is why D-T11
 (delete a transport rather than fake it) is the model §3.6 should follow further than it does.
 
+#### BUILT AT W4, AND TWO THINGS ABOVE WERE NOT BUILDABLE AS WRITTEN
+
+Recorded here rather than only in the work item, because this subsection is what a later slice
+reads before adding a double. `tests/ledger/README.md` § *W4* carries both in full, with the
+literal reds.
+
+1. **The `Interface` count has no shippable remedy for `FakeRecognizer`, and this section asserts
+   one.** It states the rule as ">= 2 non-`[Double]` implementers", says `IRecognizer` does not
+   qualify, and §3.6 anchors `FakeRecognizer` as `Interface` regardless — *"RED on day one under
+   the corrected rule, deliberately"*. Both remedies offered here (`Contract`, `KnownDivergence`)
+   are about BEHAVIOUR and neither changes an implementer count, so as written the mechanism ships
+   a permanently failing unit test. Weakening the rule to ">= 1" was rejected: it would bless
+   exactly the interface-that-exists-only-as-a-seam case. **Built instead:
+   `SeamOnlyInterface = <open issue>`** — a declaration on the model of `no-seam-yet` (D-T21),
+   refused by rung 1 without a positive issue number, counted separately in the gate's ledger
+   reading. `FakeRecognizer` carries it; issue #17 holds both of its declared gaps.
+
+2. **`Contract` cannot be a `Type`.** A contract class holds `[Fact]`s, so it lives in a test
+   project, and two of the three doubles live in production assemblies which cannot reference
+   `tests/`. `typeof` would have compiled only for a double in a test project — the population the
+   first design already failed on. It is a **string** naming the class, and the hand copy that
+   creates is closed by `Interface_is_never_a_sole_anchor`, which resolves the name in the test
+   assembly and reddens if it names nothing, names something concrete, or names something with
+   fewer than two concrete subclasses. `Real` stays a `Type`, as required.
+
+Also found by running it: the first implementation of the count went **GREEN** over
+`FakeRecognizer`, because it and `DeepgramRecognizer` share `IDisposable` as well as `IRecognizer`
+and the strongest shared interface won. Candidates are now restricted to interfaces declared in the
+assemblies under test.
+
 ### 3.3 What goes red, and when
 
 | you did this | what goes red | where |
@@ -1028,6 +1058,17 @@ and §5.4 states it: they are reachable on the `--live` side only.
 
 Then: `RecognizerContract` green on both subclasses; `dev test unit` and `dev test ui-unit` timed and
 the numbers written down; the throwaway fixtures reverted.
+
+**BUILT 2026-08-22, in one session.** All eight reds seen and recorded verbatim in
+`tests/ledger/README.md` and in the checks' own comments; red 6 was red against the untouched
+tree, and so was a ninth nobody asked for (the implementer count, which is what forced
+`SeamOnlyInterface` — see §3.2). `RecognizerContract` is green on both subjects. Falsifier 4 does
+NOT fire: `dev test unit` warm is **1.8–1.9 s** at 304 cases and **2.8 s** with the throwaway
+fixtures and 312, i.e. **+0.9 s for eight fixture-bearing cases** — 56 ms per real `Store`, 183 ms
+per real git repo — and the fixtures are reverted. Two decisions the plan left to W4 were taken and
+are recorded with their measurements: **the fold into Repo-Lint is done and `dev gate` still
+reports ten assertions**, and **`ui-unit` joined `AllSuites`** (4.4–4.5 s warm, still solo).
+`Poses` is NOT anchored and that is named as a gap rather than left to be discovered.
 
 **Cost.** ESTIMATE: **two sessions**, not one. It was one when the mechanism was a single ~120-line
 reflection test; it is now a lint rung, two reflection classes, a contract with a real second

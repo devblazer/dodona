@@ -1,4 +1,5 @@
 using Dodona;
+using Dodona.Testing;
 
 namespace DodonaUi;
 
@@ -70,6 +71,25 @@ interface IRecognizer : IDisposable
 /// land, and the same reason `ui type` calls <c>SubmitInput</c> rather than synthesising a
 /// keystroke.
 /// </summary>
+// ONE DOUBLE, AND EVERYTHING THAT KEEPS IT HONEST, IN ONE PLACE
+// (docs/TEST-ARCHITECTURE-PLAN.md 3.2 / 3.6; both declared gaps are issue #17).
+//
+//  * Wire  -- a wire this fake DOES NOT replace, still proved against the real machinery beside
+//             it: the mic toggle at a real window, where a real socket to a closed loopback port
+//             has to read as ERROR rather than listening.
+//  * Contract -- the arrival sentence IRecognizer's own doc comment makes, run against BOTH this
+//             class and DeepgramRecognizer at a closed loopback port. One body, two subjects.
+//  * KnownDivergence -- the half no in-process subject can close, said out loud rather than
+//             hoped over. Visibility, not a catch.
+//  * SeamOnlyInterface -- IRecognizer has exactly ONE shipping implementation, so the compiler
+//             is a weaker guarantee here than the Interface anchor normally claims. Declared,
+//             ticketed, and counted separately in dev gate's ledger reading.
+[Double(Anchor.Interface, typeof(DeepgramRecognizer),
+        Wire = "voice:clicking_the_mic_toggles_listening",
+        Contract = "RecognizerContract",
+        KnownDivergence = "Start() raises Ready synchronously; DeepgramRecognizer raises it only after the socket has answered and survived the auth grace period",
+        Issue = 17,
+        SeamOnlyInterface = 17)]
 sealed class FakeRecognizer : IRecognizer
 {
     public event Action<Dictation.Heard>? Heard;

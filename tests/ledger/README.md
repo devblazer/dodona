@@ -463,6 +463,280 @@ is how the line-ending bill gets paid twice, and this one buys nothing.
   census about a second project is W4's, in the commit that gives it rows to count.
 - **`--rehash` is still not implemented** (unchanged from W2).
 
+## W4 -- the double ledger
+
+Two rungs, because one instrument cannot answer both questions (plan 3.2, redesigned after the
+adversarial review found the first design reflecting over an empty set).
+
+| rung | where | question |
+|---|---|---|
+| 1, POPULATION | `Repo-Lint` in `tools\dev.ps1`, so `dev lint` and I8 | which types in this repo are doubles, and does anything look at them? |
+| 2, ANCHOR SEMANTICS | `tests\Dodona.Tests\Doubles\DoubleLedgerTests.cs` and `tests\Dodona.Ui.Tests\DoubleLedgerTests.cs` | does each anchor actually hold? |
+
+The attribute is `src\Dodona\Testing\DoubleAttribute.cs`, `internal`, zero behaviour,
+`Compile Include`-linked into `DodonaUi.csproj` and deliberately NOT into `DodonaFakeAgent`
+(D-B7, D-T27). `tests\ledger\double-assemblies.tsv` is the list rung-1 assertion 4 resolves a
+project against.
+
+### THE EIGHT REDS, EACH SEEN, EACH VERBATIM
+
+`dev prove` refuses the `unit` suites in their bare form, so every one of these was produced by
+hand against this tree and the literal refusal copied out. Reds 1-4 and 8 are `dev lint`; 5, 6 and
+7 are `dev test unit` / `dev test ui-unit`. All were reverted.
+
+**1 -- an unanchored `Fake*` in `src\Dodona\`.** *(The first design could not produce this red at
+all: `src\` was outside its population.)*
+
+```
+src\Dodona\RED01.cs:3 class 'FakeThingA' is a test double by its NAME and carries no
+[Double(...)] -- every double declares what keeps it honest (plan 3.2 rung 1, assertion 1)
+```
+
+**2 -- the same in `src\DodonaUi\`, from the same scan.**
+
+```
+src\DodonaUi\RED02.cs:3 class 'FakeThingB' is a test double by its NAME and carries no
+[Double(...)] -- every double declares what keeps it honest (plan 3.2 rung 1, assertion 1)
+```
+
+**3 -- a `[Double]` in `src\DodonaShim\`, which no rung-2 test loads.** Assertion 4, the one the
+first design could not have.
+
+```
+src\DodonaShim\RED03.cs:6 declares [Double] on 'FakeThingC' but project 'src\DodonaShim' is in NO
+tests\ledger\double-assemblies.tsv row -- no reflection test loads that assembly, so the anchor
+would never be checked. Give the project a rung-2 row, or move the double (plan 3.2 rung 1,
+assertion 4)
+```
+
+**4 -- a type named `Mock*`.**
+
+```
+src\Dodona\RED04.cs:3 class 'MockThingD' is named Stub*/Mock*, which is refused anywhere in the
+repo -- name it Fake*/Recording* and anchor it with [Double(...)] (plan 3.2 rung 1, assertion 2)
+```
+
+**5 -- a new fake anchored `Interface` where the only other implementer is itself a `[Double]`.**
+One throwaway interface, one real implementation, two fakes; rung 2, printing the survivor.
+
+```
+Interface anchors that do not hold:
+Dodona.FakeRed5A [dodona]: Dodona.IRed5 has 1 shipping implementer(s) once every [Double] is
+excluded -- Dodona.RealRed5. An Interface anchor claims the compiler catches shape drift, and with
+one shipping implementation the interface's shape is whatever the fake finds convenient. Either
+point it at an interface production really implements twice, or declare the shortfall:
+SeamOnlyInterface = <open issue>.
+Dodona.FakeRed5B [dodona]: Dodona.IRed5 has 1 shipping implementer(s) once every [Double] is
+excluded -- Dodona.RealRed5. ...
+```
+
+**6 -- `FakeRecognizer` anchored `Interface` with no `Contract` and no `KnownDivergence`. RED
+AGAINST THE TREE AS IT STANDS**, which is the mechanism proving itself against code nobody wrote
+for it. Observed before the attribute was completed, with `Anchor`, `Real` and `Wire` only:
+
+```
+Interface anchors with nothing behind them:
+DodonaUi.FakeRecognizer [DodonaUi]: anchored Interface alone. Interface reaches SHAPE drift and
+nothing else, so every Interface anchor needs Contract = "<X>Contract" (one body, two subjects) or
+KnownDivergence = "<one sentence>" with Issue = <open issue>.
+```
+
+**6b -- AND A SECOND ONE NOBODY ASKED FOR, from the same untouched tree.** The implementer count
+is red for `FakeRecognizer` too, and the plan offers no remedy for it. See *"the rule the plan
+could not ship"* below; this is the red that forced `SeamOnlyInterface` to exist.
+
+```
+Interface anchors that do not hold:
+DodonaUi.FakeRecognizer [DodonaUi]: DodonaUi.IRecognizer has 1 shipping implementer(s) once every
+[Double] is excluded -- DodonaUi.DeepgramRecognizer. An Interface anchor claims the compiler
+catches shape drift, and with one shipping implementation the interface's shape is whatever the
+fake finds convenient. Either point it at an interface production really implements twice, or
+declare the shortfall: SeamOnlyInterface = <open issue>.
+```
+
+**7 -- a wire check renamed out from under the double.** One edit to `wires.tsv`'s F9 row, both
+rungs red, and BOTH are recorded because they catch it from opposite directions -- rung 1 sees a
+register row naming a check no suite registers, rung 2 sees a double naming a register row that no
+longer exists.
+
+```
+wires.tsv:33 names owner_check 'the_mic_button_toggles_listening', which no suite registers --
+deleted, renamed, or misspelled
+src\DodonaUi\Recognizer.cs:93 [Double] on 'FakeRecognizer' names Wire
+'voice:clicking_the_mic_toggles_listening', which resolves to no tests\ledger\wires.tsv row -- the
+wire was deleted, renamed, or misspelled
+```
+
+```
+doubles standing beside a wire that has moved:
+DodonaUi.FakeRecognizer [DodonaUi]: names Wire "voice:clicking_the_mic_toggles_listening", which
+resolves to no row in tests\ledger\wires.tsv. The wire was deleted, renamed or misspelled, and
+this double is now standing beside nothing.
+```
+
+`wires.tsv` was restored byte-for-byte (`git diff HEAD --stat` reports nothing).
+
+**8 -- a `KnownDivergence` with no `Issue`.**
+
+```
+src\Dodona\RED08.cs:6 [Double] on 'FakeThingE' declares a KnownDivergence with no Issue -- a
+divergence is visibility, not a catch, and an untracked gap is one nobody will ever close
+(plan 3.2)
+```
+
+### The controls -- what did NOT go red
+
+`dev lint` and both unit suites are green with the same mechanism in place over the real tree
+(`304 checks, 0 failed` and `7 checks, 0 failed`), which is the control every one of those reds
+needs: a refusal that fires on everything is worth nothing. Rung 1's reading line is printed on
+every `dev lint` and every `dev gate`, so the anchored count is visible rather than assumed:
+
+```
+note: doubles: 1 anchored by attribute, 1 by corpus; 1 with a known divergence (issues #17);
+      1 on a seam-only interface (issues #17)
+```
+
+### THE RULE THE PLAN COULD NOT SHIP, AND WHAT REPLACED IT
+
+**Plan 3.2 as written does not build, and the failure is not cosmetic.** It states the `Interface`
+rule as *">= 2 implementers that do NOT carry `[Double]`"*, says in as many words that
+`IRecognizer` does not qualify, and then 3.6 anchors `FakeRecognizer` as `Interface` anyway and
+calls it *"RED on day one under the corrected rule, deliberately"*. The two remedies it offers for
+that red -- a `Contract` and a `KnownDivergence` -- are both about BEHAVIOUR, and neither one
+changes an implementer count. Red 6b above is that contradiction in the flesh.
+
+So as written the mechanism ships a **permanently failing unit test**, which is a gate people learn
+to ignore -- the same disease as a gate that is always green, and the one this repo has paid for
+most often.
+
+**Rejected: weakening the rule to ">= 1 surviving implementer".** It would bless every interface
+that exists only as a test seam, which is exactly the case `IRecognizer` is, so the rule would then
+be satisfied by the thing it is meant to detect.
+
+**Taken: the shortfall becomes a DECLARATION, on the model of `no-seam-yet` (D-T21).**
+`SeamOnlyInterface = <open issue>` on the `[Double]`. Rung 1 refuses a value that is not a positive
+issue number and refuses it on any anchor but `Interface`; rung 2 lets the count fall below two only
+when it is set; `dev gate`'s ledger reading counts it separately from `KnownDivergence`. It is not
+a debt to be worked off -- `IRecognizer` has one shipping implementation because there is one speech
+engine -- and what it buys is that the weakness cannot be silent. Issue **#17** carries both of
+`FakeRecognizer`'s declared gaps.
+
+### `Contract` IS A STRING, AND THE PLAN SAID `typeof`
+
+Plan 3.2 writes `Contract = typeof(LaneSinkContract)`. That cannot compile for the doubles this
+redesign exists to reach. A contract class holds `[Fact]`s, so it lives in a test project; two of
+the three existing doubles live in PRODUCTION assemblies; and `src\` cannot reference `tests\`.
+`typeof` would have worked only for a double living in a test project -- the population the first
+design already failed on.
+
+So `Contract` is a name, and the hand copy that creates is closed by enforcement rather than by
+care: `Interface_is_never_a_sole_anchor` resolves the name inside the test assembly and is RED if
+it names nothing, if what it names is not abstract, or if it has fewer than two concrete
+subclasses. `Real` stays a `Type`, as the plan requires -- it is in the same assembly, so it can be.
+
+### A HOLE FOUND IN THIS MECHANISM BY RUNNING IT: `IDisposable` self-satisfied the count
+
+First run against the real tree, `Every_Interface_anchor_has_two_shipping_implementers` came back
+**GREEN** over `FakeRecognizer`. `FakeRecognizer` and `DeepgramRecognizer` share `IRecognizer` AND
+`IDisposable`; the assertion took the shared interface with the most shipping implementers, and
+`IDisposable` has dozens. That is review finding 2's failure wearing a different hat -- a count
+satisfied by something other than the thing being claimed -- and it was caught only because red 6b
+was expected and did not appear.
+
+Fixed by restricting the candidates to interfaces **declared in the assemblies under test**: the
+anchor's claim is *"production implements this interface twice"*, and nobody grows `IDisposable`.
+`DoubleLedger.SharedInterfaces` carries the measurement.
+
+### A false positive that was the rule being right
+
+`dev lint` refused `FakeRecognizerContract`, the contract subclass that supplies the fake:
+
+```
+tests\Dodona.Ui.Tests\RecognizerContract.cs:91 class 'FakeRecognizerContract' is a test double by
+its NAME and carries no [Double(...)]
+```
+
+Which is correct. `Fake*` is this repo's word for a thing that stands in for something real, and a
+class named that with no anchor is the ambiguity assertion 1 exists to remove. The subclasses are
+named for the contract now -- `RecognizerContractOverTheFake` and
+`RecognizerContractOverDeepgramAtAClosedPort`.
+
+### `RecognizerContract` -- the real subject really runs, and it costs nothing
+
+`tests\Dodona.Ui.Tests\RecognizerContract.cs`: one abstract body asserting `IRecognizer`'s own
+sentence -- *exactly one of `Ready` or `Failed` arrives, exactly once* -- with two concrete
+subclasses. The real one is `DeepgramRecognizer` pointed at `ws://127.0.0.1:1/`, a closed loopback
+port, so the connect is refused by the loopback stack instantly. **No network, no microphone, no
+credential, no quota**: `RunAsync` only reaches `_capture.Start()` after the socket is open and it
+never opens, and `DODONA_STT_TOKEN` is set to a dummy so `SpeechAuth` never walks to the operator's
+real `~\.claude\.credentials.json`. Both subjects pass.
+
+`tests\Dodona.Ui.Tests\AssemblyInfo.cs` disables xunit's parallel collections in that project,
+because the endpoint override is three process-wide environment variables and a sibling class
+running beside it would see them half-restored.
+
+### FALSIFIER 4, MEASURED (review finding 19)
+
+Throwaway `StoreFixture` (a real `Store` on a temp file) and `GitRepoFixture` (a real `git init`
+plus one commit) were built, exercised by eight cases -- five and three -- measured, and reverted.
+All figures are `dev test unit`'s own printed seconds on this machine, 2026-08-22, **warm, on a
+second run after a build**, which is the threshold the plan restates. Three runs each:
+
+| | run 1 | run 2 | run 3 | cases |
+|---|---|---|---|---|
+| without the fixtures | 3.4 s | **1.8 s** | **1.9 s** | 304 |
+| with them | 3.3 s | **2.8 s** | **2.8 s** | 312 |
+| reverted, confirming the baseline returns | 2.2 s | **1.9 s** | **1.9 s** | 304 |
+
+Per case, from the TRX: **56 ms** for a real `Store`, **183 ms** for a real git repository (four
+`git` process starts). So the whole delta is **+0.9 s for eight fixture-bearing cases**, and the
+arithmetic that matters for W8 is the per-case figure, not the total.
+
+**Falsifier 4 does not fire, and the honest bound is this**: the operator's one-to-two seconds is
+blown at roughly **20 more git-repo cases** or **60 more store cases** beyond today's 304. That is
+a real ceiling, and it says the answer for a large slice is a *shared* fixture (`IClassFixture`)
+rather than a per-case one -- the measurement above is deliberately the per-case worst case.
+
+### WHAT W4 CHANGED BESIDE ITS OWN DELIVERABLES
+
+- **The fold (D-T23) is done.** `dev ledger`'s static rungs and the double ledger's rung 1 are
+  asserted inside **Repo-Lint (I8)**, which is already one of the gate's ten. **`dev gate` still
+  reports ten assertions.** W2 could not do this: the fold makes them a gate assertion, and the
+  first thing that assertion would have done is fail for want of a `baseline.tsv` that only a green
+  gate can produce. The census exists now, so it lands.
+  The cost, said out loud: **`dev lint` is no longer sub-second** -- ~1.5-2.5 s, because it now
+  AST-parses fifteen suite files and reads every tracked `.cs` under `src\` and `tests\`.
+- **`ui-unit` joined `AllSuites`.** W3 left that decision to W4 *"when it has something to assert"*,
+  and it now has: rung 2 over `DodonaUi` and `RecognizerContract` exist nowhere else, and
+  `tests\Dodona.Tests` cannot load a net8.0-windows assembly. Measured **4.4-4.5 s warm**, and it
+  stays SOLO (it compiles `DodonaUi`, whose output every window suite copies its binaries from), so
+  it is ~4.5 s of serialized wall clock on a full run that measures 258-312 s against a 300 s
+  budget. **The budget was not raised**; the pressure there is issue #1.
+- **`Ledger-Live` reads BOTH TRXes** and `Ledger-Key` namespaces both unit suites (`unit/<leaf>`,
+  `ui-unit/<leaf>`). W3 recorded this as W4's, *"in the commit that gives it rows to count"*.
+  `--capture` was generalised the same way but **was not run**: the baseline stays frozen at its
+  964 rows and the eleven new names are declared in `added.tsv` instead, which is what that file is
+  for.
+
+### WHAT W4 DID NOT DO
+
+- **`Poses` is not anchored.** Plan 3.6 tabulates it as `Interface + Contract`, but it does not
+  match the `Fake*`/`Recording*` name rung 1 enforces, no `PosesContract` is in W4's file list, and
+  `Poses_cover_every_snapshot_member` is named in 3.3 without being one of W4's eight reds.
+  Inventing one here would be W4 quietly doing W8's work. **It is a gap and this is it being
+  recorded as one**: today the ledger's population is `FakeRecognizer` plus the corpus row.
+- **"A `KnownDivergence` may not land in the same commit as the code that needed it"** (plan 3.2) is
+  NOT implemented. It is a statement about a commit's contents, and rung 1 runs against a working
+  tree with no commit in view; every cheap approximation of it was a rule that fires on the wrong
+  thing. Named here rather than left to be discovered.
+- **`owner_body_sha` is still empty** and `--rehash` is still not implemented. Both are W7.
+- **`RecordingLaneSink` and `RecordingTransport` do not exist**, so rung 2 over the `Dodona`
+  assembly finds nothing today. Three of its four facts are vacuously true there, which would be
+  the empty-set failure again if nothing noticed -- two things notice, and both are deliberate:
+  `The_assemblies_this_project_loads_are_exactly_the_ones_it_is_declared_to_cover` fails if the
+  explicit list ever stops matching the register in EITHER direction, and rung 1 is a text scan
+  that cannot miss an assembly.
+
 ## The wire owners have not been audited, and every one looked at so far was wrong
 
 `wires.tsv` names, for each of the 52 wires, the single check that would fail most loudly if that

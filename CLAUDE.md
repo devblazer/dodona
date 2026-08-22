@@ -246,10 +246,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | `build` | Builds. Only *real* compile errors reach you; a locked output is named, never mistaken for one. |
 | `test <suite>...` | One or more named suites, run concurrently. `--sequential` for one at a time. **IT DOES NOT BUILD — run `dev build` first or you are testing the PREVIOUS binary.** Suites copy their binaries out of `src\...\bin\Release\...` (`Use-TestBinaries`), and only `prove`, `gate` and `suites` compile. Measured 2026-08-19: a defect was deleted from `Daemon.cs`, `dev test m0` said **26 checks, 0 failed**, and `dev build` + the same command said 1 failed. That is a false green from the tool itself — `LOCATIONS-PLAN.md` P1.5 carries the fix. |
 | `test unit` | The pure logic — no daemon, no store, no window. **~1 second**; run it while you edit. |
-| `suites` | All sixteen, **three at a time** (69e8003 lowered it from five; `ui-use` went intermittently red at five). Measured on this machine 2026-08-19: **93 s** at 69e8003 and **100 s** with Phase 3's fifteen extra checks, not the 54–72 s this row claimed — the range predates both the concurrency change and Phase 3's eleven extra m0 checks. Still a gate before committing rather than the twenty-minute event the table claimed before that. |
+| `suites` | All seventeen, **three at a time** (69e8003 lowered it from five; `ui-use` went intermittently red at five). Measured on this machine 2026-08-19: **93 s** at 69e8003 and **100 s** with Phase 3's fifteen extra checks, not the 54–72 s this row claimed — the range predates both the concurrency change and Phase 3's eleven extra m0 checks. Still a gate before committing rather than the twenty-minute event the table claimed before that. |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. Run it before believing any new check. Three verdicts: PROVEN, VACUOUS (it passes against HEAD — rewrite it), MISSING (it never ran). |
 | `prove <suite>:<check> ...` | The same, for MANY checks: grouped by suite and **one run per suite**, because a suite run prints every check it ran. Phase 3 ran m0 eleven times to read eleven lines of one run's output — 46 minutes for what is 40 seconds. Reach for this form by default. |
-| `lint` | The repo lint (I8): control bytes, dangling `tests\*.ps1` references in docs, mixed line endings. Sub-second, tracked files only. Asserted by `gate`; run it directly after any scripted edit. |
+| `lint` | The repo lint (I8): control bytes, dangling `tests\*.ps1` references in docs, mixed line endings — **and, since W4, the whole of `dev ledger`'s static side plus the double ledger's rung 1** (`TEST-ARCHITECTURE-PLAN` D-T23). It is no longer sub-second: **~1.5–2.5 s**, because it AST-parses fifteen suite files for check-name collisions and text-scans every tracked `.cs` under `src\` and `tests\` for unanchored test doubles. Tracked files only — `git add` first, or it has not looked at what you just wrote (issue #15). Asserted by `gate`, which is why the gate's count stays at **ten** rather than growing an eleventh row. |
 | `gate` | The pre-commit gate: runs the suites, then **asserts** ten invariants — nothing left running in the build output, a suite run that dirtied nothing, **no wrapper or agent process that outlived the run** (I3), the commit guard deployed and unoverridden, the live build’s commit resolvable in `git log`, the full run inside its time budget (I7), and **no changed file quietly altering its BOM or line endings** (P7.5 — that has happened three times and twice went unnoticed until someone read a diff). Every row of `RECOVERY-PHASES` §2 is asserted now — which is NOT the same as proving the system works, and the verdict line says "on the 10 assertions above, and only those" on purpose. `dev gate <suite>` runs the same machinery over less, in ~20 s, and says PARTIAL on every line. |
 | `ship` | build + suites + publish. |
 | `worktree <name>` | a tree of your own under `.claude\worktrees\`. All work goes in one (§0.0). |
@@ -358,6 +358,7 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 | what you changed | run |
 |---|---|
 | anything that is a pure function (claims, policy, repo resolution, paths, routing verdicts) | `dev test unit` — ~1 s, no daemon |
+| anything pure that lives in `src\DodonaUi` — or any test double, anywhere | `dev test ui-unit` — ~4.5 s, no window. `dev lint` for the double ledger's static half |
 | daemon lifetime, reconnect, drain | `dev test m0` |
 | the write gate, the merge token, the land flow, the completion record | `dev test m1` |
 | a lane's system prompt, or the per-turn lane briefing | `dev test unit m1` |
@@ -378,7 +379,7 @@ seconds spent twenty times is worse than 80 seconds spent once at the end.
 - **While iterating**: `dev test unit` for anything that is a function (~1 s), then the one or
   two suites your change actually touches. Anything that must start a daemon has a ~7 second
   floor, and that is the honest target.
-- **Before you MERGE to main**: `dev gate`, once — all sixteen plus the ten assertions, about
+- **Before you MERGE to main**: `dev gate`, once — all seventeen plus the ten assertions, about
   80 s of suites and ~15 s of its own two builds. This is the only moment the full set is
   required, and skipping it is how a stale test survives for months (two did).
 - **Three consecutive failed verification attempts**: stop and report. Do not grind.
@@ -545,7 +546,7 @@ the design doc records the revision.
 
 ## 3. Verify with the suites, not by looking
 
-Sixteen model-free suites, all fake agents, all free. **Run them through `dev test`, never by
+Seventeen model-free suites, all fake agents, all free (`ui-unit` joined the default set at W4 of `TEST-ARCHITECTURE-PLAN`, which is when it first had something to assert). **Run them through `dev test`, never by
 invoking the `.ps1` directly** — the wrapper is what enforces that a suite which crashed, hung
 or never reported is a FAILURE rather than a blank line (P4.4), and it is what runs them five
 at a time:
@@ -557,7 +558,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 test unit     
 
 | suite | what it covers |
 |---|---|
-| `unit` | the pure logic: claim algebra, policy table, repo resolution, canonical paths, the code-only routing decisions |
+| `unit` | the pure logic: claim algebra, policy table, repo resolution, canonical paths, the code-only routing decisions — plus the double ledger's rung 2 over the `Dodona` assembly |
+| `ui-unit` | the same one-second loop for the WINDOW's assembly, which `unit` cannot load at all (net8.0 against net8.0-windows): the double ledger's rung 2 over `DodonaUi`, where two of this repo's three doubles live, and `RecognizerContract` — one body run against `FakeRecognizer` and against the real `DeepgramRecognizer` at a closed loopback port. No window, no socket, no microphone, ~4.5 s. It runs ALONE, for `unit`'s reason: it compiles `DodonaUi`, and every window suite copies its binaries out of that directory |
 | `m0` | daemon death mid-turn, and Phase 3's whole invariant: a wrapper that outlives its agent, a lane with no shim record, the lease, reconcile asking the OS |
 | `m1` | the write gate (layer 1), the merge token, and the land: merge main in, verify, fast-forward, dropped-nothing, and that the whole of it runs **off the control pipe**; plus R4's completion record — one per worktree change and not one per turn, and still produced by a lane the daemon ADOPTED rather than spawned; plus B2's lane briefing — the block reaches the AGENT and never the operator's feed, differs by lane kind, and is rebuilt when layer 2 promotes a lane |
 | `m2` | routing, presence, and what a branch touched (recorded, not judged — the backstop is retired) |
@@ -580,12 +582,16 @@ than no table, because it still gets quoted. `dev suites` and `dev test` print t
 every run, measured on the machine you are actually using. What stays is the mapping from a
 suite to what it covers, which is judgement no command can print.
 
-**Two suites run ALONE, and taking one out of that list will look like it works.**
-`SoloSuites` in `tools/dev.ps1` is the list — `unit`, `voice` — and each entry carries
+**Three suites run ALONE, and taking one out of that list will look like it works.**
+`SoloSuites` in `tools/dev.ps1` is the list — `unit`, `ui-unit`, `voice` — and each entry carries
 its reason in a comment:
 
 - **`unit`** compiles (`dotnet test` builds Dodona into `src\Dodona\bin`), and every other
   suite copies its binaries out of there at startup. Two compilers, one directory.
+- **`ui-unit`** is solo for exactly that reason one project along: it compiles `DodonaUi` into
+  `src\DodonaUi\bin`, which is where all four `ui-*` suites and `voice` take their binaries from.
+  It has been in `SoloSuites` since W3 and joined `AllSuites` at W4; **4.4–4.5 s warm**, measured
+  2026-08-22, so it is ~4.5 s of serialized wall clock on a run that measures 258–312 s.
 - **`voice`** is a window suite whose failures CASCADE — two missed interactions become six red
   checks — measured red inside a wave and green alone. The measurement, with its date, is in
   `tools/dev.ps1` beside the list. It is not root-caused; the contention is windows and process

@@ -50,4 +50,22 @@
     <ProjectReference Include="..\..\src\DodonaUi\DodonaUi.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- ONE BODY, COMPILED TWICE (docs/TEST-ARCHITECTURE-PLAN.md W4, rung 2). The double
+         ledger needs one reflection class PER DOUBLE-BEARING ASSEMBLY, and these two test
+         projects cannot reference each other: Dodona.Tests is net8.0 and this one is
+         net8.0-windows, which is the entire reason this project exists. Linking by source is
+         the house's own mechanism for "two places must reach the same answer" (see
+         DodonaUi.csproj's Compile Include block, where every entry carries the same argument).
+         The alternative was two hand copies of one algorithm, which is the failure the plan
+         these files implement exists to prevent.
+
+         It also makes typeof(DoubleAttribute) resolve, in each assembly, to the copy that
+         assembly actually carries - Dodona compiles the attribute, DodonaUi links it, so
+         there are two distinct CLR types with one name and each half must ask about its own. -->
+    <Compile Include="..\Dodona.Tests\CheckLedger.cs" Link="CheckLedger.cs" />
+    <Compile Include="..\Dodona.Tests\Doubles\DoubleLedger.cs" Link="Doubles\DoubleLedger.cs" />
+    <Compile Include="..\Dodona.Tests\Doubles\DoubleLedgerAssertions.cs" Link="Doubles\DoubleLedgerAssertions.cs" />
+  </ItemGroup>
+
 </Project>
