@@ -155,7 +155,10 @@ sentence is the whole design.
 **52 integration wires, riding 19 fixtures, in 10 acceptance suites plus `unit`**, holding roughly
 **195 named acceptance checks** against today's 750. The rest move down. The unit layer goes from
 208 methods to roughly 760. **No name is lost**, and §5's ledger makes that arithmetic mechanical
-rather than a promise.
+rather than a promise. The one exception is `obsolete` (§5.4.1, D-T32) — a check whose subject no
+longer exists, which cannot fail, which asserts the wrong thing, or which exactly duplicates a named
+survivor. It is narrow, it demands evidence, and it is counted on its own line precisely so that
+"no name is lost" stays a readable claim rather than one with a silent hole in it.
 
 49 came from applying a fold rule to 109 candidate wire rows the six surveys produced; 60 were
 folded, each with a recorded reason (`design-wires.md` §3). The rule, in the operator's own terms:
@@ -1572,12 +1575,12 @@ reads the directory.
 | column | rule enforced |
 |---|---|
 | `old_suite`, `old_check` | must be in `baseline.tsv`; must appear **exactly once** across all `moves/*.tsv` |
-| `disposition` | one of `moved` `kept` `merged` `stays` `vacuous-guard` `renamed` — a **closed vocabulary**, so it cannot become a shrug |
+| `disposition` | one of `moved` `kept` `merged` `stays` `vacuous-guard` `renamed` `obsolete` — a **closed vocabulary**, so it cannot become a shrug. `obsolete` is the only one that ends an assertion instead of relocating it, and §5.4.1 governs it |
 | `destination` | `moved`/`renamed`: `unit:<FQN>` for `Dodona.Tests`, `ui-unit:<FQN>` for `Dodona.Ui.Tests` — two prefixes because `dev prove --with` must know which project to build (W3 item 4) and a `net8.0-windows` compile has no business in a net8.0-only proof; `merged`: `suite:<suite>:<check>`, and that check must itself be a `kept` row or a `wires.tsv` owner |
 | `wire` | REQUIRED for `kept`, `merged`, `stays`; must resolve in `wires.tsv` |
 | `mutation` | REQUIRED for `moved`; the patch must exist under `tests/mutants/` |
 | `red_old`, `red_new` | REQUIRED for `moved`; both non-empty, the **literal observed failure lines** |
-| `note` | REQUIRED for `stays`, `vacuous-guard`, `renamed`, and for a cross-suite `merged`. For `stays` it must BEGIN with a word from the closed reason vocabulary |
+| `note` | REQUIRED for `stays`, `vacuous-guard`, `renamed`, `obsolete`, and for a cross-suite `merged`. For `stays` it must BEGIN with a word from the closed reason vocabulary; for `obsolete` with a word from the closed **evidence** vocabulary, and it must additionally carry a citation and an `if-wrong:` clause (§5.4.1) |
 
 **THE LAST-SEGMENT RULE.** For `disposition=moved`, the final dotted segment of `destination` MUST
 equal `old_check` **character for character**, *after stripping a trailing parenthesised argument
@@ -1622,7 +1625,8 @@ rather than hiding it.
 
 ### 5.4 A check that cannot move down — the four-rung ladder
 
-The answer is **never** "delete it, it is covered elsewhere":
+The answer is **never** "delete it, it is covered elsewhere" — that is a judgement, and §5.4.1 is
+the only door out, which takes evidence instead:
 
 1. **Is there a cheap seam?** Consult `seams.md` S1–S12. Most "cannot move" is really "has no seam
    yet"; the seam belongs in this slice's commit A.
@@ -1663,6 +1667,64 @@ Three special cases that must not be mishandled:
   inside a migration commit, because a migration commit that also changes what is asserted is
   unreviewable.
 
+### 5.4.1 `obsolete` — the one disposition that reduces coverage
+
+**The operator's directive of 2026-08-22, in their own words:** *"Go over the test you're actually
+busy with and make sure none of them are outdated or no longer needed, etcetera. because I know that
+stuff gets to be a mess with AI development over time sometimes, and there might be a bunch of shit
+there that's either completely wrong or just no longer even needed at all, that kind of thing. So
+just watch out for that."* Said while authorising the bulk migration, alongside *"I fix any errors
+along the way"* — fix what you find en route, do not route around it.
+
+**This does not repeal anything above it.** §2.1's *no name is lost* and §5.4's *never "it is
+covered elsewhere"* both stand. What it opens is a **narrow, evidenced exception**, because without
+one a slice agent facing a check that asserts something no longer true has exactly two moves left,
+and both are worse than deleting it: leave it alone, or **port a dead assertion faithfully down a
+layer**, which spends a seam, a mutant and a reviewer's attention on preserving a lie. A migration
+that carries its own rot down with it is not a migration.
+
+A row is `obsolete` only when **one of these four is demonstrable and CITED IN THE ROW**:
+
+| evidence word | what has to be true, and what has to be cited |
+|---|---|
+| `subject-gone` | the production code, config key, command or behaviour it asserts no longer exists. Cite the commit that removed it, or the file that demonstrably no longer contains the symbol |
+| `cannot-fail` | it is structurally vacuous — it compares a value to itself, or its query returns empty so the comparison is against nothing. **The standard form of this evidence is `dev prove --with <patch>` coming back VACUOUS under a real defect in the very thing the check names**, with the literal VACUOUS line recorded in `red_old` |
+| `contradicts-current-behaviour` | it passes only because it asserts the wrong thing, and the right assertion would be different. Cite where the right answer lives |
+| `duplicate-of` | it is an **exact** duplicate of a NAMED survivor that still runs. `destination` carries `suite:<suite>:<check>` and `dev ledger` resolves it against the live suites — this is §5.4's own *"unless the elsewhere is named and exists"*, and nothing else |
+
+**"It looks redundant", "it seems old", "we probably don't need it" are NOT evidence, and
+`dev ledger` refuses them by name.** The evidence vocabulary is closed for the same reason the
+`stays` reason vocabulary is (D-T21): the word in the column is what stops the disposition becoming
+a shrug, and this is the one shrug that ends in a deletion.
+
+**Every `obsolete` row is REPORTED, never silent.** The note carries an `if-wrong:` clause — *what
+is lost if this judgement is wrong* — and the tool refuses a row without one, because that sentence
+is what a reviewer actually reads and what a `git revert` restores. Each row is named in the slice's
+commit message and surfaced to the operator with its check name, its evidence word, its citation and
+its `if-wrong:` clause. Reversibility is unchanged and structural (§9.9): reverting commit B
+restores the deleted check and removes the row, and the accounting closes itself.
+
+**`vacuous-guard` versus `obsolete`, which is the judgement this exception creates.** Both apply to a
+check that cannot fail, so the vocabulary alone will not separate them:
+
+- **`vacuous-guard` — keep it and LABEL it.** The check cannot fail *today*, but the thing it
+  watches is real and could come back. R7's precedent: 18 checks shipped, 14 seen red, the 4 vacuous
+  ones kept and labelled. The subject still exists; the guard is standing over live code.
+- **`obsolete` — it should go.** The check cannot fail *and there is nothing left for it to watch*:
+  the subject is gone, or the assertion is structurally incapable of noticing any defect in it, so no
+  future change can make it meaningful again.
+
+The question that decides it, in one line: **could a defect ever exist that this check would catch?**
+If yes, it is a `vacuous-guard` and it is kept. If the answer is no because the subject is gone or
+the assertion is structurally blind, it is `obsolete`. **When you cannot answer, it is
+`vacuous-guard`** — keeping a useless check costs milliseconds and deleting a useful one costs a
+defect nobody catches, so the tie does not break both ways.
+
+And the rule that has no exception: **a check pinning behaviour that should CHANGE is not obsolete.**
+§5.4's third special case governs it — it moves faithfully and is ticketed. Preserving a name is not
+endorsing its assertion, and disagreeing with an assertion is judgement, which is the one thing this
+disposition does not accept.
+
 ### 5.5 The verdict block, and the stop condition
 
 `dev ledger --verdict` prints exactly this, and the job is finished when it says so:
@@ -1677,6 +1739,9 @@ LEDGER
                             timing N, absence-of-process N, wire-shape N, harness-hygiene N
   stays (no-seam-yet)   N   <- MUST BE 0, or every one carries an issue number
   vacuous-guard         N   (kept and labelled, by decision)
+  obsolete              N   <- REDUCES COVERAGE, never folded into moved or stays.
+                            by evidence: subject-gone N, cannot-fail N,
+                            contradicts-current-behaviour N, duplicate-of N
   unaccounted           0   <- MUST BE 0
   added (declared)      N
 INTEGRATION CHECKS
@@ -1689,6 +1754,11 @@ DOUBLES
   unwitnessed shapes    N   (issues #c #d)   <- a READING, not an assertion
 VERDICT: on the accounting above, and only that.
 ```
+
+**`obsolete` has its own line and never folds into another**, because it is the only number in the
+block that means *coverage went down*, and every number it could plausibly be folded into means the
+opposite. A count that can hide inside a healthy-looking one is the failure `stays (no-seam-yet)`'s
+separate line already exists to prevent; this is the same rule applied one step harder.
 
 The two `DOUBLES` counts are readings for the same reason corpus staleness is (D-T13): a number that
 must be zero teaches people to make it zero by editing a list. A number that is **printed, sourced to
@@ -1880,6 +1950,16 @@ precisely what I8 already is, so nothing about the gate widens and the refusal i
 `dev ledger` remains a verb for humans (`--live`, `--slice`, `--verdict`, `--origin`); it is NOT
 added to `dev test`, and NOT to `dodona.json`'s `//verify`. If the ledger stops earning its place
 after the migration, the lint rows and the files go together in one commit.
+
+**D-T32. `obsolete` is a disposition, and it takes EVIDENCE rather than judgement.** Four closed
+evidence words, a citation, an `if-wrong:` clause, a separate line in the verdict, and every row
+reported to the operator. *Reason:* the operator asked, on 2026-08-22, that outdated and no-longer-
+needed tests be found rather than faithfully preserved (§5.4.1 quotes it). D-T21 must not be repealed
+to do that — *"delete because it is covered elsewhere"* is still not a disposition, and *"it looks
+redundant"* is refused by name. What is added is one door with a lock on it: the alternative is an
+agent that ports a dead assertion down a layer to stay inside the rule, which spends a seam and a
+mutant on preserving something untrue. It is counted separately because it is the only disposition
+whose number means coverage went DOWN, and a number that can hide inside a healthy one always does.
 
 **D-T24. `check-authoring` gains the anchor section, in the same commit as the mechanism. No fourth
 trap skill.** *Reason:* CLAUDE.md §5.1 D-6 forbids one by name, and a "how to write a fake" skill is
@@ -2269,7 +2349,11 @@ left to see.
 
 **If an old check will NOT redden under any mutation of the function it is supposedly about, STOP
 and classify it** — do not force it. It is `vacuous-guard` (keep and LABEL), or it is misnamed (fix
-the aim in a separate commit, or `renamed` with a note). Do not proceed by weakening the mutant.
+the aim in a separate commit, or `renamed` with a note), or it is `obsolete` — and §5.4.1 is what
+tells those apart, with the VACUOUS verdict you just saw as the evidence. Do not proceed by weakening
+the mutant, and **do not carry a dead assertion down a layer to avoid the judgement**: a faithful
+move of a broken check is worse than leaving it alone, because it spends a seam and a mutant on
+preserving something untrue.
 
 The commit message states, in house style: what moved, the mutant and **both reds**, that
 `dev prove` without `--with` is VACUOUS on this commit and why that is correct, and the arithmetic
@@ -2341,6 +2425,9 @@ leaves any of these to inference is a slice that will collide):
   moved;
 - **everything it could NOT move**, each with a closed-vocabulary reason, and each `no-seam-yet` one
   named with the seam it would need;
+- **every `obsolete` row, spelled out** (§5.4.1): the check name, its evidence word, the citation, and
+  what would be lost if the judgement is wrong. These are reported to the operator, never only to the
+  ledger — they are the one disposition that reduces coverage;
 - anything it found that is mis-aimed, vacuous, or pinning behaviour that should change — reported,
   **not** fixed inside the migration commit.
 
@@ -2369,6 +2456,9 @@ The parent does **not** take the subagent's word for any of it. In the parent's 
    suite verified before that merge was verified against a `DodonaUi.exe` that did not contain the
    change.
 7. `dev lint`.
+8. **Read every `obsolete` row's evidence against the code it cites** (§5.4.1). There are few of them
+   by construction, they are the only rows that reduce coverage, and a wrong one is the single
+   unreviewable loss in this job. This is not a sample — it is all of them.
 
 Only then does the slice merge. `dev gate` runs **once**, before merging to main — not per slice, not
 per wave (CLAUDE.md §0.1: the heavy set has one standing reason and this is it).

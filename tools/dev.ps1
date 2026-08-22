@@ -2813,6 +2813,26 @@ function Doubles-Static {
     return $out
 }
 
+# THE CLOSED DISPOSITION VOCABULARY, IN ONE PLACE, because it was written out THREE times --
+# the static rung, --slice and --verdict -- and a disposition added to one of them validates
+# and then vanishes from the count. That matters most for the one below that DELETES coverage:
+# a number able to hide inside a list somebody forgot to widen is the whole reason 5.5 counts
+# no-seam-yet separately in the first place.
+function Ledger-Dispositions { @('moved', 'merged', 'kept', 'stays', 'vacuous-guard', 'renamed', 'obsolete') }
+
+# The EVIDENCE vocabulary for `obsolete` -- the narrow exception to "no coverage may be lost"
+# opened by the operator's directive of 2026-08-22 (CLAUDE.md 0.1). Every other disposition
+# keeps the assertion alive somewhere; this one ends it. So it is the one that may never rest
+# on judgement: each word names a FACT a reader can check, and the note has to cite it.
+#   subject-gone                  the code, config key, command or behaviour is gone (cite it)
+#   cannot-fail                   structurally vacuous -- dev prove --with says VACUOUS under a
+#                                 real defect in the very thing the check names
+#   contradicts-current-behaviour it passes by asserting the wrong thing (cite where the right
+#                                 answer lives)
+#   duplicate-of                  an exact duplicate of a NAMED survivor that still runs
+# "it looks redundant" is not on this list on purpose.
+function Ledger-ObsoleteEvidence { @('subject-gone', 'cannot-fail', 'contradicts-current-behaviour', 'duplicate-of') }
+
 function Ledger-Static {
     $dir = Ledger-Dir
     $out = [pscustomobject]@{ Problems = @(); Readings = @(); Sites = @(); Baseline = $null; Added = $null; Wires = $null; Moves = @() }
@@ -2911,8 +2931,9 @@ function Ledger-Static {
 
     # ---- moves\<slice>.tsv ----
     $moveCols = @('old_suite', 'old_check', 'disposition', 'destination', 'wire', 'mutation', 'red_old', 'red_new', 'note')
-    $dispositions = @('moved', 'kept', 'merged', 'stays', 'vacuous-guard', 'renamed')
+    $dispositions = @(Ledger-Dispositions)
     $reasons = @('process-fact', 'git-ref-mutation', 'real-window', 'timing', 'absence-of-process', 'wire-shape', 'harness-hygiene', 'no-seam-yet')
+    $evidence = @(Ledger-ObsoleteEvidence)
     $movesDir = Join-Path $dir 'moves'
     $unitMethods = $null; $uiMethods = $null
     $claimed = Ledger-NewSet
@@ -2943,6 +2964,15 @@ function Ledger-Static {
                 if (@('kept', 'stays', 'vacuous-guard') -contains $r.disposition -and -not $stillThere) {
                     $out.Problems += "$at is '$($r.disposition)' but no suite registers '$($r.old_check)' any more"
                 }
+                # THE MIRROR of the rung above, and it is not symmetry for its own sake. An
+                # `obsolete` row is written in the commit that DELETES the check (plan 9.4 B3),
+                # so a row whose check still runs is a deletion that never happened: the verdict
+                # would report the coverage gone while the check is sitting there green. The two
+                # rungs together mean a moves row and the suites can never disagree about whether
+                # a name is alive.
+                if ($r.disposition -eq 'obsolete' -and $stillThere) {
+                    $out.Problems += "$at is 'obsolete' but a suite still registers '$($r.old_check)' -- an obsolete row is written in the commit that DELETES the check, never before it"
+                }
                 switch ($r.disposition) {
                     'moved' {
                         if ($r.mutation -eq '') { $out.Problems += "$at is 'moved' with no mutation -- a move is proved by a PAIRED RED under one checked-in mutant (D-T5)" }
@@ -2958,6 +2988,44 @@ function Ledger-Static {
                         }
                     }
                     'vacuous-guard' { if ($r.note -eq '') { $out.Problems += "$at is 'vacuous-guard' with no note" } }
+                    # OBSOLETE -- the narrow, EVIDENCED exception to "no coverage may be lost"
+                    # (operator directive 2026-08-22). Every refusal below exists because the
+                    # alternative is a row reading `obsolete  it looked redundant`, which is
+                    # D-T21's shrug wearing the one word that ends in a deletion.
+                    'obsolete' {
+                        if ($r.note -eq '') {
+                            $out.Problems += "$at is 'obsolete' with NO EVIDENCE -- the note must BEGIN with one of [$($evidence -join ' ')], cite it, and carry an  if-wrong: <what is lost if this judgement is wrong>  clause. 'it looks redundant' is not evidence (operator directive 2026-08-22)"
+                        }
+                        else {
+                            $word = @($r.note -split '[ :,]')[0]
+                            if ($evidence -notcontains $word) {
+                                $out.Problems += "$at note begins '$word', which is outside the closed obsolete EVIDENCE vocabulary [$($evidence -join ' ')] -- obsolete is the one disposition that REDUCES coverage, so it may never rest on judgement"
+                            }
+                            if ($r.note -notmatch 'if-wrong:\s*\S') {
+                                $out.Problems += "$at is 'obsolete' with no  if-wrong:  clause -- every obsolete row states what is LOST if the judgement is wrong, because that sentence is what the operator is shown and what a git revert restores"
+                            }
+                            switch ($word) {
+                                'cannot-fail' {
+                                    # The STANDARD FORM of this evidence: dev prove --with returns
+                                    # VACUOUS under a real defect in the very thing the check names.
+                                    if ($r.mutation -eq '') { $out.Problems += "$at is 'obsolete / cannot-fail' with no mutation -- the standard evidence is dev prove --with <patch> coming back VACUOUS under a real defect in the thing the check names" }
+                                    elseif (-not (Test-Path (Join-Path $repo $r.mutation))) { $out.Problems += "$at names mutation '$($r.mutation)', which does not exist" }
+                                    if ($r.red_old -eq '') { $out.Problems += "$at is 'obsolete / cannot-fail' with no red_old -- record the literal VACUOUS line dev prove printed, or the evidence is an assertion about a run nobody else can see" }
+                                }
+                                'duplicate-of' {
+                                    # 5.4's own escape clause: "unless the elsewhere is NAMED and
+                                    # EXISTS". The survivor is resolved against the live suites by
+                                    # the same rung `merged` uses, below.
+                                    if ($r.destination -eq '') { $out.Problems += "$at is 'obsolete / duplicate-of' and names no survivor -- a duplicate is obsolete only when the elsewhere is NAMED and EXISTS (plan 5.4); destination must be 'suite:<suite>:<check>'" }
+                                }
+                                default {
+                                    if ($r.note -notmatch '[0-9a-f]{7,40}' -and $r.note -notmatch '[\\/]') {
+                                        $out.Problems += "$at is 'obsolete / $word' with no citation in the note -- name the commit that removed the subject, or the file the current behaviour lives in. A citation is what separates this from an opinion"
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 if (@('kept', 'merged', 'stays') -contains $r.disposition) {
                     if ($r.wire -eq '') { $out.Problems += "$at is '$($r.disposition)' and names no wire" }
@@ -2988,15 +3056,21 @@ function Ledger-Static {
                         if (-not $uiMethods.ContainsKey($leaf)) { $out.Problems += "$at destination method '$leaf' does not exist in tests\Dodona.Ui.Tests (that project is created in W3)" }
                     }
                 }
-                if ($r.disposition -eq 'merged') {
-                    $parts = @($r.destination -split ':', 3)
-                    if ($parts.Count -ne 3 -or $parts[0] -ne 'suite') {
-                        $out.Problems += "$at destination '$($r.destination)' must be 'suite:<suite>:<check>' for a merged row"
-                    }
-                    else {
-                        $survivor = $parts[2]
-                        if (@($sites | Where-Object { -not $_.Dynamic -and $_.Check -eq $survivor }).Count -eq 0) {
-                            $out.Problems += "$at merges into '$survivor', which no suite registers -- a merged row must name a LIVE survivor"
+                # `merged` names its survivor -- and so does `obsolete / duplicate-of`, through
+                # the SAME rung, because the plan's escape clause is one clause: the elsewhere
+                # must be NAMED and must EXIST (5.4). A name no suite registers any more is not
+                # an elsewhere, whichever of the two words is written in the disposition column.
+                if ($r.disposition -eq 'merged' -or ($r.disposition -eq 'obsolete' -and $r.note -match '^duplicate-of\b')) {
+                    if ($r.destination -ne '') {
+                        $parts = @($r.destination -split ':', 3)
+                        if ($parts.Count -ne 3 -or $parts[0] -ne 'suite') {
+                            $out.Problems += "$at destination '$($r.destination)' must be 'suite:<suite>:<check>' for a $($r.disposition) row"
+                        }
+                        else {
+                            $survivor = $parts[2]
+                            if (@($sites | Where-Object { -not $_.Dynamic -and $_.Check -eq $survivor }).Count -eq 0) {
+                                $out.Problems += "$at names survivor '$survivor', which no suite registers -- the elsewhere must be NAMED and EXIST (plan 5.4)"
+                            }
                         }
                     }
                 }
@@ -3205,7 +3279,7 @@ function Ledger-Slice($static, [string]$name) {
         return
     }
     Say "slice $name -- $($rows.Count) row(s)"
-    foreach ($d in @('moved', 'merged', 'kept', 'stays', 'vacuous-guard', 'renamed')) {
+    foreach ($d in @(Ledger-Dispositions)) {
         $these = @($rows | Where-Object { $_.disposition -eq $d })
         if ($these.Count -eq 0) { continue }
         Say ""
@@ -3214,6 +3288,7 @@ function Ledger-Slice($static, [string]$name) {
             $proof = switch ($d) {
                 'moved' { if ($r.red_old -and $r.red_new -and $r.mutation) { "PAIRED RED under $($r.mutation)" } else { 'NOT PROVED' } }
                 'merged' { "into $($r.destination) on $($r.wire)" }
+                'obsolete' { "COVERAGE REMOVED -- $(@($r.note -split '[ :,]')[0])" }
                 default { if ($r.wire) { "on $($r.wire)" } else { $r.note } }
             }
             Say ("    {0,-58} {1}" -f "$($r.old_suite):$($r.old_check)", $proof)
@@ -3227,7 +3302,7 @@ function Ledger-Verdict($static) {
     $sites = @($static.Sites | Where-Object { -not $_.Dynamic -and $_.Check -ne '' })
     $liveNames = @($sites | Select-Object -ExpandProperty Check -Unique)
     $by = @{}
-    foreach ($d in @('moved', 'kept', 'merged', 'stays', 'vacuous-guard', 'renamed')) { $by[$d] = @($moves | Where-Object { $_.disposition -eq $d }).Count }
+    foreach ($d in @(Ledger-Dispositions)) { $by[$d] = @($moves | Where-Object { $_.disposition -eq $d }).Count }
     $accounted = @{}
     foreach ($r in $moves) { $accounted[$r.old_check] = $true }
     $unaccounted = 0
@@ -3240,6 +3315,17 @@ function Ledger-Verdict($static) {
         $reasonCounts[$w] = $reasonCounts[$w] + 1
     }
     $noSeam = if ($reasonCounts.ContainsKey('no-seam-yet')) { $reasonCounts['no-seam-yet'] } else { 0 }
+
+    # OBSOLETE GETS ITS OWN LINE AND ITS OWN BREAKDOWN. It is the only disposition that ends an
+    # assertion rather than relocating it, so folding it into `moved` or `stays` would make the
+    # one number that means "coverage went down" invisible inside a number that means the
+    # opposite. Same reasoning as no-seam-yet's separate count (D-T21), one step sharper.
+    $obsCounts = @{}
+    foreach ($r in @($moves | Where-Object { $_.disposition -eq 'obsolete' })) {
+        $w = @($r.note -split '[ :,]')[0]
+        if (-not $obsCounts.ContainsKey($w)) { $obsCounts[$w] = 0 }
+        $obsCounts[$w] = $obsCounts[$w] + 1
+    }
 
     $frozenAt = "$(& git -C $repo log -1 --format=%h -- 'tests/ledger/baseline.tsv' 2>$null)"
     if (-not $frozenAt) { $frozenAt = 'NOT COMMITTED' }
@@ -3270,6 +3356,10 @@ function Ledger-Verdict($static) {
     Say ("  stays               {0}   by reason: {1}" -f ($by['stays'] + $by['kept']), ($rs -join ', '))
     Say ("  stays (no-seam-yet)   {0}   <- MUST BE 0, or every one carries an issue number" -f $noSeam)
     Say ("  vacuous-guard         {0}   (kept and labelled, by decision)" -f $by['vacuous-guard'])
+    $os = @()
+    foreach ($w in @(Ledger-ObsoleteEvidence)) { $os += "$w $(if ($obsCounts.ContainsKey($w)) { $obsCounts[$w] } else { 0 })" }
+    Say ("  obsolete              {0}   <- REDUCES COVERAGE, never folded into moved or stays." -f $by['obsolete'])
+    Say ("                            by evidence: {0}" -f ($os -join ', '))
     Say ("  unaccounted           {0}   <- MUST BE 0" -f $unaccounted)
     Say ("  added (declared)      {0}" -f $addedCount)
     Say "INTEGRATION CHECKS"

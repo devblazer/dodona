@@ -102,6 +102,33 @@ nothing while looking installed).
   a missed catch is the accepted cost, because the operator approves every irreversible step
   anyway. Do not propose widening an automatic reader on the grounds that it might miss
   something. It will.
+- **A TEST THAT IS OUTDATED OR NO LONGER NEEDED IS A DEFECT, AND FINDING IT IS PART OF THE JOB**
+  (standing directive, 2026-08-22, in their words: *"Go over the test you're actually busy with and
+  make sure none of them are outdated or no longer needed, etcetera. because I know that stuff gets
+  to be a mess with AI development over time sometimes, and there might be a bunch of shit there
+  that's either completely wrong or just no longer even needed at all, that kind of thing. So just
+  watch out for that."* — said while authorising the test migration, alongside *"I fix any errors
+  along the way"*: fix what you find en route rather than routing around it).
+
+  **This does NOT repeal `docs/TEST-ARCHITECTURE-PLAN.md`'s rule that no coverage may be lost.** It
+  opens one narrow, evidenced hole in it, and the hole is enforcement rather than permission
+  (§5.4.1 of that plan, D-T32). A check may be dropped only as an **`obsolete`** row in
+  `tests/ledger/moves/<slice>.tsv`, and `dev ledger` refuses one without EVIDENCE — exactly four
+  words, each naming a fact somebody else can check: the **subject is gone** (cite the commit, or
+  the file that no longer holds the symbol); the **assertion cannot fail** (the standard form is
+  `dev prove --with` coming back VACUOUS under a real defect in the very thing the check names); it
+  **contradicts current behaviour**; or it is an **exact duplicate of a NAMED survivor** that still
+  runs. *"It looks redundant"*, *"it seems old"*, *"we probably don't need it"* are refused by name,
+  in those words, by the tool.
+
+  **Every such row is reported, never silent.** It carries what would be LOST if the judgement is
+  wrong, it is named in the slice's commit message and to the operator, `dev ledger --verdict`
+  counts it on its own line — never folded into `moved` or `stays`, because it is the only number
+  that means coverage went down — and a `git revert` puts the check back. And the thing you may
+  NOT do is port a dead assertion faithfully down a layer to stay inside the rule: a faithful move
+  of a broken check is worse than leaving it alone, because it spends a seam and a mutant on
+  preserving something untrue.
+
 - **Act, announce, allow undo** (§11) applies to you too: make the routine call, say what
   you did, keep it reversible. Blocking questions are for genuinely unsafe forks only.
 - Feedback like "that's bullshit" about a proposal is a decision — record it (rejected

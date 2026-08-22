@@ -8,7 +8,7 @@ The accounting that makes "no coverage was lost" a fact rather than a promise, f
 | `wires.tsv` | one row per distinct integration wire, and the single check that proves it |
 | `baseline.tsv` | the frozen name set, captured once from a green `dev gate` |
 | `added.tsv` | declared growth: names that appeared after the freeze, with a reason |
-| `moves/<slice>.tsv` | per-slice disposition rows: `moved`, `merged`, `renamed`, `no-seam-yet` |
+| `moves/<slice>.tsv` | per-slice disposition rows: `moved`, `merged`, `renamed`, `no-seam-yet`, `obsolete` |
 
 **`baseline.tsv` is keyed on the CHECK NAME, not on `suite<TAB>check`.** The suite is an ordinary
 column. That is what lets the suite rename (W6) happen without invalidating the freeze — and it is
@@ -886,6 +886,111 @@ the instance: **a path with a backslash in a generated string is a lottery over 
 follows it.** `\a` `\b` `\f` `\n` `\r` `\t` `\v` are silent corruption; `\l` `\s` `\w` are merely a
 warning. Use forward slashes in generated content, or the `edit.py` helper, which takes the string
 as a literal argument and never goes near a shell.
+
+## `obsolete` -- the exception that takes evidence instead of judgement
+
+**Operator directive, 2026-08-22** (`CLAUDE.md` 0.1, `TEST-ARCHITECTURE-PLAN.md` 5.4.1, D-T32):
+*"there might be a bunch of shit there that's either completely wrong or just no longer even needed
+at all ... So just watch out for that."*
+
+The plan's *no name is lost* rule stands, and *"delete because it is covered elsewhere"* is still not
+a disposition. `obsolete` is one door out of it, with a lock on the door. It exists because the
+alternative is worse than a deletion: an agent facing a check that asserts something no longer true
+either leaves it alone or **ports a dead assertion faithfully down a layer**, spending a seam, a
+mutant and a reviewer's attention on preserving something untrue.
+
+**A row is `obsolete` only on EVIDENCE, and the evidence is a word in the note plus a citation.**
+
+| evidence word | what has to be true | what the row must carry |
+|---|---|---|
+| `subject-gone` | the code, config key, command or behaviour it asserts no longer exists | a commit sha, or a path, in the note |
+| `cannot-fail` | structurally vacuous -- compares a value to itself, or the query returns empty so the comparison is against nothing | `mutation` = a patch that exists, and `red_old` = the literal `VACUOUS` line `dev prove --with` printed. **That is the standard form of this evidence** |
+| `contradicts-current-behaviour` | it passes only by asserting the wrong thing | a commit sha, or a path, in the note |
+| `duplicate-of` | an exact duplicate of a NAMED survivor that still runs | `destination` = `suite:<suite>:<check>`, resolved against the live suites |
+
+Every one of them also carries an **`if-wrong:` clause** -- what is LOST if the judgement is wrong.
+The tool refuses a row without one, because that sentence is the thing a reviewer actually reads and
+the thing a `git revert` restores. And every `obsolete` row is **reported**: named in the slice's
+commit message and surfaced to the operator, never left to be found in a TSV.
+
+### Choosing between `vacuous-guard` and `obsolete` -- the judgement this creates
+
+They overlap exactly where it matters: both describe a check that cannot fail. The vocabulary will
+not separate them, so this is the rule.
+
+- **`vacuous-guard` = keep it and LABEL it.** It cannot fail *today*, but the thing it watches is
+  real. R7's precedent: 18 checks shipped, 14 seen red, the 4 vacuous ones kept and labelled.
+- **`obsolete` = it should go.** It cannot fail *and there is nothing left for it to watch* -- the
+  subject is gone, or the assertion is structurally blind to any defect in it.
+
+**The question that decides it: could a defect ever exist that this check would catch?** Yes, and it
+is a `vacuous-guard`. No -- because the subject is gone, or because the assertion cannot see -- and
+it is `obsolete`. **When you cannot answer, it is `vacuous-guard`**: keeping a useless check costs
+milliseconds, deleting a useful one costs a defect nobody catches, and the tie does not break both
+ways.
+
+One case that looks like this and is neither: **a check pinning behaviour that SHOULD change.** It
+moves faithfully and is ticketed (plan 5.4, `INVESTIGATION` 4.8). Disagreeing with an assertion is
+judgement, which is the one thing this disposition does not accept.
+
+### The refusals, each one produced against this tree, verbatim
+
+Same standard as W2's rungs: `dev prove` cannot judge `dev.ps1`, so each was broken by hand and the
+literal output copied out. A fixture `moves\z-obsolete-fixture.tsv` carried the rows; it was deleted
+afterwards and `git status` is clean of it. Every run exits **1**.
+
+| what was wrong | the literal refusal |
+|---|---|
+| `obsolete` with an empty note | `moves\z-obsolete-fixture.tsv:2 is 'obsolete' with NO EVIDENCE -- the note must BEGIN with one of [subject-gone cannot-fail contradicts-current-behaviour duplicate-of], cite it, and carry an  if-wrong: <what is lost if this judgement is wrong>  clause. 'it looks redundant' is not evidence (operator directive 2026-08-22)` |
+| an opinion where the evidence goes (`it looks redundant and we probably do not need it. if-wrong: nothing much`) | `moves\z-obsolete-fixture.tsv:3 note begins 'it', which is outside the closed obsolete EVIDENCE vocabulary [subject-gone cannot-fail contradicts-current-behaviour duplicate-of] -- obsolete is the one disposition that REDUCES coverage, so it may never rest on judgement` and `moves\z-obsolete-fixture.tsv:3 is 'obsolete / it' with no citation in the note -- name the commit that removed the subject, or the file the current behaviour lives in. A citation is what separates this from an opinion` |
+| `subject-gone` with no citation and no `if-wrong:` | `moves\z-obsolete-fixture.tsv:4 is 'obsolete' with no  if-wrong:  clause -- every obsolete row states what is LOST if the judgement is wrong, because that sentence is what the operator is shown and what a git revert restores` and `moves\z-obsolete-fixture.tsv:4 is 'obsolete / subject-gone' with no citation in the note -- name the commit that removed the subject, or the file the current behaviour lives in. A citation is what separates this from an opinion` |
+| `cannot-fail` with no mutation and no `red_old` | `moves\z-obsolete-fixture.tsv:5 is 'obsolete / cannot-fail' with no mutation -- the standard evidence is dev prove --with <patch> coming back VACUOUS under a real defect in the thing the check names` and `moves\z-obsolete-fixture.tsv:5 is 'obsolete / cannot-fail' with no red_old -- record the literal VACUOUS line dev prove printed, or the evidence is an assertion about a run nobody else can see` |
+| `duplicate-of` naming no survivor | `moves\z-obsolete-fixture.tsv:6 is 'obsolete / duplicate-of' and names no survivor -- a duplicate is obsolete only when the elsewhere is NAMED and EXISTS (plan 5.4); destination must be 'suite:<suite>:<check>'` |
+| `duplicate-of` naming a survivor no suite registers | `moves\z-obsolete-fixture.tsv:3 names survivor 'a_check_nobody_registers_any_more', which no suite registers -- the elsewhere must be NAMED and EXIST (plan 5.4)` |
+| an `obsolete` row for a check that is STILL REGISTERED | `moves\z-obsolete-fixture.tsv:2 is 'obsolete' but a suite still registers 'status_does_not_summon_a_daemon' -- an obsolete row is written in the commit that DELETES the check, never before it` |
+
+That last one is the **mirror** of the existing `kept`/`stays`/`vacuous-guard` reachability rung, and
+it is not symmetry for its own sake. An obsolete row is written in the commit that deletes the check
+(plan 9.4 B3), so a row whose check still runs is a deletion that never happened -- the verdict would
+report the coverage gone while the check sits there green. With both rungs, a moves row and the
+suites can never disagree about whether a name is alive.
+
+### The control, and the one thing it had to borrow
+
+A fully-evidenced row is **clean, exit 0**, counted separately, and printed by `--slice`:
+
+```
+  obsolete              1   <- REDUCES COVERAGE, never folded into moved or stays.
+                            by evidence: subject-gone 1, cannot-fail 0, contradicts-current-behaviour 0, duplicate-of 0
+```
+
+```
+slice z-obsolete-fixture -- 1 row(s)
+
+  obsolete (1)
+    m1:event_claim_overlap                                     COVERAGE REMOVED -- subject-gone
+```
+
+**And the borrow is worth naming, because it is a real property of the static rung.** The control
+needed a baseline name that no suite registers, and at this commit **there is no such name**: every
+name a slice has deleted is already claimed by `moves\s-wire.tsv`, and a name is disposed of exactly
+once. The one available family is the 22 **loop-generated** names (`event_*`, `resolution_recorded_*`),
+which the static scanner cannot see at all -- reachability for those is satisfied on the `--live`
+side only (plan 5.4), so the mirror rung stays quiet over one. That is a documented gap being used as
+a fixture, not a hole the demo invented; a real `obsolete` row over a loop-generated name would be
+caught by `dev ledger --live` instead, on the run that still produces it.
+
+### Why it is a separate number in `--verdict`
+
+`obsolete` is the only disposition whose count means *coverage went down*. Every count it could
+plausibly be folded into -- `moved`, `stays` -- means the opposite, so a fold makes the one number
+worth watching invisible inside a healthy-looking one. Same reasoning as `stays (no-seam-yet)`'s
+separate line (D-T21), one step harder.
+
+The vocabulary is now **one list in one place**, `Ledger-Dispositions` in `tools\dev.ps1`. It had
+been written out three times -- the static rung, `--slice`, `--verdict` -- and a disposition added to
+only the first would validate and then vanish from the count, which for this one would be a deletion
+that no number anywhere reported.
 
 ## The wire owners have not been audited, and every one looked at so far was wrong
 
