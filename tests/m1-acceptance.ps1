@@ -290,11 +290,26 @@ try {
     Check 'gate_denies_a_ticket_lane_writing_its_claim_in_the_shared_checkout' `
         ($tSharedOut -match '"permissionDecision":"deny"') "hook=$tHook output=[$($tSharedOut.Trim())]"
 
-    # ---- A FAIL-OPEN MUST LEAVE A TRACE, whatever caused it (operator decision 2026-08-19) ----
+    # ---- WHATEVER THE GATE COULD NOT CHECK LEAVES A TRACE (operator decision 2026-08-19) ----
     # The gate had four paths that allowed a write and said nothing: no ticket, unreadable stdin,
     # unparseable stdin, and no file_path. Silence is the reason `gate_denies_outside_claim`
     # could go red under load with an empty detail and three wrong diagnoses -- there was
     # nothing written down to read. Every one of them now records what it saw.
+    #
+    # RENAMED, ALL THREE, AND THE NAMES WERE THE ONLY THING WRONG WITH THEM (S-GATE, plan W8
+    # wave 2; the rows are in tests\ledger\moves\s-gate.tsv). They were
+    # `unparseable_input_is_recorded`, `the_fail_open_says_how_much_it_got` and
+    # `the_fail_open_reaches_the_backstops_log` -- named after a FAIL-OPEN path issue #4
+    # established does not exist, and a MERGE BACKSTOP D-R5/R3 retired. Nothing reads that log
+    # but a person, and a person reading "fail-open" about a write that was REFUSED draws the
+    # wrong conclusion at the worst possible moment; the marker in the log itself says
+    # `gate could not check` now, for the same reason and in the same slice.
+    #
+    # What the three ASSERT is unchanged and still sound: the trace fires, it says why, it says
+    # how much it got, and it reaches the log on disk. `GateAllowedUnchecked` really is still
+    # called at the unparseable branch -- for the trace only; the verdict is the refusal beside
+    # it, which is the check in the next block. That is why these are renamed IN PLACE rather
+    # than deleted or moved down: an assertion about a real diagnostic, wearing a retired name.
     #
     # Driven with input the gate CANNOT interpret, which is the closest reproducible stand-in for
     # whatever happens under heavy load, and the case that used to vanish completely.
@@ -305,90 +320,33 @@ try {
     $gFlat = ($g -replace '\s+', ' ')
     # Whitespace collapsed before matching: captured native stderr is WRAPPED to the console
     # width, so a phrase can be split mid-sentence (CLAUDE.md 0.2).
-    Check 'unparseable_input_is_recorded' ($gFlat -match 'gate could not check' -and $gFlat -match 'unparseable') $gFlat
-    Check 'the_fail_open_says_how_much_it_got' ($gFlat -match '\d+ bytes') $gFlat
+    Check 'the_unreadable_input_trace_says_why' ($gFlat -match 'gate could not check' -and $gFlat -match 'unparseable') $gFlat
+    Check 'the_unreadable_input_trace_says_how_much_it_got' ($gFlat -match '\d+ bytes') $gFlat
     $logged = if (Test-Path $bypassLog) { (Get-Content $bypassLog -Raw) } else { '' }
-    Check 'the_fail_open_reaches_the_backstops_log' (($logged -replace '\s+', ' ') -match 'could not check.*unparseable') "log=[$logged]"
+    Check 'the_unreadable_input_trace_reaches_the_bypass_log' (($logged -replace '\s+', ' ') -match 'could not check.*unparseable') "log=[$logged]"
 
-    # ---- AND THE VERDICT ON UNREADABLE INPUT IS NOW A REFUSAL. A RECORDED RATIONALE, REVERSED ----
+    # ---- THE FIVE ARGUMENT-AND-INPUT VERDICTS MOVED DOWN A LAYER (S-GATE, plan W8 wave 2) ----
     #
-    # This check used to be `a_fail_open_does_not_block_the_write`, asserting the opposite, with the
-    # reason written beside it: "layer 1 failing closed would strand a lane that has no way to ask a
-    # human for permission (CLAUDE.md 7). The backstop is layer 2."
+    # `unreadable_input_is_refused_not_allowed_into_the_live_tree`,
+    # `the_gate_denies_a_lane_argument_it_cannot_read`,
+    # `the_misconfiguration_refusal_says_it_is_not_the_agents_mistake`,
+    # `the_gate_still_checks_the_tree_when_the_ticket_argument_is_unreadable` and
+    # `the_unreadable_ticket_is_reported_without_claiming_a_fail_open` lived here, each starting
+    # a `dodona gate-hook` subprocess -- and two of them a daemon round trip -- to ask something
+    # pure over (laneArg, ticketArg, stdin, the tree answer). They are
+    # `unit:Dodona.Tests.GateDecisionTests.<the same name>` now, under the S11 seam that commit A
+    # cut, with their rows and both reds in tests\ledger\moves\s-gate.tsv.
     #
-    # That was correct for the gate it was written about. It lived only inside ticket worktrees, so
-    # a fail-open let a write slip to the merge-time diff backstop, which catches it before anything
-    # can land. WORK-ISOLATION-PLAN section 9 requires exactly this re-reading, because layer 1
-    # changes what is behind the fail-open: nothing. A write allowed into the SHARED CHECKOUT is in
-    # the operator's live tree, next to their uncommitted work and every other lane's, and no
-    # backstop sees it -- it was never going to be merged, it is already there.
-    #
-    # So the two questions now fail in opposite directions, and the ORDER is what keeps that safe:
-    # the TREE question is asked first and refuses when it cannot get an answer; the CLAIM question
-    # is asked second and still fails open exactly as before. Because the tree answer has already
-    # been obtained, every remaining claim fail-open can only let a write through INSIDE A WORKTREE
-    # -- which is the case the original rationale was actually about, and the backstop still covers.
-    #
-    # A refused write is also not a stranding: it is announced to the agent, recorded, and
-    # retryable, and the daemon it needs an answer from is the same one already pumping this lane's
-    # output. An allowed one is invisible and permanent. CLAUDE.md 0.3 is largely a list of what
-    # invisible costs.
-    Check 'unreadable_input_is_refused_not_allowed_into_the_live_tree' `
-        ($gFlat -match 'permissionDecision.*deny') $gFlat
+    # THE HALF THAT DID NOT MOVE, AND MUST NOT (TEST-ARCHITECTURE-PLAN 3.5): the gate's stdin is
+    # never faked. `Console.In` hands a leading U+FEFF back as an ordinary character and PS 5.1
+    # writes BOMs by default, and that pair made the claim gate FAIL OPEN on every run while
+    # looking green (2026-08-19). So wire B1 (`m2:the_lane_ends_up_in_a_worktree`) still pipes
+    # real bytes including a real BOM into the real exe;
+    # `gate_denies_a_ticket_lane_writing_its_claim_in_the_shared_checkout` above still drives the
+    # command out of the deployed gate-lane<N>.json end to end; and the two plain-lane tree
+    # checks either side of it are still the real discrimination through the real daemon. What
+    # `GateDecision` decides is what to do with the ANSWER; what the answer IS stays here.
     Remove-Item $bypassLog -ErrorAction SilentlyContinue
-
-    # RE-AIMED from `gate_never_failed_open_silently`, and the re-aim is forced rather than
-    # chosen. That check read: denied, OR allowed-with-a-trace -- the two acceptable outcomes for
-    # a write outside the claim, where the unacceptable third was allowed-and-silent. It had
-    # already been backwards once and passed during the exact event it was written to catch, which
-    # is why the three outcomes are spelled out above it. R3 makes silence the CORRECT answer for
-    # that payload, so the old form cannot be kept without asserting the opposite of the design.
-    #
-    # The property it was really protecting -- THIS GATE NEVER ALLOWS WHAT IT CANNOT DETERMINE --
-    # is what moves here, and R3 makes it stronger rather than weaker: with the claim question
-    # gone there is no fail-open path left in `GateHook` at all. Asserted at the one input that
-    # can still make the gate unable to answer: a `--lane` argument it cannot parse. That is our
-    # own misconfiguration, the case where guessing "allow" would put a write in the operator's
-    # live tree, and it must DENY.
-    $badLaneHook = "`"$dodona`" gate-hook --lane not-a-number --workspace `"$($ws.Id)`""
-    $badLaneOut = ($inJson | & cmd /c $badLaneHook 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
-    Check 'the_gate_denies_a_lane_argument_it_cannot_read' `
-        ($badLaneOut -match '"permissionDecision":"deny"') "output=[$($badLaneOut.Trim())]"
-    # ...and it says whose fault it is, because an agent cannot fix a Dodona misconfiguration and
-    # should not spend a turn trying (CLAUDE.md 0.3: name the real cause).
-    Check 'the_misconfiguration_refusal_says_it_is_not_the_agents_mistake' `
-        ($badLaneOut -match 'misconfiguration') "output=[$($badLaneOut.Trim())]"
-
-    # ...AND THE SIBLING ARGUMENT, WHICH WAS STILL A LIVE FAIL-OPEN UNTIL 2026-08-21. Issue #4
-    # asked which of two documents was right about `GateHook` having no fail-open path left. The
-    # answer came out of enumerating every `return` rather than trusting either: `--ticket` that
-    # does not parse returned an unchecked ALLOW while `--lane` right beside it denied, so
-    # `--lane <good> --ticket abc` skipped the tree question entirely. Same shape as the hole R3
-    # closed, one argument along, and it survived R3 because the ticket number stopped mattering
-    # the moment D-R5 deleted the claim question and nobody re-read this branch.
-    #
-    # Driven at the SHARED CHECKOUT, because that is what the bug actually cost: HEAD lets this
-    # write into the operator's live tree and says `gate fail-open` on stderr. The fix carries on
-    # to the tree check, which refuses it. `DeployGate` only ever writes a numeric `--ticket`, so
-    # this is unreachable from Dodona's own deployment -- which is the argument for asserting it,
-    # not against: an unreachable allow is exactly the kind that stays unread for a day.
-    $badTicketHook = "`"$dodona`" gate-hook --lane $plainId --ticket not-a-number --workspace `"$($ws.Id)`""
-    $badTicketOut = ($sharedJson | & cmd /c $badTicketHook 2> $gerr | Out-String) + (Get-Content $gerr -Raw -ErrorAction SilentlyContinue)
-    Check 'the_gate_still_checks_the_tree_when_the_ticket_argument_is_unreadable' `
-        ($badTicketOut -match '"permissionDecision":"deny"') "output=[$($badTicketOut.Trim())]"
-    # ...and it is not doing it by calling the write a fail-open. `GateAllowedUnchecked` writes
-    # `gate fail-open` where the merge backstop looks; nothing is being let through here, so that
-    # phrase must not appear -- while the misconfiguration itself still has to be said out loud,
-    # or a bad `--ticket` becomes the silent degrade CLAUDE.md 0.1 forbids.
-    #
-    # ALL whitespace is stripped, not collapsed. Captured native stderr is wrapped to the console
-    # width (CLAUDE.md 0.2) and the break lands at a column, not at a word boundary, so
-    # `not-a-nu\nmber` is a real outcome that a collapse-to-single-space would not survive.
-    $badTicketFlat = $badTicketOut -replace '\s', ''
-    Check 'the_unreadable_ticket_is_reported_without_claiming_a_fail_open' `
-        (($badTicketFlat -match "--ticket'not-a-number'isnotanumber") -and
-         ($badTicketFlat -notmatch 'gatefail-open')) `
-        "output=[$(($badTicketOut -replace '\s+', ' ').Trim())]"
 
     # ---- 5. agent work: commit in wt1 (the test IS the agent at the git layer) ----
     Set-Content "$wt1\src\water\sim.cs" "// water sim v2"

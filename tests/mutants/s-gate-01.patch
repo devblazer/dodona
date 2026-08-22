@@ -1,0 +1,43 @@
+# S-GATE 01. R3's hole, put back: the no-gate-was-deployed guard asks the PARSED NUMBERS
+# defect: again instead of the arguments. `--lane not-a-number` parses to 0, so it takes the
+# defect: early allow and the write goes through unchecked -- before ever reaching the deny
+# defect: written two blocks below for exactly that input.
+#
+# WHY THIS SHAPE. It is the literal pre-R3 line, because the point of the checks it reddens is
+# that the deny was UNREACHABLE in the one case it was written for. Nothing else in the
+# function is touched, so a red here cannot be the tree question or the stdin branches
+# misfiring -- and the expects-green lines say which neighbours had to survive.
+#
+# THE PAIRED REDS (plan 5.3):
+#
+# expects-red: m1:the_gate_denies_a_lane_argument_it_cannot_read
+# expects-red: m1:the_misconfiguration_refusal_says_it_is_not_the_agents_mistake
+# expects-red: unit:Dodona.Tests.GateDecisionTests.the_gate_denies_a_lane_argument_it_cannot_read
+# expects-red: unit:Dodona.Tests.GateDecisionTests.the_misconfiguration_refusal_says_it_is_not_the_agents_mistake
+# expects-red: unit:Dodona.Tests.GateDecisionTests.every_allow_asked_the_tree_or_had_no_gate_deployed
+#
+# THE CONTROLS. A readable lane is unaffected by this line, so everything downstream of one
+# must survive. If any of these reddens, the mutant is broad and the reds above mean nothing:
+#
+# expects-green: m1:the_gate_still_checks_the_tree_when_the_ticket_argument_is_unreadable
+# expects-green: m1:unreadable_input_is_refused_not_allowed_into_the_live_tree
+# expects-green: m1:gate_denies_a_ticket_lane_writing_its_claim_in_the_shared_checkout
+# expects-green: unit:Dodona.Tests.GateDecisionTests.unreadable_input_is_refused_not_allowed_into_the_live_tree
+#
+# AND THE ENUMERATION IS RED HERE ON PURPOSE. `every_allow_asked_the_tree_or_had_no_gate_deployed`
+# is growth rather than a moved name, so it owes no paired red -- but it is the instrument that
+# claims to catch a new unchecked allow, and this defect IS one. A green there would mean the
+# enumeration does not do what its own summary says (CLAUDE.md 0.3: believing a green check).
+diff --git a/src/Dodona/Program.cs b/src/Dodona/Program.cs
+index 7d30e6f..67ec695 100644
+--- a/src/Dodona/Program.cs
++++ b/src/Dodona/Program.cs
+@@ -1741,7 +1741,7 @@ namespace Dodona
+             // (`the_gate_denies_a_lane_argument_it_cannot_read`), which is the argument for
+             // re-aiming a check rather than deleting it: the old assertion was retired, and the new
+             // one immediately caught something the old one could never have looked at.
+-            if (laneArg is not { Length: > 0 } && ticketArg is not { Length: > 0 })
++            if (lane <= 0 && ticket <= 0)
+                 return new Outcome(Verdict.Allow, null, null, null, ticket, null);
+ 
+             // A LANE ARGUMENT WE CANNOT READ IS NOT AN ALLOW. It means our own deployment wrote

@@ -1,0 +1,41 @@
+# S-GATE 02. Issue #4's hole, put back: an unreadable `--ticket` returns an unchecked ALLOW
+# defect: instead of reporting the misconfiguration and carrying on. `--lane 7 --ticket abc`
+# defect: then never reaches the tree question at all, so a write lands wherever it was aimed
+# defect: -- including the operator's live checkout -- and the trace calls it a fail-open.
+#
+# WHY THIS SHAPE. This is the line as it stood for a day after R3: the `--lane` sibling was
+# fixed and this one was not, because the ticket number stopped being load-bearing the moment
+# D-R5 deleted the claim question and nobody re-read the branch. `DeployGate` only ever writes
+# a numeric `--ticket`, so nothing reached it, which is exactly why it sat there unread.
+#
+# THE PAIRED REDS (plan 5.3):
+#
+# expects-red: m1:the_gate_still_checks_the_tree_when_the_ticket_argument_is_unreadable
+# expects-red: m1:the_unreadable_ticket_is_reported_without_claiming_a_fail_open
+# expects-red: unit:Dodona.Tests.GateDecisionTests.the_gate_still_checks_the_tree_when_the_ticket_argument_is_unreadable
+# expects-red: unit:Dodona.Tests.GateDecisionTests.the_unreadable_ticket_is_reported_without_claiming_a_fail_open
+# expects-red: unit:Dodona.Tests.GateDecisionTests.every_allow_asked_the_tree_or_had_no_gate_deployed
+#
+# THE CONTROLS. Nothing without a `--ticket` argument passes this line, so the whole
+# unreadable-lane family and the unparseable-stdin verdict must survive:
+#
+# expects-green: m1:the_gate_denies_a_lane_argument_it_cannot_read
+# expects-green: m1:the_misconfiguration_refusal_says_it_is_not_the_agents_mistake
+# expects-green: m1:unreadable_input_is_refused_not_allowed_into_the_live_tree
+# expects-green: unit:Dodona.Tests.GateDecisionTests.the_gate_denies_a_lane_argument_it_cannot_read
+# expects-green: unit:Dodona.Tests.GateDecisionTests.unreadable_input_is_refused_not_allowed_into_the_live_tree
+diff --git a/src/Dodona/Program.cs b/src/Dodona/Program.cs
+index 7d30e6f..58739e9 100644
+--- a/src/Dodona/Program.cs
++++ b/src/Dodona/Program.cs
+@@ -1777,9 +1777,7 @@ namespace Dodona
+             // through here.
+             string? note = null;
+             if (ticketArg is { Length: > 0 } && ticket <= 0)
+-                note = $"dodona gate: --ticket '{ticketArg}' is not a number (Dodona " +
+-                       "misconfiguration, not your mistake -- report it). The tree check still " +
+-                       "runs and still decides this write; only the trace loses the ticket number.";
++                return new Outcome(Verdict.Allow, null, $"--ticket '{ticketArg}' is not a number", null, ticket, null);
+ 
+             // THE THREE `lane <= 0` BRANCHES BELOW ARE UNREACHABLE FROM HERE, and they are kept
+             // rather than deleted because each is a genuine unchecked allow if it ever becomes
