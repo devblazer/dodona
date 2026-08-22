@@ -195,7 +195,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev.ps1 <verb>
 | `build` | Only *real* compile errors reach you; a locked output is named, never mistaken for one |
 | `test <suite>...` | Named suites, concurrently (`--sequential` for one at a time). **IT DOES NOT BUILD** — run `dev build` first or you test the PREVIOUS binary |
 | `test unit` | Pure logic, no daemon/store/window. ~2 s; run it while you edit |
-| `suites` | All seventeen, **three at a time** |
+| `suites` | All eighteen, **three at a time** |
 | `prove <suite> <check>` | Demands a new check FAILS against HEAD. PROVEN / VACUOUS (rewrite it) / MISSING (it never ran) |
 | `prove <suite>:<check> ...` | Same for MANY: grouped by suite, **one run per suite**. **Default to this form** — Phase 3 ran m0 eleven times to read eleven lines of one run's output, 46 min for what is 40 s |
 | `lint` | Control bytes, dangling `tests\*.ps1` refs in docs, mixed line endings, all of `dev ledger`'s static side, the double ledger's rung 1, every wire command declared. ~1.5–2.5 s. **Tracked AND untracked** (issue #15) — `.gitignore` is the filter, and the verdict line states its scope |
@@ -282,6 +282,7 @@ verification became something to skip; 80 s spent twenty times is worse than 80 
 | the UI as a view over the store | `dev test m3` |
 | publish, hot swap, provenance | `dev test m4 publish` |
 | workspaces, members, repo exclusivity | `dev test workspace` |
+| which project a lane opens in; a sentence that names one | `dev test projects` |
 | box, panes, tiles — anything clicked or typed in ONE workspace | `dev test ui-grid` |
 | one window over N workspaces: bands, merged feed, boot-to-zero | `dev test ui-shell` |
 | the overlay that ASKS | `dev test ui-ask` |
@@ -406,7 +407,7 @@ is opt-in, waiting never is), and a schema-migrating swap **backs up the store a
 
 ## 3. Verify with the suites, not by looking
 
-Seventeen model-free suites, all fake agents, all free. **Run them through `dev test`, never by
+Eighteen model-free suites, all fake agents, all free. **Run them through `dev test`, never by
 invoking the `.ps1` directly** — the wrapper is what makes a suite that crashed, hung or never
 reported a FAILURE rather than a blank line (P4.4).
 
@@ -420,6 +421,7 @@ reported a FAILURE rather than a blank line (P4.4).
 | `m3` | the UI as a view over the store |
 | `m4` | hot swap (runs a REAL build — the slow one) |
 | `workspace` | identity, repo-exclusivity, multi-repo |
+| `projects` | **which project** a lane opens in and which one a typed sentence means (`LOCATIONS-PLAN` phases 1–3). Split out of `workspace` at its own fixture boundary (#23) — for FILE SIZE, not the clock: both halves were already in the wave, so it cost ~1 s |
 | `ui-grid` | the UI driven like a person: the box and how it grows, panes, model/effort policy, attention badges, close/collapse/expand |
 | `ui-shell` | one window over N workspaces (§3.1): boot-to-zero, the bare launch, a band, clicking a band, the feed as a labelled union, a live shell hot-swapping |
 | `ui-ask` | the window ASKS, and it is not a dialog: one component, two render modes, one answer path, over all three question kinds real code produces |

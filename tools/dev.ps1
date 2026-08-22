@@ -66,7 +66,11 @@ function AllSuites {
     # of SERIALIZED wall clock added to a full run that measured 258-312 s against a 300 s budget.
     # That is ~1.5 %, it is model-free, it opens no window and no microphone, and it is not a
     # candidate for widening back out: the budget pressure is issue #1, not this.
-    'unit', 'ui-unit', 'm0', 'm1', 'm2', 'm3', 'm4', 'workspace', 'voice', 'compression', 'brain', 'concierge', 'publish',
+    # `projects` split out of `workspace` 2026-08-22 (issue #23) at the fixture boundary that
+    # suite already had -- everything in it stands up its own two-project workspace. The split is
+    # for FILE SIZE and not for the clock: both halves were already in the wave, and the wave is
+    # sum-bound, so it costs ~1s rather than saving any. SuiteOrderHint has both.
+    'unit', 'ui-unit', 'm0', 'm1', 'm2', 'm3', 'm4', 'workspace', 'projects', 'voice', 'compression', 'brain', 'concierge', 'publish',
     # `ui-use` was one 1221-line, 130-check, 88.8 s suite that had to run alone. Split at its
     # four fixture boundaries 2026-08-21 (issue #2); see SoloSuites below for the measurement.
     'ui-grid', 'ui-shell', 'ui-ask', 'ui-wake'
@@ -1115,9 +1119,13 @@ function UnitProject([string]$name) {
 #
 # KEEP IT SORTED BY IN-WAVE MEDIAN when you touch it, and re-derive rather than nudge: this list
 # going stale is silent, costs ~17 s, and nothing fails when it happens.
+# `projects` and `workspace` are placed from ALONE times scaled by workspace's own measured
+# alone-to-in-wave ratio (68,8 -> 81,3s, x1,18): projects 48,3 -> ~57s, workspace 30,8 -> ~36s.
+# That is an ESTIMATE and the only two entries here that are -- re-derive both from in-wave
+# medians once a few gates have run with the split in.
 function SuiteOrderHint {
-    , @('brain', 'workspace', 'ui-grid', 'm1', 'm4', 'm0', 'ui-ask', 'm3', 'ui-wake', 'ui-shell',
-        'publish', 'concierge', 'm2', 'compression')
+    , @('brain', 'ui-grid', 'projects', 'm1', 'workspace', 'm4', 'm0', 'ui-ask', 'm3', 'ui-wake',
+        'ui-shell', 'publish', 'concierge', 'm2', 'compression')
 }
 
 # HOW MANY AT ONCE. THREE. The number is measured, and it was 5 until 5 was shown to be wrong.
@@ -2410,8 +2418,19 @@ function Do-Gate {
     foreach ($row in @(git -C $repo status --porcelain)) {
         if ($row.Length -lt 4) { continue }
         $code = $row.Substring(0, 2)
-        # untracked and deleted have no HEAD blob to compare against
-        if ($code.Contains('?') -or $code.Contains('D')) { continue }
+        # untracked, ADDED and deleted have no HEAD blob to compare against.
+        #
+        # `A` WAS MISSING AND IT MADE THIS ROW FIRE ON EVERY NEW FILE THAT NEEDS A BOM. The guard
+        # below is `Test-Path $tmp`, which looks like it covers a missing blob and does not: the
+        # redirect is `cmd /c ... > tmp`, and cmd CREATES the file before git runs, so a failed
+        # `cat-file` leaves a ZERO-BYTE file rather than no file. That reads back as "HEAD had no
+        # BOM", so adding a file WITH one -- which every suite in tests\ that contains a non-ASCII
+        # character must have (CLAUDE.md 0.2: in a BOM-less .ps1 they are read as ANSI and match
+        # nothing) -- was reported as "BOM was ADDED by this change". Found 2026-08-22 by
+        # `tests\projects-acceptance.ps1`, the first new suite file since this check was written.
+        # Nothing is lost by skipping them: a file that did not exist cannot have ALTERED its
+        # encoding, which is the only thing this row claims to detect.
+        if ($code.Contains('?') -or $code.Contains('A') -or $code.Contains('D')) { continue }
         $rel = $row.Substring(3).Trim('"')
         if ($rel -match ' -> ') { $rel = ($rel -split ' -> ')[-1].Trim('"') }
         $full = Join-Path $repo $rel
@@ -2421,6 +2440,9 @@ function Do-Gate {
         if (-not (Test-Path $tmp)) { continue }
         try {
             $hb = [System.IO.File]::ReadAllBytes($tmp)
+            # Belt and braces for the same cmd-redirect fact: a zero-byte blob means `cat-file`
+            # failed, not that HEAD holds an empty file that lost its BOM.
+            if ($hb.Length -eq 0) { continue }
             $wb = [System.IO.File]::ReadAllBytes($full)
             $hBom = ($hb.Length -ge 3 -and $hb[0] -eq 0xEF -and $hb[1] -eq 0xBB -and $hb[2] -eq 0xBF)
             $wBom = ($wb.Length -ge 3 -and $wb[0] -eq 0xEF -and $wb[1] -eq 0xBB -and $wb[2] -eq 0xBF)

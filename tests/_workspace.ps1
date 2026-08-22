@@ -514,6 +514,50 @@ function Wait-Daemon([string]$ctlPipe, [int]$TimeoutMs = 20000) {
     Wait-Until { Test-DodonaPipe $ctlPipe } $TimeoutMs "daemon pipe $ctlPipe"
 }
 
+# ------------------------------------------- addressing a workspace BY ID, not by --root
+#
+# Here rather than in a suite because TWO suites need them and the reasoning below is the kind
+# that drifts the moment it exists twice (`workspace-acceptance.ps1` and `projects-acceptance.ps1`,
+# split 2026-08-22). Each suite keeps a three-line wrapper closing over its own `$dodona`,
+# `$errFile`, `$out` and daemon list, so no call site had to change when these moved.
+
+# `dodona` with NO `--root`: the suites that address workspaces by id cannot use the root-bound
+# helper. Native stderr is capturable ONLY with Continue + `2> file` (CLAUDE.md 0.2) -- under the
+# suites' `Stop`, one stderr line would throw NativeCommandError; under SilentlyContinue the record
+# is eaten. Assigning `$ErrorActionPreference` inside a function is function-scoped, so it restores
+# itself on return.
+function Invoke-DodonaBare([string]$dodona, [string]$errFile, [string[]]$a) {
+    $ErrorActionPreference = 'Continue'
+    Remove-Item $errFile -ErrorAction SilentlyContinue
+    $o = (& $dodona $a 2> $errFile) | Out-String
+    $global:DODONA_EXIT = $LASTEXITCODE
+    $e = if (Test-Path $errFile) { (Get-Content $errFile -Raw) } else { '' }
+    ("$o`n$e").Trim()
+}
+
+# Start a daemon for a workspace and WAIT FOR ITS PIPE. `$track` is the suite's own list, so the
+# `finally` can stop exactly what it started -- resolved from this suite's own record and never by
+# process name (CLAUDE.md 4: killing by name once murdered the operator's live session).
+function Start-WorkspaceDaemon([string]$dodona, [string]$wsId, [string]$outDir, $track) {
+    $p = Start-Process $dodona -ArgumentList "daemon", "--workspace", $wsId -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$outDir\daemon-$wsId.out" -RedirectStandardError "$outDir\daemon-$wsId.err"
+    if ($null -ne $track) { [void]$track.Add($p) }
+    Wait-Daemon (& $dodona where --workspace $wsId --json | Out-String | ConvertFrom-Json).ctlPipe | Out-Null
+    $p
+}
+
+# Stop a daemon and WAIT FOR THE CTL PIPE TO GO. A daemon that has been asked to stop still holds
+# `Global\dodona-<id>` for a moment, and a non-successor start makes exactly ONE attempt at that
+# mutex -- so an immediate restart loses the race, prints "another daemon already owns workspace",
+# and every check after it fails for a reason that has nothing to do with what it was testing.
+# workspace-acceptance's repo-identity section restarts three times and rewrites the store file with
+# python between two of them, which cannot be done while a writer holds it.
+function Stop-WorkspaceDaemon([string]$dodona, [string]$errFile, [string]$wsId) {
+    $ctl = (& $dodona where --workspace $wsId --json | Out-String | ConvertFrom-Json).ctlPipe
+    Invoke-DodonaBare $dodona $errFile @("stop-daemon", "--workspace", $wsId) | Out-Null
+    Wait-Until { -not (Test-DodonaPipe $ctl) } 15000 "the daemon for $wsId is down" | Out-Null
+}
+
 # ---------------------------------------------------------------- asking the store, LOUDLY
 
 # Run one SQL statement against a suite's store and return its rows as text.
