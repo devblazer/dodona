@@ -1,0 +1,32 @@
+# S-PUBLISH 01. `--all` stops asking whether a workspace is LIVE, so every registered
+# defect: workspace becomes a swap target -- including the one that is asleep.
+#
+# WHY THIS SHAPE. `--all` means "every LIVE registered workspace", and the two halves of that
+# sentence fail differently: dropping REGISTERED is 02/07's business, dropping LIVE is this. It
+# is the smallest edit that reaches the liveness half and nothing else -- the concierge is still
+# gated on liveness one line below, which is what makes 03's control meaningful.
+#
+# THE PAIRED RED (plan 5.3). Before deletion this reddened the acceptance ancestor:
+#
+#   all_skips_a_workspace_with_no_daemon: FAIL ... swapping asleep ...
+#
+# expects-red: unit:Dodona.Tests.PublishPlanTests.all_skips_a_workspace_with_no_daemon
+#
+# The controls. A defect in one half of `--all` must not redden the other half, or the red says
+# nothing about which half broke.
+#
+# expects-green: unit:Dodona.Tests.PublishPlanTests.all_reaches_every_live_workspace
+# expects-green: unit:Dodona.Tests.PublishPlanTests.all_includes_the_concierge
+diff --git a/src/Dodona/PublishPlan.cs b/src/Dodona/PublishPlan.cs
+index 2ded841..7d5f14e 100644
+--- a/src/Dodona/PublishPlan.cs
++++ b/src/Dodona/PublishPlan.cs
+@@ -84,7 +84,7 @@ static class PublishPlan
+         if (all)
+         {
+             foreach (var w in registered)
+-                if (isLive(w.Id)) targets.Add(For(w));
++                targets.Add(For(w));
+             if (isLive(conciergeId)) targets.Add(Concierge(conciergeId));
+         }
+         else if (named.Count > 0)

@@ -19,6 +19,24 @@
 # operator's instances are invisible to it by construction, not by luck.
 #
 # Model-free: no agents at all, only daemons and a prebuilt binary.
+#
+# WHAT THIS SUITE IS AFTER S-PUBLISH (docs/TEST-ARCHITECTURE-PLAN.md W8, wave 1). Twelve of its
+# twenty-five checks were asking pure questions and paying for a real publish to ask them:
+# which targets a combination of flags resolves to, what an exit code plus a reply means, and
+# what a build with no stamp says about itself. Those are Dodona.Tests.PublishPlanTests now.
+# Four more were folded into the wire check they were downstream of, so the assertion survives
+# on a fixture that already exists rather than as a second registration.
+#
+# What is left is the WIRES -- I5, I6, I7, I9 -- plus the fixture facts that make them mean
+# anything, and every one of them needs a real process to be true or false:
+#
+#   I5  a live daemon from ANOTHER registry is never named and is still running afterwards
+#   I6  a target that connects, reads and answers NOTHING is named, and the publish fails
+#   I7  the concierge really takes a swap: a DIFFERENT pid, reporting a DIFFERENT build
+#   I9  a build with no provenance refuses to watch, out loud, with autostart CLEARED
+#
+# The one judgement worth carrying: the naming half of I5 did not move down with its siblings,
+# and the check itself says why.
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -92,19 +110,19 @@ try {
     }
     Check 'both_daemons_are_answering' ($before['alpha'] -and $before['beta']) "$($before['alpha']) | $($before['beta'])"
 
-    # ---- a NAMED target gets the swap, and nothing else does ----------------------------
-    # --exe: publish an already-built binary. The point here is the TARGETING, and rebuilding
-    # three executables per check would make this suite minutes long for no extra coverage.
-    $pub = Dx @('publish', '--exe', $dodona, '--workspace', 'alpha', '--mode', 'now')
-    Check 'named_target_is_swapped' ($pub -match "swapping alpha") $pub
-    Check 'unnamed_workspace_is_untouched' ($pub -notmatch 'swapping beta') $pub
-    Check 'asleep_workspace_is_untouched' ($pub -notmatch 'swapping asleep') $pub
-
-    # ---- --all means every LIVE REGISTERED workspace, plus the concierge -----------------
-    $pubAll = Dx @('publish', '--exe', $dodona, '--all', '--mode', 'now')
-    Check 'all_reaches_every_live_workspace' (($pubAll -match 'swapping alpha') -and ($pubAll -match 'swapping beta')) $pubAll
-    Check 'all_skips_a_workspace_with_no_daemon' ($pubAll -notmatch 'swapping asleep') $pubAll
-    Check 'all_includes_the_concierge' ($pubAll -match 'swapping concierge') $pubAll
+    # ---- WHO GETS THE SWAP IS A PURE QUESTION, AND IT IS ASKED IN `unit` NOW -------------
+    # Six checks stood here, each spending a real `publish --exe` on something pure over
+    # (flags, registry rows, liveness): named / unnamed / asleep, and the three halves of
+    # `--all`. They are Dodona.Tests.PublishPlanTests now -- same names, same assertions -- and
+    # every one was seen RED here under tests\mutants\s-publish-01..07.patch before it was
+    # deleted, then seen red again in C# under the same patch (plan 9.4 B0/B2).
+    # tests\ledger\moves\s-publish.tsv carries both reds.
+    #
+    # `named_target_is_swapped` went down as `named_target_is_selected`: it matched the
+    # `swapping alpha` line, which publish prints BEFORE the call and which the code's own
+    # comment calls a statement of INTENT. What it asserted was selection, never the outcome --
+    # and a name promising an outcome over an assertion about an announcement is the exact
+    # shape issue #9 hid in for two days.
 
     # ---- THE SAFETY PROPERTY: a live pipe outside this registry is never a target ---------
     # A daemon for a workspace registered in a DIFFERENT registry — which is exactly what the
@@ -128,36 +146,43 @@ try {
     Check 'the_foreign_daemon_really_is_live' ($livePipes.Count -ge 1) "pipes=$($livePipes.Count)"
 
     $pubAll2 = Dx @('publish', '--exe', $dodona, '--all', '--mode', 'now')
-    Check 'all_never_swaps_a_workspace_from_another_registry' ($pubAll2 -notmatch [regex]::Escape($foreignId)) $pubAll2
-    Check 'foreign_daemon_survived_untouched' (-not $foreignDaemon.HasExited) ''
-    # ...and it is genuinely still serving, not merely still a process.
     $env:DODONA_HOME = $foreignHome
     $foreignStatus = (& $dodona status --workspace $foreignId) | Out-String
     $env:DODONA_HOME = $saveHome
-    Check 'foreign_daemon_still_answers_its_pipe' ($foreignStatus -match 'daemon pid=') $foreignStatus
+    # THE WIRE (I5). One check, because the three things it asserts are one fact about one
+    # fixture: after a real `--all` over a real registry with a foreign daemon alive beside it,
+    # that daemon was never NAMED, its ORIGINAL process is still alive, and it is genuinely
+    # still serving rather than merely still a process. `all_never_swaps_a_workspace_from_
+    # another_registry` and `foreign_daemon_still_answers_its_pipe` were separate checks and
+    # are folded in here (plan 5.4 rung 3).
+    #
+    # THE NAMING HALF DELIBERATELY DID NOT MOVE DOWN with its six siblings above, and this is
+    # the one place that decision is visible. `PublishPlan.Resolve` can only build a target out
+    # of a row of the registry it was handed, so a unit test saying "a foreign id never becomes
+    # a target" could not be reddened by any mutation of it: it would be green by construction,
+    # which is the cannot-fail shape plan 5.4.1 exists to refuse. The property belongs to the
+    # CALL SITE -- targets come from the registry, not from the pipe namespace -- and only a
+    # live pipe that belongs to nobody in this registry can tell the two apart.
+    Check 'foreign_daemon_survived_untouched' `
+        (($pubAll2 -notmatch [regex]::Escape($foreignId)) -and (-not $foreignDaemon.HasExited) -and ($foreignStatus -match 'daemon pid=')) `
+        "named=$($pubAll2 -match [regex]::Escape($foreignId)) exited=$($foreignDaemon.HasExited) status=$(($foreignStatus -replace '\s+', ' '))"
 
-    # ---- naming a workspace that does not exist is refused before anything is swapped -----
-    $bad = Dx @('publish', '--exe', $dodona, '--workspace', 'no-such-workspace', '--mode', 'now')
-    Check 'unknown_target_is_refused' ($DODONA_EXIT -ne 0 -and $bad -match 'no workspace') $bad
-    Check 'refusal_swapped_nothing' ($bad -notmatch 'swapping') $bad
-
-    # ---- the default target is the workspace owning --project ------------------------------
-    $pubDefault = Dx @('publish', '--exe', $dodona, '--root', $roots['beta'], '--mode', 'now')
-    Check 'default_target_is_the_owning_workspace' `
-        (($pubDefault -match 'swapping beta') -and ($pubDefault -notmatch 'swapping alpha')) $pubDefault
-
-    # ---- a build still publishes when no workspace can be resolved ------------------------
-    # Found live, and the reason resolution is lazy: a source tree whose own pre-workspace
-    # daemon still holds its store cannot be migrated — and publish must not refuse to BUILD
-    # over a workspace it never needed. It says so and exits 0, because the build is real.
-    $orphan = Join-Path (Use-SuiteTemp) ("dodona-orphan-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
-    New-Item -ItemType Directory -Force "$orphan\.dodona" | Out-Null
-    Set-Content "$orphan\.dodona\store.db" "pretend-store"
-    # Make it look like a pre-workspace daemon owns it, by holding the legacy ctl pipe name.
-    # --adopt: this fixture MEANS to migrate the orphan, and a bare --root stopped creating in
-    # issue #12 (naming a path is not adopting it).
-    $legacyPipe = (Dx @('where', '--root', $orphan, '--adopt', '--json'))  # resolves + migrates: no daemon holds it
-    Check 'an_unheld_legacy_store_migrates_normally' ($legacyPipe -match '"store"') $legacyPipe
+    # ---- THE REFUSAL AND THE DEFAULT TARGET are pure too, and are asked in `unit` ---------
+    # `unknown_target_is_refused`, `refusal_swapped_nothing` and
+    # `default_target_is_the_owning_workspace` moved down with the six above, under
+    # tests\mutants\s-publish-04.patch and -07.patch. Two real publishes went with them.
+    #
+    # AND `an_unheld_legacy_store_migrates_normally` IS GONE FROM THIS SUITE, merged into
+    # `workspace:migration_moved_the_store` (wire J2). It is worth saying what was found rather
+    # than only that it left: the section it sat in was headed "a build still publishes when no
+    # workspace can be resolved" and its comment said the fixture holds the legacy ctl pipe --
+    # and nothing here ever held a pipe, and the check never invoked `publish` at all. What
+    # survived was `where --root <orphan> --adopt --json` matching the string `"store"`, which
+    # is a key every `where --json` prints. It asserted that resolution answered, under a name
+    # promising a migration, in a suite about publish targeting. The real migration -- files
+    # leaving one directory and arriving in another -- is asserted by J2's owner, which is
+    # where a reader should go. The publish-exits-0-when-nothing-resolves path that the section
+    # header names is asserted NOWHERE, and that is reported as a gap, not fixed here.
 
     # ---- THE CONCIERGE ACTUALLY TAKES THE SWAP (issue #9) -------------------------------
     # `all_includes_the_concierge` above asserts that publish SAYS "swapping concierge". It said
@@ -177,12 +202,6 @@ try {
     $newBuild = ((& "$bin2\dodona.exe" version --json) | ConvertFrom-Json).build
     $cxStatusBefore = Dx @('concierge-status')
     $cxPidBefore = if ($cxStatusBefore -match 'concierge pid=(\d+)') { [int]$Matches[1] } else { 0 }
-    # A fixture assertion, not a product one: if the copy is not a DIFFERENT build then the
-    # check below would pass without anything having swapped at all.
-    Check 'the_copied_binary_is_a_distinguishable_build' `
-        ($cxPidBefore -gt 0 -and $newBuild -like '*20260102030405' -and $cxStatusBefore -notmatch [regex]::Escape($newBuild)) `
-        "pid=$cxPidBefore newBuild=$newBuild"
-
     $pubCx = Dx @('publish', '--exe', "$bin2\dodona.exe", '--workspace', 'alpha', '--concierge', '--mode', 'now')
     # Asserted on the PROCESS and on what the successor says about itself -- never on an
     # instantaneous pipe read, which blinks out while the swap hands the ctl pipe over
@@ -194,12 +213,18 @@ try {
     } 40000 'the concierge swaps to the new build and the old process exits' | Out-Null
     $cxPidAfter = if ($cxStatusAfter -match 'concierge pid=(\d+)') { [int]$Matches[1] } else { 0 }
 
+    # THE WIRE (I7), carrying what were three checks. The two folded in are not decoration:
+    #
+    #   * the FIXTURE GUARD (`the_copied_binary_is_a_distinguishable_build`) -- if the mtime-forced
+    #     copy is not a genuinely different build, everything below passes without anything having
+    #     swapped at all. It cannot be moved down and left behind: a guard that is not evaluated
+    #     beside the thing it guards is not a guard;
+    #   * the PROCESS HALF (`the_old_concierge_process_is_gone_after_the_swap`) -- a status line
+    #     could in principle be told by the same old process. The process could not.
     Check 'a_swapped_concierge_reports_the_new_build' `
-        (($cxStatusAfter -match "build=$([regex]::Escape($newBuild))") -and $cxPidAfter -gt 0 -and $cxPidAfter -ne $cxPidBefore) `
-        "want=$newBuild pidBefore=$cxPidBefore pidAfter=$cxPidAfter status=$(($cxStatusAfter -replace '\s+', ' '))"
-    # The status line could in principle be told by the same old process; the process could not.
-    Check 'the_old_concierge_process_is_gone_after_the_swap' ($cx.HasExited) `
-        "pid $cxPidBefore still alive; publish said: $(($pubCx -replace '\s+', ' '))"
+        ($cxPidBefore -gt 0 -and $newBuild -like '*20260102030405' -and ($cxStatusBefore -notmatch [regex]::Escape($newBuild)) -and `
+         ($cxStatusAfter -match "build=$([regex]::Escape($newBuild))") -and $cxPidAfter -gt 0 -and $cxPidAfter -ne $cxPidBefore -and $cx.HasExited) `
+        "want=$newBuild pidBefore=$cxPidBefore pidAfter=$cxPidAfter oldExited=$($cx.HasExited) status=$(($cxStatusAfter -replace '\s+', ' '))"
 
     # ---- PUBLISH REPORTS OUTCOMES, AND NAMES A TARGET THAT DID NOT SWAP (issue #9) -------
     # This is the half that stops the NEXT silent no-op. A target that answers nothing at all is
@@ -237,12 +262,18 @@ while (`$true) {
     # 0.2). ASCII only in the pattern for the same family of reasons -- redirected child stdio
     # defaults to the OEM codepage and an em dash arrives mangled.
     $muteFlat = ($pubMute -replace '\s+', ' ')
+    # THE WIRE (I6). The exit code is folded in rather than left to a check of its own: reading
+    # silence as a failure is one decision, and the pure half of it -- (exit 0, no reply lines)
+    # becomes exit 1 -- is Dodona.Tests.PublishPlanTests.publish_fails_when_a_target_did_not_
+    # take_the_build now, proved red under tests\mutants\s-publish-08.patch, which is issue #9
+    # put back. What CANNOT move is the input: `Client` really does return 0 for a pipe that
+    # accepts, reads and says nothing, and only a real one of those says so.
+    #
+    # `accepted` needs only ONE target to succeed, so alpha taking the build used to make the
+    # whole publish look successful no matter what anyone else did. That is why alpha is in the
+    # same invocation and why its line is asserted NOT to say ANSWERED NOTHING.
     Check 'publish_names_a_target_that_did_not_take_the_build' `
-        (($muteFlat -match 'mute \([^)]+\): ANSWERED NOTHING') -and ($muteFlat -notmatch 'alpha \([^)]+\): ANSWERED NOTHING')) `
-        $muteFlat
-    # ...and it FAILS. `accepted` needs only one target to succeed, so alpha taking the build
-    # used to make the whole publish look successful no matter what anyone else did.
-    Check 'publish_fails_when_a_target_did_not_take_the_build' ($muteExit -ne 0) `
+        (($muteFlat -match 'mute \([^)]+\): ANSWERED NOTHING') -and ($muteFlat -notmatch 'alpha \([^)]+\): ANSWERED NOTHING') -and ($muteExit -ne 0)) `
         "exit=$muteExit $muteFlat"
 
     Dx @('concierge-stop') | Out-Null
@@ -257,18 +288,12 @@ while (`$true) {
     # ~65 seconds, four consecutive swaps reporting the byte-identical
     # `sources 15:56:19 > image 15:55:55`.
     #
-    # THIS CHECK USED TO ASSERT THE ABSENCE OF A `.built-from` FILE. That file is gone (P2.4 is
-    # a deletion), so the old assertion became vacuously true -- it would have passed against
-    # any build forever, which is precisely the green check nobody has seen fail. What it was
-    # really protecting is asserted directly instead: a `--exe <prebuilt>` publish compiled
-    # nothing, so the binary must claim NOTHING about a commit.
-    #
-    # The binaries under test are a copy of a `dev build` image, which is exactly the
-    # unknown-provenance case. Note the .NET SDK writes a bare commit SHA into
-    # InformationalVersion by itself, so "the suffix is non-empty" would NOT be a valid test;
-    # Ver only accepts its own `c=` marker, and that distinction is what this asserts.
-    $vj = Dx @('version', '--json') | ConvertFrom-Json
-    Check 'prebuilt_publish_claims_no_provenance' ($vj.commit -eq '' -and -not $vj.trial) "commit=$($vj.commit)"
+    # `prebuilt_publish_claims_no_provenance` MOVED DOWN (s-publish-09.patch). It read
+    # `version --json` off a `dev build` image and demanded commit == '' and trial == false --
+    # a pure read of four assembly-metadata keys, which is BuildProvenance now. Its comment
+    # here cited a `c=` marker inside a combined informational-version string; that marker has
+    # not existed since P2.3/P2.4 replaced the combined string with four named keys, so the
+    # citation was stale while the property it named was not. Both are in the new test.
 
     # ...and it SAYS SO rather than guessing. The old code degraded to the image's own mtime
     # whenever the stamp was missing -- the loop-prone comparison wearing a fallback, reached

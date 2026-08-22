@@ -1,0 +1,31 @@
+# S-PUBLISH 07. With no target named at all, publish swaps EVERY registered workspace instead
+# defect: of the one that owns what it just built. `dodona publish` in one project reaches the
+# defect: operator's other ones.
+#
+# WHY THIS SHAPE. The default branch is the one a person hits by typing the shortest command, and
+# its whole content is "exactly one target, and it does not come from the registry". Replacing it
+# with the registry breaks both halves of that in the one way that still looks plausible.
+#
+# THE PAIRED RED (plan 5.3):
+#
+#   default_target_is_the_owning_workspace: FAIL ... swapping alpha ... swapping beta ...
+#
+# expects-red: unit:Dodona.Tests.PublishPlanTests.default_target_is_the_owning_workspace
+#
+# The controls. Naming a target, and `--all`, are untouched -- so this red is the DEFAULT branch's.
+#
+# expects-green: unit:Dodona.Tests.PublishPlanTests.named_target_is_selected
+# expects-green: unit:Dodona.Tests.PublishPlanTests.all_reaches_every_live_workspace
+diff --git a/src/Dodona/PublishPlan.cs b/src/Dodona/PublishPlan.cs
+index 2ded841..a472f76 100644
+--- a/src/Dodona/PublishPlan.cs
++++ b/src/Dodona/PublishPlan.cs
+@@ -97,7 +97,7 @@ static class PublishPlan
+             }
+             if (concierge && isLive(conciergeId)) targets.Add(Concierge(conciergeId));
+         }
+-        else targets.Add(owning());
++        else foreach (var w in registered) targets.Add(For(w));
+         return (targets, null, 0);
+     }
+ 

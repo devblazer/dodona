@@ -33,3 +33,14 @@ A_reading_older_than_two_minutes_says_how_old_it_is	ui-unit	S-POLLER: the `as of
 Overage_is_named	ui-unit	S-POLLER: OVERAGE is the one quota state that costs money and it is named in capitals. Unasserted before.
 A_reset_time_is_offered_when_the_wire_carried_one	ui-unit	S-POLLER: the reset time is rendered in LOCAL time for the operator, so the assertion is the SHAPE and never an hour -- a literal would make the check a passenger of the machine's timezone.
 An_unreadable_reading_renders_nothing	ui-unit	S-POLLER: seven ways the reading can be unusable -- absent, empty, unparseable, no info, no utilization, a seven_day window, a negative -- all render NOTHING rather than a guess. The catch-all `catch { return null; }` had no coverage at all.
+named_target_is_selected	unit	S-PUBLISH renamed publish:named_target_is_swapped on the way down. The ancestor matched publish's `swapping alpha` line, which is printed BEFORE the call and is a statement of INTENT, so it asserted SELECTION and not the outcome. New name, same assertion; moves\s-publish.tsv carries the reasoning and the paired red.
+unnamed_workspace_is_untouched	unit	S-PUBLISH moved it down from publish. Same name, unit namespace.
+asleep_workspace_is_untouched	unit	S-PUBLISH moved it down from publish. Same name, unit namespace.
+all_reaches_every_live_workspace	unit	S-PUBLISH moved it down from publish. Same name, unit namespace.
+all_skips_a_workspace_with_no_daemon	unit	S-PUBLISH moved it down from publish. Same name, unit namespace.
+all_includes_the_concierge	unit	S-PUBLISH moved it down from publish. Same name, unit namespace.
+unknown_target_is_refused	unit	S-PUBLISH moved it down from publish. Same name, unit namespace.
+refusal_swapped_nothing	unit	S-PUBLISH moved it down from publish. Same name, unit namespace.
+default_target_is_the_owning_workspace	unit	S-PUBLISH moved it down from publish. Same name, unit namespace.
+publish_fails_when_a_target_did_not_take_the_build	unit	S-PUBLISH moved it down from publish. Same name, unit namespace; four [Theory] rows, of which the silence row is issue #9 and the other three are its controls.
+prebuilt_publish_claims_no_provenance	unit	S-PUBLISH moved it down from publish. Same name, unit namespace; asked of BuildProvenance rather than of a real binary's own assembly metadata.

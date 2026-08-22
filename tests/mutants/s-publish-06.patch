@@ -1,0 +1,35 @@
+# S-PUBLISH 06. A `--workspace` name resolves, is validated, and is then dropped on the floor:
+# defect: publish reports nothing to swap and swaps nothing, for a workspace that is right there.
+#
+# WHY THIS SHAPE. It is 05 read the other way up. 05 keeps the named target and adds others;
+# this keeps the refusal and loses the target. Between them, "named means exactly these" is
+# pinned from both sides, and neither red can be produced by the other defect.
+#
+# THE PAIRED RED (plan 5.3):
+#
+#   named_target_is_swapped: FAIL published ...; no daemon running to swap
+#
+# (that ancestor is `renamed` rather than `moved`: it matched the `swapping alpha` line, which is
+# a statement of INTENT printed before the call, so what it really asserted is that alpha was
+# SELECTED. The name is the honest one now; the assertion is unchanged. See moves\s-publish.tsv.)
+#
+# expects-red: unit:Dodona.Tests.PublishPlanTests.named_target_is_selected
+#
+# The controls. The absences this defect makes vacuously true must still be checked by something
+# that can see the difference -- they pass here, and 05 is where they are proved to have teeth.
+#
+# expects-green: unit:Dodona.Tests.PublishPlanTests.unnamed_workspace_is_untouched
+# expects-green: unit:Dodona.Tests.PublishPlanTests.unknown_target_is_refused
+diff --git a/src/Dodona/PublishPlan.cs b/src/Dodona/PublishPlan.cs
+index 2ded841..4e40025 100644
+--- a/src/Dodona/PublishPlan.cs
++++ b/src/Dodona/PublishPlan.cs
+@@ -93,7 +93,7 @@ static class PublishPlan
+             {
+                 if (byNameOrId(n) is not { } w)
+                     return (new List<Target>(), $"error: no workspace \"{n}\" to publish to", 2);
+-                targets.Add(For(w));
++                _ = w;
+             }
+             if (concierge && isLive(conciergeId)) targets.Add(Concierge(conciergeId));
+         }

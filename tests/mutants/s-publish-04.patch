@@ -1,0 +1,33 @@
+# S-PUBLISH 04. A `--workspace` name that resolves to nothing is not refused: it becomes a
+# defect: target of its own, aimed at a pipe named after a workspace that does not exist.
+#
+# WHY THIS SHAPE. The refusal has two properties and this breaks both at once on purpose,
+# because they are one decision: it must SAY no workspace of that name exists, and it must do so
+# BEFORE anything is swapped. A defect that only dropped the message would leave a publish that
+# swapped some targets and then failed, which is the state the early return exists to prevent.
+#
+# THE PAIRED REDS (plan 5.3):
+#
+#   unknown_target_is_refused: FAIL ... swapping no-such-workspace ...
+#   refusal_swapped_nothing:   FAIL ... swapping no-such-workspace ...
+#
+# expects-red: unit:Dodona.Tests.PublishPlanTests.unknown_target_is_refused
+# expects-red: unit:Dodona.Tests.PublishPlanTests.refusal_swapped_nothing
+#
+# The controls. A name that DOES resolve still resolves, and the other two branches are untouched.
+#
+# expects-green: unit:Dodona.Tests.PublishPlanTests.named_target_is_selected
+# expects-green: unit:Dodona.Tests.PublishPlanTests.all_reaches_every_live_workspace
+diff --git a/src/Dodona/PublishPlan.cs b/src/Dodona/PublishPlan.cs
+index 2ded841..902e104 100644
+--- a/src/Dodona/PublishPlan.cs
++++ b/src/Dodona/PublishPlan.cs
+@@ -92,7 +92,7 @@ static class PublishPlan
+             foreach (var n in named)
+             {
+                 if (byNameOrId(n) is not { } w)
+-                    return (new List<Target>(), $"error: no workspace \"{n}\" to publish to", 2);
++                    { targets.Add(new Target(n, Instance.CtlPipe(n))); continue; }
+                 targets.Add(For(w));
+             }
+             if (concierge && isLive(conciergeId)) targets.Add(Concierge(conciergeId));

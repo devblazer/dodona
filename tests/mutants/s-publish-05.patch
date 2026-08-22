@@ -1,0 +1,38 @@
+# S-PUBLISH 05. Naming a workspace stops NARROWING anything: the names are still validated,
+# defect: and then every registered workspace is swapped anyway. `publish --workspace alpha`
+# defect: reaches beta and the sleeping one too.
+#
+# WHY THIS SHAPE. The refusal is deliberately left intact, so this cannot be confused with 04.
+# What breaks is only the claim that a named target is the ONLY target -- which is the property
+# the operator relies on when they publish a trial to one workspace and not to their live work.
+#
+# THE PAIRED REDS (plan 5.3):
+#
+#   unnamed_workspace_is_untouched: FAIL ... swapping beta ...
+#   asleep_workspace_is_untouched:  FAIL ... swapping asleep ...
+#
+# expects-red: unit:Dodona.Tests.PublishPlanTests.unnamed_workspace_is_untouched
+# expects-red: unit:Dodona.Tests.PublishPlanTests.asleep_workspace_is_untouched
+#
+# The controls. alpha is still a target and the refusal still refuses, so the red is about the
+# narrowing and not about the branch as a whole.
+#
+# expects-green: unit:Dodona.Tests.PublishPlanTests.named_target_is_selected
+# expects-green: unit:Dodona.Tests.PublishPlanTests.unknown_target_is_refused
+diff --git a/src/Dodona/PublishPlan.cs b/src/Dodona/PublishPlan.cs
+index 2ded841..9a56e9e 100644
+--- a/src/Dodona/PublishPlan.cs
++++ b/src/Dodona/PublishPlan.cs
+@@ -91,10 +91,10 @@ static class PublishPlan
+         {
+             foreach (var n in named)
+             {
+-                if (byNameOrId(n) is not { } w)
++                if (byNameOrId(n) is null)
+                     return (new List<Target>(), $"error: no workspace \"{n}\" to publish to", 2);
+-                targets.Add(For(w));
+             }
++            foreach (var w in registered) targets.Add(For(w));
+             if (concierge && isLive(conciergeId)) targets.Add(Concierge(conciergeId));
+         }
+         else targets.Add(owning());

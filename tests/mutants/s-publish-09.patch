@@ -1,0 +1,32 @@
+# S-PUBLISH 09. A build that was never stamped INVENTS a commit for itself -- forty zeros,
+# defect: which is a real-looking SHA -- instead of reporting that it does not know.
+#
+# WHY THIS SHAPE. "Unknown" degrading into a plausible answer is this file's own recorded
+# incident, one costume along: the old drift watcher fell back to an mtime compare whenever the
+# stamp was missing, and looped 64 times in an afternoon. `publish --exe <prebuilt>` reaches the
+# unstamped case on EVERY call, so a substitute value here is not a corner.
+#
+# THE PAIRED RED (plan 5.3). The acceptance ancestor read it back out of `version --json`:
+#
+#   prebuilt_publish_claims_no_provenance: FAIL commit=0000000000000000000000000000000000000000
+#
+# expects-red: unit:Dodona.Tests.PublishPlanTests.prebuilt_publish_claims_no_provenance
+#
+# The control. Target resolution has nothing to do with provenance, and a mutant that reddened
+# both would be measuring the suite rather than the seam.
+#
+# expects-green: unit:Dodona.Tests.PublishPlanTests.all_reaches_every_live_workspace
+diff --git a/src/Dodona/Ver.cs b/src/Dodona/Ver.cs
+index 1e96757..e3eb278 100644
+--- a/src/Dodona/Ver.cs
++++ b/src/Dodona/Ver.cs
+@@ -243,7 +243,8 @@ readonly record struct BuildProvenance(string Commit, string MainSha, string Bra
+     /// <summary>Read the four facts out of one metadata lookup. A missing key is "", never a
+     /// throw and never a guess.</summary>
+     public static BuildProvenance Read(Func<string, string> meta) =>
+-        new(meta("DodonaCommit"), meta("DodonaMainSha"), meta("DodonaBranch"), meta("DodonaDirty") == "1");
++        new(meta("DodonaCommit") is { Length: > 0 } c ? c : new string('0', 40),
++            meta("DodonaMainSha"), meta("DodonaBranch"), meta("DodonaDirty") == "1");
+ 
+     /// <summary>True when the image cannot say what commit it came from -- a plain
+     /// <c>dev build</c>, or <c>publish --exe</c> of a prebuilt binary. Every consumer must

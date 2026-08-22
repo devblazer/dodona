@@ -1,0 +1,35 @@
+# S-PUBLISH 08. ISSUE #9, PUT BACK. A target that connects, reads the request and answers
+# defect: NOTHING is reported as having taken the build, and the publish exits 0.
+#
+# WHY THIS SHAPE. This is not an invented defect -- it is the code as it stood for two days, and
+# the reason silence is the dangerous case is that it is indistinguishable from success at the
+# wire: no `error:` line, so `Client` returns 0. Measured on the operator's machine 2026-08-21 at
+# f346b76: the workspace daemon on build 20260821-105924, the concierge still on 20260819-212126,
+# after a publish that printed nothing but success.
+#
+# THE PAIRED RED (plan 5.3). The acceptance ancestor asserted the EXIT CODE of a real publish
+# against a real mute pipe:
+#
+#   publish_fails_when_a_target_did_not_take_the_build: FAIL exit=0 ...
+#
+# expects-red: unit:Dodona.Tests.PublishPlanTests.publish_fails_when_a_target_did_not_take_the_build
+#
+# NO expects-green in this suite by design: the WIRE owner
+# (publish:publish_names_a_target_that_did_not_take_the_build) is supposed to go red under this
+# too, and declaring it green would be declaring issue #9 undetectable at the wire. The controls
+# are the other three verdicts, which are rows of the same [Theory] and survive it.
+#
+# expects-green: unit:Dodona.Tests.PublishPlanTests.default_target_is_the_owning_workspace
+diff --git a/src/Dodona/PublishPlan.cs b/src/Dodona/PublishPlan.cs
+index 2ded841..d77fdce 100644
+--- a/src/Dodona/PublishPlan.cs
++++ b/src/Dodona/PublishPlan.cs
+@@ -137,7 +137,7 @@ static class PublishPlan
+     {
+         if (code != 0) return new Verdict($"DID NOT SWAP (exit {code})", code);
+         // Silence. Not success, and not exit 0 either.
+-        if (reply.Count == 0) return new Verdict("ANSWERED NOTHING \u2014 it did not take this build", 1);
++        if (reply.Count == 0) return new Verdict("took this build", 0);
+         if (reply.Any(l => l.StartsWith("armed:"))) return new Verdict("armed \u2014 it takes this build when its blocker clears", 0);
+         return new Verdict("took this build", 0);
+     }

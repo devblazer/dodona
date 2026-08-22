@@ -1,0 +1,27 @@
+# S-PUBLISH 03. `--all` never names the concierge. This is issue #9's incident reproduced one
+# defect: step earlier: the concierge ran a two-day-old build while publish printed success, and
+# defect: the reason it could is that nothing except a check makes `--all` mean "and the
+# defect: concierge too". It has no workspace of its own, so no registry row misses it.
+#
+# THE PAIRED RED (plan 5.3):
+#
+#   all_includes_the_concierge: FAIL ... swapping alpha ... swapping beta ...
+#
+# expects-red: unit:Dodona.Tests.PublishPlanTests.all_includes_the_concierge
+#
+# The controls. The workspace half of `--all` is untouched, in both directions.
+#
+# expects-green: unit:Dodona.Tests.PublishPlanTests.all_reaches_every_live_workspace
+# expects-green: unit:Dodona.Tests.PublishPlanTests.all_skips_a_workspace_with_no_daemon
+diff --git a/src/Dodona/PublishPlan.cs b/src/Dodona/PublishPlan.cs
+index 2ded841..6e30463 100644
+--- a/src/Dodona/PublishPlan.cs
++++ b/src/Dodona/PublishPlan.cs
+@@ -85,7 +85,6 @@ static class PublishPlan
+         {
+             foreach (var w in registered)
+                 if (isLive(w.Id)) targets.Add(For(w));
+-            if (isLive(conciergeId)) targets.Add(Concierge(conciergeId));
+         }
+         else if (named.Count > 0)
+         {

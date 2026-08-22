@@ -1,0 +1,31 @@
+# S-PUBLISH 02. `--all` reaches the concierge and NOBODY ELSE: no workspace daemon is ever
+# defect: named, so a publish that says it went everywhere went to one process.
+#
+# WHY THIS SHAPE. It is the mirror of 01. 01 breaks the LIVE half and keeps the REGISTERED half;
+# this breaks the reach entirely while leaving liveness and the concierge intact, so the two
+# reds cannot be produced by one confusion.
+#
+# THE PAIRED RED (plan 5.3):
+#
+#   all_reaches_every_live_workspace: FAIL ... concierge ...
+#
+# expects-red: unit:Dodona.Tests.PublishPlanTests.all_reaches_every_live_workspace
+#
+# The controls. `asleep` is still absent (vacuously, but absent) and the concierge is still
+# there, which is what says this red belongs to the reach and not to either of them.
+#
+# expects-green: unit:Dodona.Tests.PublishPlanTests.all_skips_a_workspace_with_no_daemon
+# expects-green: unit:Dodona.Tests.PublishPlanTests.all_includes_the_concierge
+diff --git a/src/Dodona/PublishPlan.cs b/src/Dodona/PublishPlan.cs
+index 2ded841..8dbb4d9 100644
+--- a/src/Dodona/PublishPlan.cs
++++ b/src/Dodona/PublishPlan.cs
+@@ -84,7 +84,7 @@ static class PublishPlan
+         if (all)
+         {
+             foreach (var w in registered)
+-                if (isLive(w.Id)) targets.Add(For(w));
++                if (false) targets.Add(For(w));
+             if (isLive(conciergeId)) targets.Add(Concierge(conciergeId));
+         }
+         else if (named.Count > 0)
