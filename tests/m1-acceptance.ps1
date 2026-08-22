@@ -305,10 +305,10 @@ try {
     $gFlat = ($g -replace '\s+', ' ')
     # Whitespace collapsed before matching: captured native stderr is WRAPPED to the console
     # width, so a phrase can be split mid-sentence (CLAUDE.md 0.2).
-    Check 'unparseable_input_is_recorded' ($gFlat -match 'gate fail-open' -and $gFlat -match 'unparseable') $gFlat
+    Check 'unparseable_input_is_recorded' ($gFlat -match 'gate could not check' -and $gFlat -match 'unparseable') $gFlat
     Check 'the_fail_open_says_how_much_it_got' ($gFlat -match '\d+ bytes') $gFlat
     $logged = if (Test-Path $bypassLog) { (Get-Content $bypassLog -Raw) } else { '' }
-    Check 'the_fail_open_reaches_the_backstops_log' (($logged -replace '\s+', ' ') -match 'fail-open.*unparseable') "log=[$logged]"
+    Check 'the_fail_open_reaches_the_backstops_log' (($logged -replace '\s+', ' ') -match 'could not check.*unparseable') "log=[$logged]"
 
     # ---- AND THE VERDICT ON UNREADABLE INPUT IS NOW A REFUSAL. A RECORDED RATIONALE, REVERSED ----
     #
