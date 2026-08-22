@@ -1,0 +1,40 @@
+# S-STORE 02. The grant reports itself as a queue (plan 9.4 step B0).
+#
+# defect: `Store.TokenRequest`'s grant branch does the whole grant -- holder set, generation
+# defect: bumped, lease stamped, queue row removed, `token_granted` written -- and then RETURNS
+# defect: the status "queued".
+#
+# WHY THIS SHAPE. The token is a lease handed to exactly one ticket at a time, and every caller
+# above it branches on the WORD. A grant that reports itself as a queue is a ticket that holds
+# the token and does not know it: it waits for a handoff that already happened, while every
+# other ticket in that repository is fenced behind it.
+#
+# The control is the same word read the other way up: `second_ticket_queued` wants "queued" and
+# gets it, so the red belongs to the grant path and not to the status string generally.
+#
+# expects-red: unit:Dodona.Tests.StoreTokenTests.approved_token_granted
+# expects-green: m1:second_ticket_queued
+# expects-green: m1:unapproved_token_refused
+# expects-green: unit:Dodona.Tests.StoreTokenTests.the_land_fence_refuses_an_expired_lease
+#
+# THE UNIT CONTROL IS NOT THE OBVIOUS ONE, AND THE OBVIOUS ONE FAILED. `second_ticket_queued`
+# is `expects-green` above at the ACCEPTANCE layer and survives; its unit successor does NOT,
+# and the difference is a fixture guard rather than a drift. The new test asserts that the
+# FIRST request was granted before asking what the second one gets -- a precondition the old
+# check never stated -- so a defect in the grant's status reddens it. That is the moved test
+# being strictly stronger than its ancestor, which is not something to weaken for a control's
+# convenience: run at B2 with it declared, `dev prove` reported OVER-BROAD and the record is
+# kept here rather than quietly re-declared.
+diff --git a/src/Dodona/Store.cs b/src/Dodona/Store.cs
+index c265d08..d3df765 100644
+--- a/src/Dodona/Store.cs
++++ b/src/Dodona/Store.cs
+@@ -1485,7 +1485,7 @@ sealed class Store : IDisposable, ILaneSink
+                 var gen = ReadToken(tx, repo).Generation;
+                 TxEvent(tx, "token_granted", $"ticket {ticketId} repo {repo.Name} gen {gen} main {sha[..8]} lease {leaseSec}s");
+                 tx.Commit();
+-                return ("granted", gen, 0);
++                return ("queued", gen, 0);
+             }
+ 
+             int pos;

@@ -1,0 +1,42 @@
+# S-STORE 01. The conflict search looks at the wrong tickets (plan 9.4 step B0).
+#
+# defect: `Store.FindConflicts` scans CLOSED tickets instead of open ones, so every claim
+# defect: overlap search comes back empty. The ticket is still created, the extension still
+# defect: succeeds -- only the DERIVED SIGNAL (D-R7) goes silent.
+#
+# WHY THIS SHAPE. D-R5 retired the refusal and kept the report, so the report is now the whole
+# of what an overlap does. A conflict search that quietly finds nothing is therefore invisible:
+# nothing exits non-zero, nothing is refused, and two agents are told they are alone in a file
+# they are not alone in. This is the smallest defect that reaches exactly that and nothing else.
+#
+# THE CONTROLS ARE THE POINT HERE. `an_overlapping_ticket_is_created`,
+# `a_wide_extension_succeeds_whatever_else_is_held` and `disjoint_parallel` assert only that the
+# command SUCCEEDED, which is D-R5's half -- they stay green under a defect that deletes D-R7's
+# half entirely. That is not an accident of this mutant; it is the finding recorded in this
+# slice's `vacuous-guard` rows, seen here as evidence rather than asserted as an opinion.
+#
+# expects-red: unit:Dodona.Tests.StoreClaimReportTests.the_overlap_is_reported_and_names_the_holder
+# expects-red: unit:Dodona.Tests.StoreClaimReportTests.the_wide_extension_still_names_what_it_overlaps
+# expects-red: unit:Dodona.Tests.StoreClaimReportTests.the_whole_tree_claim_is_created_and_its_overlap_reported
+# expects-green: m1:an_overlapping_ticket_is_created
+# expects-green: m1:disjoint_parallel
+# expects-green: m1:a_wide_extension_succeeds_whatever_else_is_held
+# expects-green: unit:Dodona.Tests.ClaimsTests.The_whole_tree_overlaps_every_path_claim
+#
+# The unit control is the ALGEBRA, and it is the sharpest one available: s-store-01 cuts the
+# SQL scan that finds the open tickets, so every `Claims` case stays green while the store
+# reports nothing. That is what says these three are `Store` tests and not a second copy of
+# `ClaimsTests`.
+diff --git a/src/Dodona/Store.cs b/src/Dodona/Store.cs
+index c265d08..7856325 100644
+--- a/src/Dodona/Store.cs
++++ b/src/Dodona/Store.cs
+@@ -1243,7 +1243,7 @@ sealed class Store : IDisposable, ILaneSink
+         c.CommandText = """
+             SELECT cl.kind, cl.value, t.id, t.title, t.repo_path, t.repo FROM claims cl
+             JOIN tickets t ON t.id = cl.ticket_id
+-            WHERE t.state = 'open' AND ($x IS NULL OR t.id != $x);
++            WHERE t.state = 'closed' AND ($x IS NULL OR t.id != $x);
+             """;
+         c.Parameters.AddWithValue("$x", (object?)excludeTicket ?? DBNull.Value);
+         using var r = c.ExecuteReader();

@@ -1,0 +1,38 @@
+# S-STORE 05. The lease never expires (plan 9.4 step B0).
+#
+# defect: `Store.Expired` returns false unconditionally, so a lease is judged live however old
+# defect: it is -- including inside `LandCommit`, the transaction that actually lands a ticket.
+#
+# THIS MUTANT IS ALSO A FINDING, AND THE FINDING IS WHY IT IS AIMED WHERE IT IS. Run at B0
+# against `m1:expired_lease_cannot_land` -- the acceptance check whose whole subject is lease
+# expiry -- it came back:
+#
+#   VACUOUS  expired_lease_cannot_land: PASS
+#
+# Expiry switched off entirely, and the check that names it did not notice. The reason is that
+# the arithmetic exists TWICE: `Daemon.LandGate` (`Daemon.cs:6475`) carries its own copy of
+# `DateTime.Parse(tok.ExpiresTs) < DateTime.UtcNow` and refuses first, so nothing that check
+# does can reach `Store`'s fence. `Store.Expired` is the one that runs INSIDE the landing
+# transaction, which is the fence that actually holds when two things race (plan 3.5).
+#
+# So this defect reddens the STORE-side half, which no check in this repository asserted. It is
+# `added.tsv` growth rather than a move, and the acceptance check keeps its own copy's coverage
+# with a `no-seam-yet` row naming the duplication.
+#
+# expects-red: unit:Dodona.Tests.StoreTokenTests.the_land_fence_refuses_an_expired_lease
+# expects-green: m1:approved_token_granted
+# expects-green: m1:second_ticket_queued
+# expects-green: unit:Dodona.Tests.StoreTokenTests.approved_token_granted
+diff --git a/src/Dodona/Store.cs b/src/Dodona/Store.cs
+index c265d08..81b1a31 100644
+--- a/src/Dodona/Store.cs
++++ b/src/Dodona/Store.cs
+@@ -1421,7 +1421,7 @@ sealed class Store : IDisposable, ILaneSink
+                             r2.IsDBNull(2) ? null : r2.GetString(2), r2.IsDBNull(3) ? null : r2.GetString(3));
+     }
+ 
+-    bool Expired(TokenRow t) => t.ExpiresTs is not null && DateTime.Parse(t.ExpiresTs).ToUniversalTime() < _utcNow();
++    bool Expired(TokenRow t) => false;
+ 
+     /// <summary>Request the merge token. Lease + FIFO in one transaction. An expired
+     /// holder is reclaimed here — a crashed holder cannot wedge the queue (§7, §12).</summary>

@@ -1,0 +1,33 @@
+# S-STORE 06. The reclaim updates the database and not its own copy (plan 9.4 step B0).
+#
+# defect: the expired-holder reclaim clears `holder_ticket` in the transaction and then FORGETS
+# defect: `t = t with { Holder = null }`, so the rest of the method keeps reading the stale row.
+#
+# WHY THIS SHAPE. It is the failure mode a reclaim actually has -- two copies of one fact, one
+# updated. The requester matches `t.Holder == ticketId` against the stale copy, returns
+# "granted" immediately, and never re-stamps the lease. So the ticket is told it holds a token
+# whose lease expired before it asked, and `LandCommit` refuses it inside the landing
+# transaction. A crashed holder's successor gets a grant it cannot use, forever.
+#
+# The control is the refusal itself: an expired lease still cannot land, which is what says the
+# red belongs to the RECLAIM and not to the expiry check it sits beside.
+#
+# expects-red: unit:Dodona.Tests.StoreTokenTests.regrant_after_expiry_lands
+# expects-green: m1:expired_lease_cannot_land
+# expects-green: m1:approved_token_granted
+# expects-green: unit:Dodona.Tests.StoreTokenTests.the_land_fence_refuses_an_expired_lease
+#
+# That control is the finding above read the other way up: the reclaim and the expiry fence
+# are different code, so cutting one must leave the other standing.
+diff --git a/src/Dodona/Store.cs b/src/Dodona/Store.cs
+index c265d08..192b3f0 100644
+--- a/src/Dodona/Store.cs
++++ b/src/Dodona/Store.cs
+@@ -1436,7 +1436,6 @@ sealed class Store : IDisposable, ILaneSink
+             {
+                 TxSet(tx, "UPDATE merge_token SET holder_ticket = NULL WHERE repo_path = $p;", repo.Path);
+                 TxEvent(tx, "token_expired_reclaimed", $"{repo.Name}: was ticket {t.Holder}");
+-                t = t with { Holder = null };
+             }
+ 
+             if (t.Holder == ticketId)

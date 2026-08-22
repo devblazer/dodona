@@ -79,6 +79,15 @@ try {
         (-not (Select-String -Path "$root\.git\info\exclude" -Pattern 'dodona-gate deployment' -Quiet -ErrorAction SilentlyContinue))
     ) "worktree and info/exclude must carry no gate files"
     # and a repo's own tracked settings must be untouched by gate deployment
+    # KEPT AND LABELLED AS A VACUOUS GUARD (plan 5.4; S-STORE's ledger row, and
+    # `docs/testarch/survey-delivery.md` calls it "the one check in this file that currently
+    # asserts nothing about the product"). It is vacuous BY ACCIDENT rather than by design: this
+    # fixture's worktree has no `.claude\settings.json`, so the first disjunct always satisfies
+    # it. NOT obsolete, and the tie-break in plan 5.4.1 is why -- a defect CAN exist that it
+    # would catch. If `DeployGate` ever wrote that file into the project, `Test-Path` becomes
+    # true, the second disjunct is evaluated, and the new file shows in `git status --porcelain`.
+    # That is D-17's regression, which is exactly what it was written for. Keeping a useless
+    # check costs milliseconds; deleting a useful one costs a defect nobody catches.
     Check 'tracked_settings_untouched' (-not (Test-Path "$root\.dodona\wt\t1\.claude\settings.json") -or
         ((git -C "$root\.dodona\wt\t1" status --porcelain ".claude/settings.json" | Out-String).Trim() -eq ''))
 
@@ -97,13 +106,27 @@ try {
     # saying what it overlaps would be this phase's real regression -- the lock removed and the
     # signal removed with it.
     $t2bad = Dodona @("ticket-create", "--title", "WATER2", "--claim", "path:src/water/sim.cs")
+    # KEPT AND LABELLED AS A VACUOUS GUARD (plan 5.4, R7's precedent; S-STORE's ledger row).
+    # This asserts that the create SUCCEEDED, and D-R5 is why nothing can make it fail: the
+    # refusal it guards against was retired, so the only defect it now catches is that refusal
+    # coming back. MEASURED, not assumed -- `tests\mutants\s-store-01.patch` deletes the whole
+    # conflict search and this check is a declared `expects-green` control that survives it.
+    # It is kept because the thing it watches is real; do not read it as covering the overlap.
     Check 'an_overlapping_ticket_is_created' ($DODONA_EXIT -eq 0 -and $t2bad -match 'ticket \d+ branch') $t2bad
-    Check 'the_overlap_is_reported_and_names_the_holder' `
-        ($t2bad -match 'overlap:' -and $t2bad -match 'ticket 1') $t2bad
+    # MOVED to unit:Dodona.Tests.StoreClaimReportTests.the_overlap_is_reported_and_names_the_holder
+    # (S-STORE, mutant s-store-01). The REPORT is `Store.FindConflicts` and is asked there now,
+    # over a real store with no daemon; the `overlap: ` prefix stays at `Daemon.cs:1454` riding
+    # the wire. The create above still runs because every later section depends on this ticket.
     if ($t2bad -match 'ticket (\d+) ') { $t2badId = $Matches[1] } else { $t2badId = 0 }
 
     # ---- 3. disjoint claim runs in parallel ----
     $t2 = Dodona @("ticket-create", "--title", "SKY", "--claim", "subtree:src/sky")
+    # KEPT AND LABELLED AS A VACUOUS GUARD (plan 5.4; S-STORE's ledger row). Post-D-R5 an
+    # overlap refuses nothing, so "runs in parallel" is not a property this can fail to observe:
+    # what it asserts is that the create succeeded, which is why it is a declared `expects-green`
+    # control on `tests\mutants\s-store-01.patch` and survives the conflict search being deleted.
+    # The ALGEBRA it reads as being about is `ClaimsTests.Two_different_paths_do_not` and the
+    # store's use of it is `StoreClaimReportTests`. Kept: the refusal returning is a real defect.
     Check 'disjoint_parallel' ($t2 -match 'ticket (\d+) branch') $t2
     if ($t2 -match 'ticket (\d+) ') { $t2id = $Matches[1] } else { $t2id = 0 }
 
@@ -536,13 +559,17 @@ try {
         "refusal=[$($req.Trim())] rows=[$(($askRow -replace '\s+', ' ').Trim())]"
 
     Dodona @("approve", "1") | Out-Null
+    # MOVED to unit:Dodona.Tests.StoreTokenTests.approved_token_granted (S-STORE, mutant
+    # s-store-02). The request itself STAYS: ticket 1 must actually hold the token for section 8
+    # to land it, and the approval gate above is the daemon's, which does not move.
     $req = Dodona @("token-request", "1")
-    Check 'approved_token_granted' ($req -match 'granted ticket 1') $req
 
     # ---- 7. second ticket queues behind the holder (FIFO serialization) ----
     Dodona @("approve", "$t2id") | Out-Null
+    # MOVED to unit:Dodona.Tests.StoreTokenTests.second_ticket_queued (S-STORE, mutant
+    # s-store-04). The request STAYS: it is what puts ticket 2 in the queue that section 10's
+    # handoff then depends on.
     $req2 = Dodona @("token-request", "$t2id")
-    Check 'second_ticket_queued' ($req2 -match 'queued') $req2
 
     # ---- 8. land ticket 1: daemon executes ff-only; claims released; verify runs ----
     #
@@ -563,6 +590,12 @@ try {
 
     # ---- 9. released claim is claimable again ----
     $t3 = Dodona @("ticket-create", "--title", "WATER-NEXT", "--claim", "subtree:src/water")
+    # KEPT AND LABELLED AS A VACUOUS GUARD (plan 5.4; S-STORE's ledger row). Its NAME encodes
+    # the retired lock: since D-R5 a held claim never blocked a create, so "reclaimable" is true
+    # whether or not the land released anything and no defect in `LandCommit`'s
+    # `DELETE FROM claims` can redden it. The release itself is asserted at
+    # unit:Dodona.Tests.StoreTokenTests.the_land_fence_refuses_an_expired_lease (the negative:
+    # a REFUSED land frees nothing). Kept because a create that stopped working would fail here.
     Check 'released_claim_reclaimable' ($t3 -match 'ticket \d+ branch') $t3
 
     # ---- 10. queued ticket now gets the token, and the DAEMON brings main in (R1 / D-R1) ----
@@ -574,8 +607,10 @@ try {
     # that ever satisfied it was a test pretending to be a developer. The moment and the
     # fixture are unchanged; what is asserted is now the stronger fact, and the two checks
     # below it are the guard that the precondition is still real.
+    # MOVED to unit:Dodona.Tests.StoreTokenTests.queued_ticket_now_granted (S-STORE, mutant
+    # s-store-03, which gives `LandCommit`'s holder release an `AND 0`). The request STAYS:
+    # ticket 2 cannot land below without the token this line collects.
     $req2 = Dodona @("token-request", "$t2id")
-    Check 'queued_ticket_now_granted' ($req2 -match "granted ticket $t2id") $req2
     $wt2 = "$root\.dodona\wt\t$t2id"
     Set-Content "$wt2\src\sky\box.cs" "// skybox v2"
     git -C $wt2 add -A
@@ -811,8 +846,16 @@ for k, d in db.execute('SELECT kind, detail FROM events ORDER BY id'):
     $landExpired = Dodona @("land", "$t4id")
     Check 'expired_lease_cannot_land' ($DODONA_EXIT -eq 1 -and $landExpired -match 'expired') $landExpired
     Dodona @("token-request", "$t4id") | Out-Null      # expired holder reclaimed, re-granted
+    # MOVED to unit:Dodona.Tests.StoreTokenTests.regrant_after_expiry_lands (S-STORE, mutant
+    # s-store-06). The land STAYS: it is what releases the token for section 11c's async land.
+    #
+    # AND THE `Start-Sleep -Seconds 2` ABOVE STAYS WITH IT, which is worth knowing before anyone
+    # deletes it as dead weight. `expired_lease_cannot_land` is still here, and it is gated by
+    # `Daemon.LandGate`'s OWN copy of the expiry arithmetic (`Daemon.cs:6475`) rather than by
+    # `Store.Expired` -- proved: `tests\mutants\s-store-05.patch` switches `Store.Expired` off
+    # entirely and that check comes back VACUOUS. The clock seam `Store` gained cannot reach the
+    # daemon's copy, so the sleep is only removable once that duplicate predicate is extracted.
     $landRetry = Dodona @("land", "$t4id")
-    Check 'regrant_after_expiry_lands' ($landRetry -match "landed ticket $t4id") $landRetry
 
     # ---- 11b. `subtree:/` -- the claim that read "the whole tree" and blocked nobody --------
     #
@@ -834,8 +877,9 @@ for k, d in db.execute('SELECT kind, detail FROM events ORDER BY id'):
     # matched nothing would produce no overlap line at all.
     if ($t3 -match 'ticket (\d+) ') { $t3id = $Matches[1] } else { $t3id = 0 }
     $whole = Dodona @("ticket-create", "--title", "WHOLE", "--claim", "subtree:/")
-    Check 'the_whole_tree_claim_is_created_and_its_overlap_reported' `
-        ($DODONA_EXIT -eq 0 -and $whole -match 'overlap:' -and $whole -match "ticket $t3id") $whole
+    # MOVED to unit:Dodona.Tests.StoreClaimReportTests.the_whole_tree_claim_is_created_and_its_overlap_reported
+    # (S-STORE, mutant s-store-01). The empty-value round trip through `claims.value` is asked
+    # there; the create above stays because the next check reads its refusal sibling.
     # An empty value is the whole tree for a SUBTREE and nonsense everywhere else: `path:/`
     # names no file. HEAD created a ticket holding a claim over nothing and reported success --
     # P0.5's silently-dropped spec reached from the other side. Refused by name now.
@@ -852,9 +896,16 @@ for k, d in db.execute('SELECT kind, detail FROM events ORDER BY id'):
     # (Store.ClaimExtend carries why the fourth refusal had to go with D-R5's three). So the
     # extension now succeeds regardless, and what it overlaps is said rather than enforced.
     $wide = Dodona @("claim-extend", "$t3id", "--claim", "subtree:/")
+    # KEPT AND LABELLED AS A VACUOUS GUARD (plan 5.4; S-STORE's ledger row). `claim-extend`
+    # prints "extended ticket N" unconditionally (`Daemon.cs:1653`), so no defect in
+    # `Store.ClaimExtend` can make this fail -- it survives `tests\mutants\s-store-01.patch` as a
+    # declared control. What it still guards is the FOURTH refusal returning, the one R3 retired
+    # alongside D-R5's three.
     Check 'a_wide_extension_succeeds_whatever_else_is_held' `
         ($DODONA_EXIT -eq 0 -and $wide -match "extended ticket $t3id") $wide
-    Check 'the_wide_extension_still_names_what_it_overlaps' ($wide -match 'overlap:') $wide
+    # MOVED to unit:Dodona.Tests.StoreClaimReportTests.the_wide_extension_still_names_what_it_overlaps
+    # (S-STORE, mutant s-store-01), where `excludeTicket` -- a widening must not report itself --
+    # is asked directly.
     $wideCovered = Dodona @("claim-check", "$t3id", "$root\.dodona\wt\t$t3id\src\sky\box.cs")
     Check 'the_whole_tree_covers_a_file_no_other_claim_names' `
         ($DODONA_EXIT -eq 0 -and $wideCovered -match 'covered:') $wideCovered

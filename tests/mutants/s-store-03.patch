@@ -1,0 +1,41 @@
+# S-STORE 03. Landing does not hand the token on (plan 9.4 step B0).
+#
+# defect: `Store.LandCommit`'s `UPDATE merge_token SET holder_ticket = NULL` is given a `AND 0`,
+# defect: so the land succeeds in every other respect -- the ticket is marked landed, its claims
+# defect: are freed, its queue row is dropped, the approval question is withdrawn -- and the
+# defect: repository's merge token stays held by a ticket that has already gone.
+#
+# WHY THIS SHAPE. Release-on-land IS the FIFO handoff. `LandCommit` is one multi-statement
+# transaction (plan 3.5's named reason `Store` is never faked: *"the properties ARE the
+# transactions"*), and this is the one statement in it that lets the NEXT ticket move. Cut it
+# and the repository is wedged by a holder that no longer exists, with nothing reporting an
+# error anywhere: every later ticket simply queues, forever, behind a landed one.
+#
+# THE CONTROLS ARE EVERY OTHER STATEMENT IN THAT TRANSACTION, plus the two token statuses that
+# are decided before it runs. They survive, so the red belongs to the release and not to the
+# land, the lease or the queue. What they cannot be is the checks AFTER the handoff -- in an
+# ordered acceptance fixture every one of those is downstream of the token this defect withholds,
+# and a mutant is not weakened to spare them (plan 9.4).
+#
+# expects-red: unit:Dodona.Tests.StoreTokenTests.queued_ticket_now_granted
+# expects-green: m1:approved_token_granted
+# expects-green: m1:second_ticket_queued
+# expects-green: m1:ticket1_landed
+# expects-green: m1:verify_ran_green
+# expects-green: m1:main_advanced
+# expects-green: m1:worktree1_pruned
+# expects-green: unit:Dodona.Tests.StoreTokenTests.approved_token_granted
+# expects-green: unit:Dodona.Tests.StoreTokenTests.second_ticket_queued
+diff --git a/src/Dodona/Store.cs b/src/Dodona/Store.cs
+index c265d08..8ef5212 100644
+--- a/src/Dodona/Store.cs
++++ b/src/Dodona/Store.cs
+@@ -1558,7 +1558,7 @@ sealed class Store : IDisposable, ILaneSink
+                     UPDATE tickets SET state = 'landed', landed_ts = $ts WHERE id = $t;
+                     DELETE FROM claims WHERE ticket_id = $t;
+                     DELETE FROM token_queue WHERE ticket_id = $t;
+-                    UPDATE merge_token SET holder_ticket = NULL WHERE repo_path = $p;
++                    UPDATE merge_token SET holder_ticket = NULL WHERE repo_path = $p AND 0;
+                     -- R6: the approval ask goes down IN THE SAME TRANSACTION that lands the
+                     -- ticket, so there is no window in which the overlay offers to approve a
+                     -- merge that has already happened. `subject` is TEXT and $t is bound as an
