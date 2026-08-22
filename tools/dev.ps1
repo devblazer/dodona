@@ -1021,6 +1021,33 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 # but tens of seconds across a full gate, not ninety. The concurrency curve is the contention, it
 # is SUB-LINEAR, and +47 ms on an 80 ms operation does not by itself blow a 20-second wait.
 #
+# AND THE 222 ms WAS DEFENDER, CONFIRMED BY REMOVING IT -- then measured as NOT WORTH REMOVING.
+# 2026-08-22, the operator excluded the suite sandbox glob (`%TEMP%\dsb-*`) from real-time scanning,
+# with admin, on their own machine and their own call. Probe: the same `dodona version --json` cold
+# start, twelve fresh paths per arm, the two arms INTERLEAVED so drift lands on both equally.
+#
+#     inside the exclusion    median  89,8 ms
+#     outside it              median 366,7 ms      <- 276,9 ms per cold start, 4,1x
+#
+# So the mechanism is real, large, and exactly what it looked like. IT STILL DOES NOT PAY:
+#
+#     gate, exclusion OFF  248,3  252,1  280,6                      median 252,1  mean 260,3
+#     gate, exclusion ON   244,0  249,3  259,7  264,8               median 254,5  mean 254,5
+#
+# The medians move the WRONG WAY and the ranges overlap almost completely. The arithmetic says why,
+# and it agrees with the means: 17 suites x 4 executables x 277 ms is ~19 s of cold-start tax, but
+# it is spread across a wave running THREE at a time, so ~6 s of wall clock -- against a run-to-run
+# spread of ~30 s on a machine in normal use. A 2 % effect cannot be seen through that, and the 5,8 s
+# the means differ by is the right size for coincidence to produce on its own at n=3 and n=4.
+#
+# THE EXCLUSION WAS REMOVED AGAIN. A permanent hole in real-time scanning is not worth 2 % of a run
+# that already fits its budget, and this is recorded so nobody re-opens it on the strength of the
+# 277 ms number alone -- which is the number that makes it look worth doing.
+#
+# WHAT DOES MOVE THIS CLOCK, measured the same afternoon: MEMORY COMMIT. 2.1 GB of background apps
+# closed took a 327,5 s run to 279,6 s (~48 s), and leftover MSBuild nodes were worth ~7 s. See
+# MachineNoise, which reports commit first for that reason.
+#
 # SO NEITHER NUMBER EXPLAINS ISSUE #3 ON ITS OWN, and that is the finding. What they do is rule
 # out "process starts get catastrophically slower in a crowd" as the whole story, and put the
 # remaining suspicion on what a wave LEAVES BEHIND rather than on what runs beside it -- which is
