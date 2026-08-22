@@ -448,7 +448,39 @@ function Wait-Until {
             # a two-element array whose [bool] cast is always $true. A wait that reported
             # success on timeout would be the exact green-check-nobody-has-seen-fail this
             # phase exists to remove.
-            [Console]::Error.WriteLine(("WAIT TIMEOUT after {0:N1}s: {1}" -f ($sw.Elapsed.TotalSeconds), $desc))
+            # THE GRACE RE-CHECK -- "TOO SLOW" AND "NEVER ARRIVED" ARE DIFFERENT DIAGNOSES, AND
+            # THIS IS THE ONLY PLACE THAT CAN TELL THEM APART (issue #3).
+            #
+            # Every sighting on that ticket is a wait running out inside a full wave and passing
+            # alone minutes later -- `voice`'s mic toggle, `m1`'s lane 2, `m3`'s retraction,
+            # `compression`'s short result. Each cost a session a re-run to establish nothing more
+            # than *it was slow*, because "timed out" is all the record ever said, and re-running
+            # is the habit this ticket is about breaking.
+            #
+            # So the wait keeps LOOKING after it has stopped WAITING. `LATE BY 1.8s` says the path
+            # works and the budget or the machine is the subject; `STILL FALSE` says something is
+            # actually stuck and the budget is not the question. Bounded at 10 s and only ever
+            # reached on a failure, so nothing green pays for it.
+            #
+            # THE RETURN VALUE IS UNTOUCHED and must stay so: a wait that reported success because
+            # the thing showed up late would be the green-nobody-has-seen-fail this whole harness
+            # exists to remove -- and the check that follows would then read the value it wanted
+            # while the product had missed its budget. This reports; it never forgives.
+            # The waited time is captured BEFORE the grace loop: the grace is observation, not
+            # waiting, and a headline number that silently included it would be this function
+            # reporting a budget overrun larger than the one that happened.
+            $waited = $sw.Elapsed.TotalSeconds
+            $late = ''
+            $graceMs = [Math]::Min(10000, [Math]::Max(2000, $TimeoutMs))
+            $gsw = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($gsw.ElapsedMilliseconds -lt $graceMs) {
+                Start-Sleep -Milliseconds 200
+                $g = $false
+                try { $g = [bool](& $Condition) } catch { $g = $false }
+                if ($g) { $late = (" -- LATE BY {0:N1}s (it DID become true, so this is slow, not stuck)" -f $gsw.Elapsed.TotalSeconds); break }
+            }
+            if (-not $late) { $late = (" -- STILL FALSE {0:N1}s later (stuck, not slow)" -f $gsw.Elapsed.TotalSeconds) }
+            [Console]::Error.WriteLine(("WAIT TIMEOUT after {0:N1}s: {1}{2}" -f $waited, $desc, $late))
             return $false
         }
         Start-Sleep -Milliseconds $wait

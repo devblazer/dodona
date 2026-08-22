@@ -952,6 +952,32 @@ function Run-Suite([string]$name, [int]$timeoutSec = 420) {
 #         Splitting a suite only pays if the pieces run CONCURRENTLY. If one of them ever has
 #         to come back here, it costs far more than its share of the monolith did, and the
 #         other three should stay in the wave rather than follow it out of sympathy.
+# WHAT A PROCESS START COSTS ON THIS MACHINE -- measured 2026-08-22, idle, at 5151640, and the
+# reason it lives beside SoloSuites is that every argument on this list is about process and
+# window creation rather than CPU (22 cores, never bound). Numbers, so the next person argues
+# from one instead of from a hunch. Probe: `dodona version --json`, the one verb that writes
+# nothing on any path, launched from copied binaries in an isolated DODONA_HOME.
+#
+#     WARM  same path, x30            median  77 ms
+#     COLD  fresh path each time, x15 median 299 ms      <- +222 ms, 3.9x, ZERO concurrency
+#     CONC  warm paths, k=1  x20      median  82 ms
+#           k=3                       median  92 ms      (+12 %)
+#           k=6                       median 111 ms      (+35 %)
+#           k=12                      median 129 ms      (+56 %)
+#
+# TWO SEPARATE EFFECTS, and conflating them is how this gets misread. The 222 ms is a FIRST-TOUCH
+# tax on a binary the machine has never executed from that path -- Defender real-time protection
+# and behaviour monitoring are both on here -- and it is paid on an idle machine with nothing else
+# running, so it is not contention at all. Every suite copies the four build outputs into a fresh
+# `$DODONA_HOME\bin` (`Use-TestBinaries`), so every suite pays it once per run per executable: real,
+# but tens of seconds across a full gate, not ninety. The concurrency curve is the contention, it
+# is SUB-LINEAR, and +47 ms on an 80 ms operation does not by itself blow a 20-second wait.
+#
+# SO NEITHER NUMBER EXPLAINS ISSUE #3 ON ITS OWN, and that is the finding. What they do is rule
+# out "process starts get catastrophically slower in a crowd" as the whole story, and put the
+# remaining suspicion on what a wave LEAVES BEHIND rather than on what runs beside it -- which is
+# where the `voice`-alone datapoint already pointed. `Wait-Until`'s grace re-check (see
+# tests\_workspace.ps1) is what the next sighting needs to carry: slow, or stuck.
 function SoloSuites { , @('unit', 'ui-unit', 'voice') }
 
 # THE TEST PROJECTS, addressed by a suite name like everything else. Two of them since W3.0:
